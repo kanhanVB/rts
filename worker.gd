@@ -1,0 +1,225 @@
+extends Unit
+class_name Worker
+## 工人：可操控的"供应链"。采资源 -> 物理扛回基地，资源不会凭空入账。
+
+enum State { IDLE, TO_NODE, GATHERING, TO_BASE }
+
+const CARRY_CAP := 10.0
+const GATHER_RATE := 4.0     # 每秒采集量
+
+var state: int = State.IDLE
+var node_target: ResNode = null
+var carry_kind: String = ""       # "" / "ore" / "wood"
+var carry_amount: float = 0.0
+## 玩家手动指定的交货点（null = 自动：就近仓库/基地）。
+## 加工厂不会自动抢货——全自动加工会把原料烧光，连农民都造不出来；
+## 想加工就得玩家自己圈农民右键加工厂，这个选择权在玩家手上。
+var deliver_to: Building = null
+
+func _ready() -> void:
+	super()
+	hp = 30.0
+	max_hp = 30.0
+	speed = 85.0
+	radius = 10.0
+	body_color = Color(0.95, 0.78, 0.2)
+	display_name = "农民"
+
+func _step(delta: float) -> void:
+	match state:
+		State.TO_NODE:
+			if node_target == null or not is_instance_valid(node_target):
+				node_target = _nearest_node(carry_kind)
+				if node_target == null:
+					state = State.IDLE
+					move_target = position
+				return
+			_move_toward(node_target.position, delta)
+			# 到达判定必须用真实距离：_move_toward 的返回值是"到当前路径点"的距离，
+			# 路径拐点/起点格心离工人常小于 24px，用它判定会半路误入采集
+			if position.distance_to(node_target.position) < 24.0:
+				state = State.GATHERING
+
+		State.GATHERING:
+			if node_target == null or not is_instance_valid(node_target):
+				_back_to_base()
+				return
+			# 保险：离资源点太远却处于采集中 = 误判，重新走过去
+			if position.distance_to(node_target.position) > 48.0:
+				state = State.TO_NODE
+				_path = _find_path(node_target.position)
+				_path_idx = 0
+				return
+			carry_amount = min(CARRY_CAP, carry_amount + GATHER_RATE * delta)
+			node_target.amount -= GATHER_RATE * delta
+			if node_target.amount <= 0.0:
+				node_target.queue_free()
+				node_target = null
+			if carry_amount >= CARRY_CAP or node_target == null:
+				_back_to_base()
+
+		State.TO_BASE:
+			var depot := _depot()
+			if depot == null:
+				state = State.IDLE
+				return
+			_move_toward(depot.position, delta)
+			# 同 TO_NODE：用真实距离判定到收货点，路径拐点会让 _move_toward 返回值提前小于 50
+			if position.distance_to(depot.position) < 50.0:
+				# 加工厂把原料加工成二级材料入账，仓库/基地则原样入库（保住原料）
+				var game := get_tree().get_first_node_in_group("game")
+				if game:
+					game.economy.add(_output_kind(depot), carry_amount)
+				carry_amount = 0.0
+				# 换工种的农民交完货要按新岗位认货种，否则"扛着木材去挖矿"会把木材记成矿石。
+				# node_target 空了就保持原货种，好让它接着找同类的下一处（树砍完换棵树）
+				if is_instance_valid(node_target):
+					carry_kind = node_target.kind
+				if node_target == null or not is_instance_valid(node_target):
+					node_target = _nearest_node(carry_kind)
+				if node_target == null:
+					state = State.IDLE
+				else:
+					state = State.TO_NODE
+					# 交货后必须重新寻路：_path 已走完被清空，直线走会被河/障碍卡死
+					_path = _find_path(node_target.position)
+					_path_idx = 0
+		_:
+			# 空闲：执行玩家的移动指令（没有就原地站着）
+			_move_toward(move_target, delta)
+
+## ---------- 指令 ----------
+func command_gather(node: ResNode) -> void:
+	node_target = node
+	# 帝国式：手上扛着别的东西被派去新岗位，先把旧货交回仓库再上岗。
+	# 直接改 carry_kind 会把"木材"记成"矿石"，账就错了
+	if carry_amount >= 0.5 and carry_kind != node.kind:
+		_back_to_base()
+		return
+	carry_kind = node.kind
+	if carry_amount >= CARRY_CAP:
+		state = State.TO_BASE
+		var d := _depot()
+		_path = _find_path(d.position) if d != null else PackedVector2Array()
+	else:
+		state = State.TO_NODE
+		_path = _find_path(node.position)
+	_path_idx = 0
+
+func command_move(pos: Vector2) -> void:
+	super(pos)            # 先走过去
+	state = State.IDLE    # 手动移动会打断采集
+	node_target = null
+
+## 手动指派交货点：右键己方收货建筑（基地/仓库/熔炉/木工台）。
+## 手上有货就立刻掉头去交；正在采集的话采完这一趟再按新地址走。
+func set_deliver_to(b: Building) -> void:
+	deliver_to = b
+	if b == null:
+		if state == State.TO_BASE:
+			_repath(_depot())
+		return
+	if state == State.TO_BASE:
+		_repath(b)
+	elif carry_amount >= CARRY_CAP:
+		_back_to_base()
+
+## 开局自动派活
+func auto_assign(kind: String) -> void:
+	var n := _nearest_node(kind)
+	if n:
+		command_gather(n)
+
+func _repath(b: Building) -> void:
+	if b == null:
+		return
+	_path = _find_path(b.position)
+	_path_idx = 0
+
+## ---------- 工具 ----------
+func _back_to_base() -> void:
+	state = State.TO_BASE
+	_repath(_depot())
+
+## 卡住（被对向工人顶住/被人群挤住）：从当前位置重新寻路。
+## 配合基类"靠右让路"，错开肩膀后就能继续走完新路径。
+func _on_stuck() -> void:
+	move_target = position
+	match state:
+		State.TO_NODE:
+			if node_target != null and is_instance_valid(node_target):
+				_path = _find_path(node_target.position)
+				_path_idx = 0
+		State.TO_BASE:
+			var b := _depot()
+			if b != null:
+				_path = _find_path(b.position)
+				_path_idx = 0
+		_:
+			pass
+
+## 收货点：玩家指派 > 就近仓库/基地。
+## 加工厂故意不参与自动挑选：以前"有熔炉就一定送熔炉"，结果木材全变木板，
+## 造农民要的 30 木永远攒不出来。现在只有玩家点名，原料才进加工线。
+func _depot() -> Building:
+	if deliver_to != null and is_instance_valid(deliver_to) and deliver_to.team == 0:
+		return deliver_to
+	# 自动：在仓库和基地里挑最近的——仓库盖得远就没意义了
+	var best: Building = null
+	var best_d := INF
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if not is_instance_valid(b) or b.team != 0:
+			continue
+		if b.kind != "warehouse" and b.kind != "base":
+			continue
+		var d := position.distance_to(b.position)
+		if d < best_d:
+			best_d = d
+			best = b
+	return best
+
+## 交货后的产出：进加工厂才算加工，否则原样入库（保住原料）
+func _output_kind(depot: Building) -> String:
+	if depot.kind == "smelter" and carry_kind == "ore":
+		return "ingot"
+	if depot.kind == "workshop" and carry_kind == "wood":
+		return "plank"
+	return carry_kind
+
+## 队里最近的某类己方设施
+func _nearest_kind(kind: String) -> Building:
+	var best: Building = null
+	var best_d := INF
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if not is_instance_valid(b) or b.team != 0 or b.kind != kind:
+			continue
+		var d := position.distance_to(b.position)
+		if d < best_d:
+			best_d = d
+			best = b
+	return best
+
+func _nearest_node(kind: String) -> ResNode:
+	var best: ResNode = null
+	var best_d := INF
+	for n in get_tree().get_nodes_in_group("res_nodes"):
+		if n.kind == kind:
+			var d := position.distance_to(n.position)
+			if d < best_d:
+				best_d = d
+				best = n
+	return best
+
+## ---------- 绘制：KR 小人（草帽 + 镐），采集时挥镐，扛货顶头上 ----------
+func _body_draw() -> void:
+	# 采集中：镐跟着节奏挥
+	if state == State.GATHERING:
+		attack_anim = 0.5 + 0.5 * sin(anim_t * 0.9)
+	_kr_body(Color(0.7, 0.6, 0.38), Color(0.4, 0.32, 0.24), "straw", "pick")
+	var s := radius / 12.0
+	if is_instance_valid(deliver_to):
+		# 脚下亮蓝点 = 玩家手动指派过交货点，不是自动跑腿
+		_outlined_circle(Vector2(0, 14.0 * s), 2.2 * s, Color(0.35, 0.82, 1.0))
+	if carry_amount > 0.5:
+		var c := Color(0.85, 0.6, 0.1) if carry_kind == "ore" else Color(0.25, 0.65, 0.3)
+		_outlined_circle(Vector2(6.5 * s, -16.5 * s), 4.2 * s, c)

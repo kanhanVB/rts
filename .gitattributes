@@ -1,0 +1,10 @@
+# 统一成 LF 存仓库：避免 Windows 提交 CRLF、服务器端 clone 出来整个文件都算改动
+* text=auto eol=lf
+*.gd text eol=lf
+*.tscn text eol=lf
+*.tres text eol=lf
+*.godot text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.png binary
+*.jpg binary
