@@ -34,7 +34,7 @@ def save(rel, im, ax, ay):
     data[rel[:-4]] = {"w": im.size[0], "h": im.size[1], "ax": round(ax, 1), "ay": round(ay, 1)}
 
 def key_out(im):
-    """没有透明通道的图（纯色底，推荐 #FF00FF 品红）：取四角颜色当背景抠掉，边缘柔化 + 去色溢"""
+    """没有透明通道的图（纯色底：白底或 #FF00FF 品红都行）：取四角颜色当背景抠掉，边缘柔化 + 去色溢"""
     import numpy as np
     a = np.asarray(im).astype(float)
     if a[..., 3].min() < 250:
@@ -46,6 +46,17 @@ def key_out(im):
     bg = np.median(corners, axis=0)
     dist = np.sqrt(((a[..., :3] - bg) ** 2).sum(axis=2))
     alpha = np.clip((dist - 40.0) / 50.0, 0.0, 1.0)
+    # 白底：只抠和画布边缘连通的背景（角色身上的白色高光不会被抠掉；被线条围住的小块白底会留下，所以首选品红底）
+    try:
+        if bg.min() < 200:
+            raise ImportError   # 品红等彩色底：全图抠
+        import cv2
+        n, lab = cv2.connectedComponents((alpha < 1).astype("uint8"), connectivity=4)
+        edge = set(np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))) - {0}
+        inner = (alpha < 1) & ~np.isin(lab, list(edge))
+        alpha[inner] = 1.0
+    except ImportError:
+        pass
     # 去色溢：半透明边缘里混进来的背景色按比例减掉
     soft = (alpha > 0) & (alpha < 1)
     for ch in range(3):
