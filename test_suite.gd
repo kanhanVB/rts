@@ -442,11 +442,11 @@ func run() -> void:
 	var eng_c: Engineer = m._player_engineers()[0]
 	m._point_select(eng_c.position)
 	m._on_warehouse_pressed()
-	m._build_mgr.try_place("warehouse", Vector2(300, 300), eng_c)
+	m._build_mgr.try_place("warehouse", Vector2(300, 345), eng_c)    # 别压着 (274,276) 那棵树
 	await m.get_tree().create_timer(0.2).timeout
 	m._point_select(eng_c.position)
 	m._on_warehouse_pressed()
-	m._build_mgr.try_place("warehouse", Vector2(700, 300), eng_c)
+	m._build_mgr.try_place("warehouse", Vector2(700, 360), eng_c)    # 别压着 (674,296) 那块矿
 	var sites_now := m.get_tree().get_nodes_in_group("sites")
 	_check(sites_now.size() == 2, "两个工地都放到了地图上")
 	var claimed := 0
@@ -457,6 +457,50 @@ func run() -> void:
 	var wh_before: int = m.warehouses_list.size()
 	await m.get_tree().create_timer(34.0).timeout
 	_check(m.warehouses_list.size() == wh_before + 2, "连续两个建造指令都能完工（%d -> %d）" % [wh_before, m.warehouses_list.size()])
+
+	# ---- 放置规则：不能压矿/树、不能叠工地 ----
+	var ore_n = null
+	for rn2 in m.get_tree().get_nodes_in_group("res_nodes"):
+		if rn2.kind == "ore":
+			ore_n = rn2
+			break
+	if ore_n != null:
+		_check(m._build_mgr.placement_error(ore_n.position + Vector2(20, 0)) != "", "工地不能压在矿上")
+	var probe := ConstructionSite.new()
+	probe.position = Vector2(820, 520)
+	probe.assigned = m._player_engineers()[0]
+	m.add_child(probe)
+	_check(m._build_mgr.placement_error(Vector2(850, 520)) != "", "工地不能叠在别的工地上")
+	probe.queue_free()
+
+	# ---- 城堡箭塔：Goo 进射程会挨箭 ----
+	var gt := Goo.new()
+	gt.position = m.base.position + Vector2(140, -60)
+	m.add_child(gt)
+	gt.command_move(gt.position)
+	await m.get_tree().create_timer(1.5).timeout
+	_check(not is_instance_valid(gt) or gt.hp < gt.max_hp, "城堡箭塔射击射程内的 Goo")
+	if is_instance_valid(gt):
+		gt.take_damage(99999.0)
+
+	# ---- 波次 Goo 沿土路行军：路边远处的建筑不会被拐过去啃 ----
+	var gl := Goo.new()
+	gl.position = m.road()[m.road().size() - 1] + Vector2(-40, 60)
+	m.add_child(gl)
+	gl.start_lane(m.road())
+	var max_off := 0.0
+	for i in 20:
+		await m.get_tree().create_timer(0.25).timeout
+		if not is_instance_valid(gl):
+			break
+		var rd: Array = m.road()
+		var off := INF
+		for j in rd.size() - 1:
+			off = minf(off, Geometry2D.get_closest_point_to_segment(gl.position, rd[j], rd[j + 1]).distance_to(gl.position))
+		max_off = maxf(max_off, off)
+	_check(is_instance_valid(gl) and gl.lane and max_off < 90.0, "波次 Goo 沿土路行军（最远偏离 %.0fpx）" % max_off)
+	if is_instance_valid(gl):
+		gl.take_damage(99999.0)
 
 	# 拆巢穴触发胜利
 	m.hive.take_damage(99999.0)

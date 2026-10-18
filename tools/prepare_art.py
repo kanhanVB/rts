@@ -33,9 +33,30 @@ def save(rel, im, ax, ay):
     im.save(out, optimize=True)
     data[rel[:-4]] = {"w": im.size[0], "h": im.size[1], "ax": round(ax, 1), "ay": round(ay, 1)}
 
+def key_out(im):
+    """没有透明通道的图（纯色底，推荐 #FF00FF 品红）：取四角颜色当背景抠掉，边缘柔化 + 去色溢"""
+    import numpy as np
+    a = np.asarray(im).astype(float)
+    if a[..., 3].min() < 250:
+        return im    # 本来就是透明图
+    h, w = a.shape[:2]
+    c = max(4, min(h, w) // 40)
+    corners = np.concatenate([a[:c, :c, :3].reshape(-1, 3), a[:c, -c:, :3].reshape(-1, 3),
+                              a[-c:, :c, :3].reshape(-1, 3), a[-c:, -c:, :3].reshape(-1, 3)])
+    bg = np.median(corners, axis=0)
+    dist = np.sqrt(((a[..., :3] - bg) ** 2).sum(axis=2))
+    alpha = np.clip((dist - 40.0) / 50.0, 0.0, 1.0)
+    # 去色溢：半透明边缘里混进来的背景色按比例减掉
+    soft = (alpha > 0) & (alpha < 1)
+    for ch in range(3):
+        v = a[..., ch]
+        v[soft] = np.clip((v[soft] - bg[ch] * (1 - alpha[soft])) / np.maximum(alpha[soft], 0.05), 0, 255)
+    a[..., 3] = alpha * 255
+    return Image.fromarray(a.astype("uint8"), "RGBA")
+
 def load(rel):
     p = os.path.join(SRC, rel)
-    return trim(Image.open(p).convert("RGBA")) if os.path.exists(p) else None
+    return trim(key_out(Image.open(p).convert("RGBA"))) if os.path.exists(p) else None
 
 def scaled(im, k):
     return im.resize((max(1, round(im.size[0] * k)), max(1, round(im.size[1] * k))), Image.LANCZOS)
@@ -93,6 +114,52 @@ for p in glob.glob(os.path.join(SRC, "items/*.png")):
 for p in glob.glob(os.path.join(SRC, "fx/*.png")):
     fit(os.path.relpath(p, SRC), 160)
 
+# ---- 地图分析：森林遮罩 + 土路中心线（都换算到 1280×720 世界坐标）
+def analyze_map(im):
+    import numpy as np
+    a = np.asarray(im.resize((1280, 720), Image.LANCZOS)).astype(int)
+    lum = a.mean(axis=2)
+    cs = 16
+    gh, gw = 720 // cs, 1280 // cs
+    cand = np.zeros((gh, gw), bool)
+    for y in range(gh):
+        for x in range(gw):
+            cand[y, x] = (lum[y*cs:(y+1)*cs, x*cs:(x+1)*cs] < 55).mean() > 0.12    # 树冠的粗描边很密
+    # 闭运算：树冠中间的亮色高光格子也算森林
+    pad = np.pad(cand, 1)
+    nb = sum(pad[1+dy:gh+1+dy, 1+dx:gw+1+dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx)
+    m = cand | (nb >= 5)
+    # 只保留和地图边缘连通的大片树林（场地中间的零星灌木不算）
+    keep = np.zeros_like(m)
+    stack = [(y, x) for y in range(gh) for x in range(gw) if (y in (0, gh-1) or x in (0, gw-1)) and m[y, x]]
+    while stack:
+        y, x = stack.pop()
+        if keep[y, x]:
+            continue
+        keep[y, x] = True
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < gh and 0 <= nx < gw and m[ny, nx] and not keep[ny, nx]:
+                stack.append((ny, nx))
+    forest = ["".join("1" if keep[y, x] else "0" for x in range(gw)) for y in range(gh)]
+    # 土路：暖黄沙土色像素，按列取中心
+    r, g, b = a[..., 0], a[..., 1], a[..., 2]
+    sand = (r > 190) & (g > 150) & (b < 140) & (r - b > 70) & (r > g)
+    cols = [x for x in range(0, 1280, 4) if sand[:, x].sum() > 12]
+    road = []
+    if cols:
+        x0, x1 = cols[0] + 12, cols[-1] - 12
+        n = max(2, int((x1 - x0) / 140) + 1)
+        for i in range(n):
+            x = int(x0 + (x1 - x0) * i / (n - 1))
+            ys = np.where(sand[:, max(0, x-6):x+6].any(axis=1))[0]
+            if len(ys):
+                # 只取最大一段连续沙土（排除远处零星黄花）
+                segs = np.split(ys, np.where(np.diff(ys) > 3)[0] + 1)
+                seg = max(segs, key=len)
+                road.append((x, int(seg.mean())))
+    return forest, road
+
 # ---- UI
 for rel, mx in [("ui/panel.png", 384), ("ui/parchment.png", 384), ("ui/portrait_frame.png", 192),
                 ("ui/banner.png", 640), ("ui/icon_victory.png", 480), ("ui/icon_defeat.png", 480),
@@ -115,10 +182,17 @@ if os.path.exists(m):
     os.makedirs(os.path.join(DST, "map"), exist_ok=True)
     im.save(os.path.join(DST, "map/map.png"), optimize=True)
     data["map/map"] = {"w": im.size[0], "h": im.size[1], "ax": 0, "ay": 0}
+    forest, road = analyze_map(im)
+
+else:
+    forest, road = [], []
 
 with open(os.path.join(sys.argv[2], "art_data.gd"), "w", encoding="utf-8") as f:
     f.write("## 由 tools/prepare_art.py 自动生成，别手改：每张图的尺寸和锚点（像素）\n")
     f.write("class_name ArtData\nextends RefCounted\n\nconst SPRITES := ")
     f.write(json.dumps(data, ensure_ascii=False, indent=1).replace("    ", "\t"))
-    f.write("\n")
+    f.write("\n\n## 地图上画着森林的格子（16px 一格，1 = 树林，单位不该走进去、不能盖房）\n")
+    f.write("const FOREST_CELL := 16\nconst FOREST := [\n" + "".join('\t"%s",\n' % r for r in forest) + "]\n")
+    f.write("\n## 地图上土路的中心线（1280×720 世界坐标，从基地端到巢穴端）\n")
+    f.write("const ROAD := [" + ", ".join("Vector2(%d, %d)" % p for p in road) + "]\n")
 print(len(data), "sprites")

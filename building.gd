@@ -54,9 +54,41 @@ func take_damage(amount: float, _from: Node2D = null) -> void:
 			Fx.spawn(get_parent(), "dust", position + Vector2(0, size * 0.2), {"size": size * 1.6, "life": 0.8})
 		queue_free()
 
+## 城堡自带箭塔（王国保卫战式）：开局没兵也能顶住零星几只 Goo，但挡不住大波
+const TOWER_RANGE := 170.0
+const TOWER_DMG := 8.0
+const TOWER_CD := 1.2
+var _tower_cd := 0.0
+
+func has_tower() -> bool:
+	return kind == "base" and team == 0
+
+func _tower(delta: float) -> void:
+	_tower_cd -= delta
+	if _tower_cd > 0.0:
+		return
+	var best: Node2D = null
+	var best_d := TOWER_RANGE
+	for e in get_tree().get_nodes_in_group("enemies"):
+		if not is_instance_valid(e):
+			continue
+		var d := position.distance_to(e.position)
+		if d < best_d:
+			best_d = d
+			best = e
+	if best == null:
+		_tower_cd = 0.2    # 没目标时别每帧扫
+		return
+	_tower_cd = TOWER_CD
+	best.take_damage(TOWER_DMG, self)
+	var from := position + Vector2(-26.0 if best.position.x < position.x else 26.0, -size * 0.95)
+	Fx.spawn(get_parent(), "arrow", from, {"to": best.position + Vector2(0, -12), "life": 0.3})
+
 ## 挨打抖动 / 选中圈要持续刷新（便宜：只在需要时重画）
 var _was_selected := false
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	if has_tower():
+		_tower(delta)
 	if Time.get_ticks_msec() < _hurt_until + 40 or selected != _was_selected:
 		_was_selected = selected
 		queue_redraw()

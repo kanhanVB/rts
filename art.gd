@@ -39,6 +39,36 @@ static func scaled(key: String, k: float) -> Texture2D:
 	_tex[ck] = out
 	return out
 
+## 地图上画着树林的地方（来自 tools/prepare_art.py 的分析）：不能盖房，右键点进去会落到最近的空地上
+static func forest_at(p: Vector2) -> bool:
+	if not has("map/map") or ArtData.FOREST.is_empty():
+		return false
+	var c: float = ArtData.FOREST_CELL
+	var gy := int(p.y / c)
+	if p.y < 0.0 or gy >= ArtData.FOREST.size():
+		return true
+	var row: String = ArtData.FOREST[gy]
+	var gx := int(p.x / c)
+	if p.x < 0.0 or gx >= row.length():
+		return true
+	return row[gx] == "1"
+
+## 离 p 最近的非树林点（p 本身能走就原样返回）
+static func open_point(p: Vector2) -> Vector2:
+	if not forest_at(p):
+		return p
+	var c: float = ArtData.FOREST_CELL
+	for r in range(1, 40):
+		var n := 8 * r
+		var best := Vector2.INF
+		for i in n:
+			var q := p + Vector2.from_angle(TAU * i / n) * (r * c * 0.75)
+			if not forest_at(q) and (best == Vector2.INF or q.distance_to(p) < best.distance_to(p)):
+				best = q
+		if best != Vector2.INF:
+			return best
+	return p
+
 static func font() -> Font:
 	if _font == null:
 		_font = load("res://fonts/ZCOOLKuaiLe-Regular.ttf") if ResourceLoader.exists("res://fonts/ZCOOLKuaiLe-Regular.ttf") else ThemeDB.fallback_font

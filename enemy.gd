@@ -12,6 +12,48 @@ var _repath_cd := 0.0                   # 重算路径的冷却
 var _path_goal := Vector2(-9999, -9999)  # 上次寻路时的目标位置
 
 const HUNT_RADIUS := 70.0    # 贴脸（70px 内）才咬单位；建筑才是行军目标，不计距离
+## 波次刷出来的 Goo 沿土路行军（王国保卫战式）：只有路边 LANE_AGGRO 内的建筑/工地会被盯上，
+## 走到路尽头（基地门口）才退回"找最近建筑"。手动放出来的（测试里）照旧直奔最近建筑。
+const LANE_AGGRO := 150.0
+var lane := false
+var _lane: Array = []
+var _lane_idx := 0
+var _lane_fighting := false
+var _lane_best := INF
+var _lane_stall := 0.0
+
+func start_lane(points: Array) -> void:
+	if points.size() < 2:
+		return
+	var off := Vector2(0, randf_range(-14.0, 14.0))
+	_lane.clear()
+	for i in range(points.size() - 1, -1, -1):    # 道路数据从基地端到巢穴端，Goo 反着走
+		var p: Vector2 = points[i] + off
+		# 路的起点压在巢穴脚下：那几个点根本走不到（会被建筑推开），跳过
+		var blocked := false
+		for b in _group("buildings"):
+			if is_instance_valid(b) and b.team == 1 and p.distance_to(b.position) < b.size * 0.8:
+				blocked = true
+		if not blocked:
+			_lane.append(p)
+	lane = true
+	_lane_idx = _nearest_lane_idx()
+
+## 下一个该去的路点：离自己最近的那个，已经走过它一半就去下一个
+func _nearest_lane_idx() -> int:
+	var best := 0
+	var bd := INF
+	for i in _lane.size():
+		var d := position.distance_to(_lane[i])
+		if d < bd:
+			bd = d
+			best = i
+	if best + 1 < _lane.size():
+		var a: Vector2 = _lane[best]
+		var b: Vector2 = _lane[best + 1]
+		if (position - a).dot(b - a) > 0.0:
+			best += 1
+	return maxi(best, _lane_idx)
 
 func _ready() -> void:
 	team = 1        # 必须在 super() 之前设，进组用
@@ -36,6 +78,10 @@ func take_damage(amount: float, from: Node2D = null) -> void:
 func _step(delta: float) -> void:
 	_cd = max(0.0, _cd - delta)
 	var t := _acquire_target()
+	if t == null and lane:
+		_follow_lane(delta)
+		return
+	_lane_fighting = t != null
 	if t:
 		var d := position.distance_to(t.position)
 		var reach := attack_range * _terrain_range_factor()
@@ -60,6 +106,32 @@ func _step(delta: float) -> void:
 			_path = _find_path(t.position)
 			_path_idx = 0
 	_move_toward(move_target, delta)
+
+func _follow_lane(delta: float) -> void:
+	if _lane_fighting:    # 打完一架回到路上：从最近的路点接着走
+		_lane_fighting = false
+		_lane_idx = _nearest_lane_idx()
+		_lane_best = INF
+		_lane_stall = 0.0
+	if _lane_idx >= _lane.size():
+		lane = false      # 走到头了：改成直奔最近建筑（就是基地）
+		_scan_t = 0.0
+		return
+	var wp: Vector2 = _lane[_lane_idx]
+	var dist := position.distance_to(wp)
+	# 被挤住 4 秒没走近这个路点：直接换下一个，别原地发呆
+	if dist < _lane_best - 2.0:
+		_lane_best = dist
+		_lane_stall = 0.0
+	else:
+		_lane_stall += delta
+	if dist < 26.0 or _lane_stall > 4.0:
+		_lane_idx += 1
+		_lane_best = INF
+		_lane_stall = 0.0
+	_path = PackedVector2Array()
+	move_target = wp
+	_move_toward(wp, delta)
 
 ## 索敌优先级：还手目标 > 贴脸单位 > 最近的玩家建筑/工地（工地也会被啃！）
 ## 每 0.15 秒才重新扫描一次，期间沿用上次结果——以前每只 Goo 每帧
@@ -96,6 +168,8 @@ func _scan_target() -> Node2D:
 		if b.team != 0:
 			continue
 		var d := position.distance_to(b.position)
+		if lane and d > LANE_AGGRO + b.size * 0.5:
+			continue
 		if d < best_d:
 			best_d = d
 			best = b
@@ -103,6 +177,8 @@ func _scan_target() -> Node2D:
 		if not is_instance_valid(s):
 			continue
 		var d := position.distance_to(s.position)
+		if lane and d > LANE_AGGRO + s.size * 0.5:
+			continue
 		if d < best_d:
 			best_d = d
 			best = s

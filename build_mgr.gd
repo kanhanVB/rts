@@ -37,14 +37,28 @@ func add_building(kind: String, pos: Vector2, team_: int) -> Building:
 	return b
 
 ## 放设施：0=成功落工地  1=可重试的失败（位置不合适）  2=买不起，该取消放置
-func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
+## 放置校验（放置预览和真正落地共用）：返回 "" = 能放，否则是给玩家看的原因
+func placement_error(pos: Vector2) -> String:
 	if pos.x < 40.0 or pos.x > W - 40.0 or pos.y < 90.0 or pos.y > H - 80.0:
-		_hud("放不下：离边界太近，往中间点")
-		return 1
+		return "放不下：离边界太近，往中间点"
 	for b in get_tree().get_nodes_in_group("buildings"):
 		if pos.distance_to(b.position) < b.size + 40.0:
-			_hud("放不下：离建筑太近，挪远一点")
-			return 1
+			return "放不下：离建筑太近，挪远一点"
+	for s in get_tree().get_nodes_in_group("sites"):
+		if is_instance_valid(s) and pos.distance_to(s.position) < s.size + 30.0:
+			return "放不下：和别的工地挤在一起了"
+	for n in get_tree().get_nodes_in_group("res_nodes"):
+		if is_instance_valid(n) and pos.distance_to(n.position) < 52.0:
+			return "放不下：压到矿/树了，挪开一点"
+	if Art.forest_at(pos) or Art.forest_at(pos + Vector2(0, 26)):
+		return "放不下：那里是树林"
+	return ""
+
+func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
+	var why := placement_error(pos)
+	if why != "":
+		_hud(why)
+		return 1
 	var cost: Dictionary = COST_TABLE.get(kind, {})
 	var g := _game()
 	if g == null or not g.economy.can_afford(cost):

@@ -70,7 +70,8 @@ var panel_label: Label
 var _panel_on := true
 var hud: Hud                 # 王国保卫战风格 HUD（hud.gd）
 var _decor: Array = []       # 地图装饰：[{key, pos, flip}]（纯视觉）
-var _markers: Array = []     # 右键落点圈：[{pos, t0, attack}]
+var _markers: Array = []
+var _rally_i := 0            # 新兵在兵营前排队的序号     # 右键落点圈：[{pos, t0, attack}]
 
 func _ready() -> void:
 	add_to_group("game")
@@ -412,6 +413,8 @@ func _issue_command(pos: Vector2) -> void:
 	if selected.is_empty():
 		return
 	var target := _thing_at(pos)
+	if target == null:
+		pos = Art.open_point(pos)    # 点进画着的树林里 = 走到林子边上
 	var depot := _friendly_depot_at(pos)     # 选农民右键己方收货建筑 = 指派交货点
 	var move_idx := 0    # 纯移动的单位排队领环形散点，别全挤向同一个坐标
 	for u in selected:
@@ -598,6 +601,16 @@ func _on_worker_pressed() -> void:
 	var w := Worker.new()
 	w.position = home.position + Vector2(60, 40)
 	add_child(w)
+	# 新农民自动上岗：哪种资源干活的人少就去哪（玩家随时可以右键改派）
+	var n_ore := 0
+	var n_wood := 0
+	for o in _player_workers():
+		if o != w and is_instance_valid(o.node_target):
+			if o.node_target.kind == "ore":
+				n_ore += 1
+			else:
+				n_wood += 1
+	w.auto_assign("wood" if n_wood < n_ore else "ore")
 
 ## 点英雄工程师 → 建兵营（帝国式：建造是工程师的活）
 ## 两种设施共用一个放置入口：工程师选中 → 检查成本 → 进入放置模式
@@ -667,6 +680,8 @@ func _train_soldier(ranged: bool) -> void:
 	s.setup(ranged)
 	s.position = b.position + Vector2(0, 60)
 	add_child(s)
+	_rally_i += 1
+	s.command_move(Art.open_point(_spread_pos(_rally_i % 24, b.position + Vector2(0, 86))))
 
 ## 按钮跟随选中对象出现：点基地出农民、点兵营出兵、点工程师建房子
 func _update_buttons() -> void:
@@ -697,7 +712,8 @@ func _selected_info_text() -> String:
 	if list.size() == 1:
 		var t = list[0]
 		if t is Building:
-			return "%s   血量 %.0f/%.0f · 建筑" % [t.display_name, t.hp, t.max_hp]
+			var extra := " · 箭塔 %.0f 伤害 / %.1f 秒 · 射程 %.0f" % [Building.TOWER_DMG, Building.TOWER_CD, Building.TOWER_RANGE] if t.has_tower() else ""
+			return "%s   血量 %.0f/%.0f · 建筑%s" % [t.display_name, t.hp, t.max_hp, extra]
 		var u: Unit = t
 		var atk_txt := "—" if u.atk <= 0.0 else "%.0f（%.1f秒/下）" % [u.atk, u.atk_cd]
 		var rng_txt := "—"
@@ -797,6 +813,12 @@ func _has_processor(kind: String) -> bool:
 
 ## ================================ 绘制 ================================
 ## 地图装饰：固定随机种子撒灌木/花丛/石头/篱笆，避开土路、建筑、资源点和边缘树林
+## 敌人行军路线 = 地图上画的土路（有手绘地图时从图里分析出来），否则用老的折线
+func road() -> Array:
+	if Art.has("map/map") and not ArtData.ROAD.is_empty():
+		return ArtData.ROAD
+	return DIRT_PATH
+
 func _build_decor() -> void:
 	_decor.clear()
 	var keys := ["decor/bush_1", "decor/bush_2", "decor/flowers", "decor/flowers", "decor/rock_1", "decor/fence"]
@@ -806,9 +828,10 @@ func _build_decor() -> void:
 	while _decor.size() < 34 and tries < 2000:
 		tries += 1
 		var p := Vector2(rng.randf_range(140, W - 140), rng.randf_range(90, H - 100))
-		var ok := true
-		for i in DIRT_PATH.size() - 1:
-			if Geometry2D.get_closest_point_to_segment(p, DIRT_PATH[i], DIRT_PATH[i + 1]).distance_to(p) < 52.0:
+		var ok := not Art.forest_at(p)
+		var rd := road()
+		for i in rd.size() - 1:
+			if Geometry2D.get_closest_point_to_segment(p, rd[i], rd[i + 1]).distance_to(p) < 52.0:
 				ok = false
 				break
 		for n in get_tree().get_nodes_in_group("res_nodes"):
@@ -877,12 +900,7 @@ func _draw() -> void:
 
 ## 放置预览用：和 BuildManager.try_place 同一套规则（只判断，不提示）
 func _placement_ok(kind: String, pos: Vector2) -> bool:
-	if pos.x < 40.0 or pos.x > W - 40.0 or pos.y < 90.0 or pos.y > H - 80.0:
-		return false
-	for b in get_tree().get_nodes_in_group("buildings"):
-		if pos.distance_to(b.position) < b.size + 40.0:
-			return false
-	return economy.can_afford(BuildManager.COST_TABLE.get(kind, {}))
+	return _build_mgr.placement_error(pos) == "" and economy.can_afford(BuildManager.COST_TABLE.get(kind, {}))
 
 ## ================================ 自测 ================================
 ## 套件本体已拆到 test_suite.gd。入口和用法不变：
