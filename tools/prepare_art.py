@@ -71,9 +71,28 @@ def key_out(im):
     a[..., 3] = alpha * 255
     return Image.fromarray(a.astype("uint8"), "RGBA")
 
+# 地图 / 建筑 / 树石摆设统一"压灰"，和低饱和的角色画风对上（1.0 = 不处理）
+MUTE_SAT, MUTE_VAL, MUTE_WARM = 0.55, 0.92, 0.10
+MUTED = ("map/", "buildings/", "resources/", "decor/")
+
+def mute(im):
+    import numpy as np
+    from PIL import ImageEnhance
+    alpha = im.getchannel("A") if im.mode == "RGBA" else None
+    rgb = ImageEnhance.Color(im.convert("RGB")).enhance(MUTE_SAT)
+    a = np.asarray(rgb).astype(float) * MUTE_VAL
+    a = a * (1 - MUTE_WARM) + np.array([150.0, 138.0, 112.0]) * MUTE_WARM   # 往暖灰褐靠一点
+    out = Image.fromarray(np.clip(a, 0, 255).astype("uint8"), "RGB")
+    if alpha is not None:
+        out = out.convert("RGBA"); out.putalpha(alpha)
+    return out
+
 def load(rel):
     p = os.path.join(SRC, rel)
-    return trim(key_out(Image.open(p).convert("RGBA"))) if os.path.exists(p) else None
+    if not os.path.exists(p):
+        return None
+    im = trim(key_out(Image.open(p).convert("RGBA")))
+    return mute(im) if rel.startswith(MUTED) else im
 
 def scaled(im, k):
     return im.resize((max(1, round(im.size[0] * k)), max(1, round(im.size[1] * k))), Image.LANCZOS)
@@ -207,14 +226,14 @@ if btn is not None:
             im = scaled(im, k)
             save(f"ui/button{s}.png", im, im.size[0] / 2, im.size[1] / 2)
 
-# ---- 地图：原样拷贝
+# ---- 地图：压灰后拷贝
 m = os.path.join(SRC, "map/map.png")
 if os.path.exists(m):
     im = Image.open(m).convert("RGB")
     os.makedirs(os.path.join(DST, "map"), exist_ok=True)
-    im.save(os.path.join(DST, "map/map.png"), optimize=True)
+    mute(im).save(os.path.join(DST, "map/map.png"), optimize=True)
     data["map/map"] = {"w": im.size[0], "h": im.size[1], "ax": 0, "ay": 0}
-    forest, road = analyze_map(im)
+    forest, road = analyze_map(im)   # 用原图分析（颜色阈值按原图调的）
 
 else:
     forest, road = [], []
