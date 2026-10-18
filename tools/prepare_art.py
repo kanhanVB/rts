@@ -72,7 +72,7 @@ def key_out(im):
     return Image.fromarray(a.astype("uint8"), "RGBA")
 
 # 地图 / 建筑 / 树石摆设统一"压灰"，和低饱和的角色画风对上（1.0 = 不处理）
-MUTE_SAT, MUTE_VAL, MUTE_WARM = 0.55, 0.92, 0.10
+MUTE_SAT, MUTE_VAL, MUTE_WARM = 0.62, 1.06, 0.08
 MUTED = ("map/", "resources/", "decor/")   # 建筑 / UI 是按角色画风新画的，本来就低饱和，不再压
 
 def mute(im):
