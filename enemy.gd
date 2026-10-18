@@ -6,6 +6,10 @@ var attack_range: float = 28.0    # 必须 > 单位分离距离(约23)，否则�
 var attack_damage: float = 7.0
 var attack_cooldown: float = 1.0
 var _cd: float = 0.0
+var _scan_t := 0.0                      # 距下次重新索敌的倒计时
+var _cached_target: Node2D = null       # 上次扫描到的目标
+var _repath_cd := 0.0                   # 重算路径的冷却
+var _path_goal := Vector2(-9999, -9999)  # 上次寻路时的目标位置
 
 const HUNT_RADIUS := 70.0    # 贴脸（70px 内）才咬单位；建筑才是行军目标，不计距离
 
@@ -46,22 +50,36 @@ func _step(delta: float) -> void:
 				t.take_damage(attack_damage)
 				attack_fx_to(t.position)
 			return
-		# 目标变了就重算路径（绕开悬崖/深水）
-		if move_target != t.position:
-			move_target = t.position
+		# 目标挪动明显（>24px）且冷却到了才重算路径（绕开悬崖/深水）。
+		# 以前追移动中的单位时 t.position 每帧都变，每只 Goo 每帧跑一次 A*
+		move_target = t.position
+		_repath_cd -= delta
+		if _repath_cd <= 0.0 and t.position.distance_to(_path_goal) > 24.0:
+			_repath_cd = 0.4
+			_path_goal = t.position
 			_path = _find_path(t.position)
 			_path_idx = 0
 	_move_toward(move_target, delta)
 
 ## 索敌优先级：还手目标 > 贴脸单位 > 最近的玩家建筑/工地（工地也会被啃！）
+## 每 0.15 秒才重新扫描一次，期间沿用上次结果——以前每只 Goo 每帧
+## 都把全部玩家单位 + 建筑 + 工地扫一遍，是混战掉帧的第二大来源
 func _acquire_target() -> Node2D:
 	if attack_target != null:
 		if is_instance_valid(attack_target):
 			return attack_target
 		attack_target = null
+	_scan_t -= get_process_delta_time()
+	if _scan_t > 0.0 and _cached_target != null and is_instance_valid(_cached_target):
+		return _cached_target
+	_scan_t = 0.15
+	_cached_target = _scan_target()
+	return _cached_target
+
+func _scan_target() -> Node2D:
 	var best: Node2D = null
 	var best_d := HUNT_RADIUS
-	for u in get_tree().get_nodes_in_group("player_units"):
+	for u in _group("player_units"):
 		if not is_instance_valid(u):
 			continue
 		var d := position.distance_to(u.position)
@@ -72,7 +90,7 @@ func _acquire_target() -> Node2D:
 		return best
 	best = null
 	best_d = INF
-	for b in get_tree().get_nodes_in_group("buildings"):
+	for b in _group("buildings"):
 		if not is_instance_valid(b):
 			continue
 		if b.team != 0:
@@ -81,7 +99,7 @@ func _acquire_target() -> Node2D:
 		if d < best_d:
 			best_d = d
 			best = b
-	for s in get_tree().get_nodes_in_group("sites"):
+	for s in _group("sites"):
 		if not is_instance_valid(s):
 			continue
 		var d := position.distance_to(s.position)

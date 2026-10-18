@@ -12,20 +12,38 @@ const GRID_H := 23            # 720 / 32 向上取整
 enum T { EMPTY, SHALLOW, DEEP, CLIFF, FOREST }
 
 var grid: Array = []          # grid[y * GRID_W + x] = 地形类型 int
-var obstacles: Array = []     # 阻挡格（深水/悬崖），A* 用
+## 原生 A*（C++ 实现）：比 GDScript 手写版快一到两个数量级。
+## 阻挡格与 grid 同步：paint() 时增量更新，不必整张重建。
+var _astar := AStarGrid2D.new()
+var _solid_count := 0         # 阻挡格数量：为 0 时视线检查直接放行（当前全平原）
+
+## 当前地形层的直接引用：单位每帧查移速/射程，别再走 get_first_node_in_group
+static var current: Terrain = null
 
 func _init() -> void:
 	_init_grid()
 
 func _ready() -> void:
 	add_to_group("terrain")
-	_init_grid()
+	current = self
+
+func _exit_tree() -> void:
+	if current == self:
+		current = null
 
 func _init_grid() -> void:
 	grid.clear()
 	grid.resize(GRID_W * GRID_H)
 	for i in GRID_W * GRID_H:
 		grid[i] = T.EMPTY
+	_astar.region = Rect2i(0, 0, GRID_W, GRID_H)
+	_astar.cell_size = Vector2(CELL, CELL)
+	_astar.offset = Vector2(CELL * 0.5, CELL * 0.5)    # 路径点落在格心，和旧实现一致
+	# 防斜穿墙角：对角移动要求两侧正交格都可走（与旧实现同规则）
+	_astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+	_astar.default_compute_heuristic = AStarGrid2D.HEURISTIC_OCTILE
+	_astar.default_estimate_heuristic = AStarGrid2D.HEURISTIC_OCTILE
+	_astar.update()
 
 ## 把一块矩形区域设成某种地形（x,y 为世界坐标左上角）
 func paint(rect: Rect2, type: int) -> void:
@@ -35,7 +53,11 @@ func paint(rect: Rect2, type: int) -> void:
 	var y1 := int((rect.position.y + rect.size.y) / CELL)
 	for gy in range(max(0, y0), min(GRID_H, y1 + 1)):
 		for gx in range(max(0, x0), min(GRID_W, x1 + 1)):
+			var was_solid := _astar.is_point_solid(Vector2i(gx, gy))
+			var solid := type == T.DEEP or type == T.CLIFF
 			grid[gy * GRID_W + gx] = type
+			_astar.set_point_solid(Vector2i(gx, gy), solid)
+			_solid_count += int(solid) - int(was_solid)
 
 ## 世界坐标 → 格子坐标
 func _cell(world: Vector2) -> Vector2i:
@@ -83,54 +105,17 @@ func find_path(start: Vector2, goal: Vector2) -> PackedVector2Array:
 		return PackedVector2Array()
 	if s == g:
 		return PackedVector2Array([goal])
-
-	var open: Array = []
-	var came: Dictionary = {}
-	var gscore: Dictionary = {}
-	var fscore: Dictionary = {}
-	var skey: int = s.y * GRID_W + s.x
-	var gkey: int = g.y * GRID_W + g.x
-	open.append(skey)
-	gscore[skey] = 0.0
-	fscore[skey] = _heuristic(s, g)
-
-	while not open.is_empty():
-		# 取 f 最小的
-		var cur_key: int = open[0]
-		var cur_idx := 0
-		for i in open.size():
-			if float(fscore.get(open[i], INF)) < float(fscore.get(cur_key, INF)):
-				cur_key = open[i]
-				cur_idx = i
-		open.remove_at(cur_idx)
-		if cur_key == gkey:
-			return _smooth(start, _reconstruct(came, g, s))
-		var cur := Vector2i(cur_key % GRID_W, int(cur_key / GRID_W))
-		for dir in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
-				Vector2i(1, 1), Vector2i(-1, 1), Vector2i(1, -1), Vector2i(-1, -1)]:
-			var nb: Vector2i = cur + dir
-			if not walkable(nb.x, nb.y):
-				continue
-			# 防斜穿墙角：对角移动要求两侧正交格都可走
-			if dir.x != 0 and dir.y != 0:
-				if not walkable(cur.x + dir.x, cur.y) or not walkable(cur.x, cur.y + dir.y):
-					continue
-			var nkey: int = nb.y * GRID_W + nb.x
-			var step_cost := 1.414 if (dir.x != 0 and dir.y != 0) else 1.0
-			var tent: float = float(gscore.get(cur_key, INF)) + step_cost
-			if tent < float(gscore.get(nkey, INF)):
-				came[nkey] = cur_key
-				gscore[nkey] = tent
-				fscore[nkey] = tent + _heuristic(nb, g)
-				if not open.has(nkey):
-					open.append(nkey)
-	return PackedVector2Array()
+	var pts := _astar.get_point_path(s, g)
+	if pts.is_empty():
+		return PackedVector2Array()
+	# 去掉起点格（单位已经站在里面），与旧实现输出一致
+	return _smooth(start, pts.slice(1))
 
 ## 两点连线是否全程可走（沿线密集采样 + 两侧留出单位半径）
 func line_walkable(a: Vector2, b: Vector2) -> bool:
 	var d := b - a
 	var len := d.length()
-	if len < 0.001:
+	if len < 0.001 or _solid_count == 0:
 		return true
 	var steps := int(ceil(len / (CELL * 0.35)))
 	var perp := Vector2(-d.y, d.x).normalized() * 6.0    # 近似单位半径的横向留边
@@ -165,35 +150,6 @@ func _smooth(start: Vector2, points: PackedVector2Array) -> PackedVector2Array:
 		out.append(points[far])
 		from = points[far]
 		idx = far + 1
-	return out
-
-func _heuristic(a: Vector2i, b: Vector2i) -> float:
-	var dx := absf(a.x - b.x)
-	var dy := absf(a.y - b.y)
-	return maxf(dx, dy)
-
-func _reconstruct(came: Dictionary, goal: Vector2i, start: Vector2i) -> PackedVector2Array:
-	var path: Array = []
-	var cur := goal
-	var skey: int = start.y * GRID_W + start.x
-	var guard := 0
-	while true:
-		guard += 1
-		if guard > GRID_W * GRID_H:
-			break
-		var ck: int = cur.y * GRID_W + cur.x
-		if ck == skey:
-			break
-		path.append(cur)
-		if not came.has(ck):
-			break
-		var pk: int = came[ck]
-		cur = Vector2i(pk % GRID_W, int(pk / GRID_W))
-	path.reverse()
-	var out := PackedVector2Array()
-	for c in path:
-		var cv: Vector2i = c
-		out.append(Vector2(cv.x * CELL + CELL * 0.5, cv.y * CELL + CELL * 0.5))
 	return out
 
 ## ---------- 绘制 ----------

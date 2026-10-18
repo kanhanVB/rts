@@ -357,6 +357,74 @@ func run() -> void:
 	if is_instance_valid(g7):
 		g7.take_damage(99999.0)
 
+	# ---- 回归测试：本轮优化修掉的行为 bug ----
+	# A 移动打完一仗要接着赶路（以前打完原地站死）
+	var s4 := Soldier.new()
+	s4.setup(false)
+	s4.position = Vector2(200, 150)
+	m.add_child(s4)
+	var dest4 := Vector2(700, 150)
+	s4.command_attack_move(dest4)
+	var g9 := Goo.new()
+	g9.position = Vector2(350, 150)
+	m.add_child(g9)
+	g9.hp = 10.0
+	await m.get_tree().create_timer(10.0).timeout
+	_check(not is_instance_valid(g9), "A 移动途中的 Goo 被打掉")
+	_check(s4.position.distance_to(dest4) < 60.0, "A 移动打完继续走到目的地（距终点 %.0fpx）" % s4.position.distance_to(dest4))
+	s4.take_damage(99999.0)
+
+	# 普通右键移动不被沿路敌人勾走（撤退要撤得下来）
+	var s5 := Soldier.new()
+	s5.setup(false)
+	s5.position = Vector2(200, 200)    # 走 y=200 这条线：避开前面测试盖的兵营和矿点、树，免得绕路导致误判
+	m.add_child(s5)
+	var g10 := Goo.new()
+	g10.position = Vector2(450, 240)
+	m.add_child(g10)
+	s5.command_move(Vector2(700, 200))
+	await m.get_tree().create_timer(3.0).timeout
+	_check(s5.position.x > 470.0, "普通移动无视沿路敌人继续走（x=%.0f）" % s5.position.x)
+	s5.take_damage(99999.0)
+	if is_instance_valid(g10):
+		g10.take_damage(99999.0)
+
+	# 工程师自卫必须贴脸才能锤到（以前缩进错位，70px 外隔空就锤中）
+	var eng5: Engineer = m._player_engineers()[0]
+	eng5.position = Vector2(400, 600)
+	eng5.command_move(eng5.position)
+	await m.get_tree().process_frame
+	var g11 := Goo.new()
+	g11.position = eng5.position + Vector2(60, 0)
+	m.add_child(g11)
+	await m.get_tree().process_frame
+	await m.get_tree().process_frame
+	_check(is_instance_valid(g11) and g11.hp >= g11.max_hp, "工程师 60px 外不会隔空锤中")
+	await m.get_tree().create_timer(2.0).timeout
+	_check(not is_instance_valid(g11) or g11.hp < g11.max_hp, "工程师贴上去后能锤到")
+	if is_instance_valid(g11):
+		g11.take_damage(99999.0)
+
+	# 多人同采一处：总采集量不超过储量
+	var rn := ResNode.new()
+	rn.kind = "ore"
+	rn.amount = 2.0
+	rn.position = Vector2(820, 120)
+	m.add_child(rn)
+	var wa := Worker.new()
+	var wb := Worker.new()
+	for wx in [wa, wb]:
+		wx.position = rn.position + Vector2(8, 0)
+		m.add_child(wx)
+		wx.node_target = rn
+		wx.carry_kind = "ore"
+		wx.state = Worker.State.GATHERING
+	await m.get_tree().create_timer(1.0).timeout
+	var got := wa.carry_amount + wb.carry_amount
+	_check(got <= 2.001 and got > 1.9, "同采一处不超采（储量 2，实采 %.3f）" % got)
+	wa.take_damage(99999.0)
+	wb.take_damage(99999.0)
+
 	# ---- 产能面板：流水能算出速率，瓶颈说得出来 ----
 	m.economy._log.clear()
 	m.economy.add("ore", 10.0)

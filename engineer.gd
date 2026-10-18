@@ -66,7 +66,7 @@ func _step(delta: float) -> void:
 				move_order = false
 				move_target = position
 			# 闲逛：自动认领无主工地
-			var sites := get_tree().get_nodes_in_group("sites")
+			var sites := _group("sites")
 			for s in sites:
 				if not is_instance_valid(s):
 					continue
@@ -79,14 +79,16 @@ func _step(delta: float) -> void:
 			var t := _acquire_target()
 			if t == null:
 				return
+			# 贴脸才抡锤，够不着就追（以前缩进错位：70px 外隔空就能锤中，
+			# 而且只有冷却中才会挪步）
 			var d := position.distance_to(t.position)
 			if d <= attack_range:
 				move_target = position
-			if _cd <= 0.0:
-				_cd = attack_cooldown
-				attack_anim = 1.0    # 抡锤自卫
-				t.take_damage(attack_damage, self)
-				attack_fx_to(t.position)
+				if _cd <= 0.0:
+					_cd = attack_cooldown
+					attack_anim = 1.0    # 抡锤自卫
+					t.take_damage(attack_damage, self)
+					attack_fx_to(t.position)
 			else:
 				move_target = t.position
 				_move_toward(move_target, delta)
@@ -99,7 +101,7 @@ func _acquire_target() -> Node2D:
 		attack_target = null
 	var best: Node2D = null
 	var best_d := aggro_range
-	for e in get_tree().get_nodes_in_group("enemies"):
+	for e in _group("enemies"):
 		if not is_instance_valid(e):
 			continue
 		var d := position.distance_to(e.position)

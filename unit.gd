@@ -40,6 +40,36 @@ var attack_anim := 0.0   # 1 → 0 递减，驱动挥刀/抡锤动画
 var _stuck_pos := Vector2.ZERO
 var _stuck_t := 0.0
 
+## ---------- 每帧共享缓存（性能） ----------
+## 以前每个单位每帧都 get_nodes_in_group() 好几次（每次分配新数组），
+## 分离力还是全员两两比较 O(n²)。现在每帧只取一次组成员，
+## 再按格子分桶做空间哈希，分离只看周围 3×3 桶。
+const HASH_CELL := 28.0           # 桶边长：必须 ≥ 最大分离距离（12+12+2=26px），越小混战里扫的邻居越少
+static var _cache_frame := -1
+static var _group_cache := {}     # 组名 -> Array（本帧快照）
+static var _hash := {}            # Vector2i -> Array[Unit]
+
+static func _sync_frame(tree: SceneTree) -> void:
+	var f := Engine.get_process_frames()
+	if f == _cache_frame:
+		return
+	_cache_frame = f
+	_group_cache.clear()
+	_hash.clear()
+	for u in tree.get_nodes_in_group("units"):
+		var k := Vector2i(floori(u.position.x / HASH_CELL), floori(u.position.y / HASH_CELL))
+		if _hash.has(k):
+			_hash[k].append(u)
+		else:
+			_hash[k] = [u]
+
+## 本帧的组成员快照（同一帧内多次调用不重复分配）
+func _group(name: String) -> Array:
+	_sync_frame(get_tree())
+	if not _group_cache.has(name):
+		_group_cache[name] = get_tree().get_nodes_in_group(name)
+	return _group_cache[name]
+
 func _ready() -> void:
 	move_target = position
 	_lane_off = Vector2.from_angle(randf() * TAU) * randf_range(3.0, 8.0)
@@ -52,7 +82,8 @@ func _process(delta: float) -> void:
 	if not moving:
 		_vel_dir = Vector2.ZERO    # 停下就清方向，下次起步重新加速转向
 	_separate()           # 单位之间互相推开，别叠成一坨
-	_avoid_obstacles()    # 撞上建筑/树就往侧面滑，别顶死	# 卡住检测：0.7 秒挪了不到 2.5px（被人群挤住）→ 就地停下列队
+	_avoid_obstacles()    # 撞上建筑/树就往侧面滑，别顶死
+	# 卡住检测：0.7 秒挪了不到 2.5px（被人群挤住）→ 就地停下列队
 	if moving:
 		if position.distance_to(_stuck_pos) < 2.5:
 			_stuck_t += delta
@@ -111,14 +142,14 @@ func _move_toward(pos: Vector2, delta: float) -> float:
 
 ## 查询当前所在格子的地形移速倍率
 func _terrain_speed_factor() -> float:
-	var t := get_tree().get_first_node_in_group("terrain")
+	var t := Terrain.current
 	if t == null:
 		return 1.0
 	return t.speed_factor(position)
 
 ## 射程修正（森林减射程）
 func _terrain_range_factor() -> float:
-	var t := get_tree().get_first_node_in_group("terrain")
+	var t := Terrain.current
 	if t == null:
 		return 1.0
 	return t.range_factor(position)
@@ -128,20 +159,32 @@ func _terrain_range_factor() -> float:
 ## 靠右通行：两个都在移动的单位相遇时，除了沿连线推开，还各自往自己的
 ## 右侧多让一点——相向而行的两人会错开肩膀通过，不再面对面顶牛。
 func _separate() -> void:
-	for u in get_tree().get_nodes_in_group("units"):
-		if u == self or not is_instance_valid(u):
-			continue
-		if _is_attacking(u):    # 正跟它贴脸互殴就不推它
-			continue
-		var d: float = position.distance_to(u.position)
-		var min_d: float = radius + u.radius + 2.0
-		if d < min_d and d > 0.01:
-			var push: Vector2 = (position - u.position).normalized() * (min_d - d) * 0.3
-			# 双方都在走 + 大致对向/交汇 → 往自己右手侧让
-			if moving and u.moving and _vel_dir != Vector2.ZERO:
-				var right := Vector2(_vel_dir.y, -_vel_dir.x)    # 移动方向的右侧法线
-				push += right * (min_d - d) * 0.4
-			position += push
+	_sync_frame(get_tree())
+	var cx := floori(position.x / HASH_CELL)
+	var cy := floori(position.y / HASH_CELL)
+	# 直接遍历 3×3 桶，不拼临时数组（混战里这是每帧最热的循环）
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			var bucket = _hash.get(Vector2i(cx + dx, cy + dy))
+			if bucket == null:
+				continue
+			for u in bucket:
+				if u == self or not is_instance_valid(u):
+					continue
+				var off: Vector2 = position - u.position
+				var min_d: float = radius + u.radius + 2.0
+				var d2 := off.length_squared()
+				if d2 >= min_d * min_d or d2 < 0.0001:
+					continue
+				if _is_attacking(u):    # 正跟它贴脸互殴就不推它
+					continue
+				var d := sqrt(d2)
+				var push: Vector2 = off / d * (min_d - d) * 0.3
+				# 双方都在走 + 大致对向/交汇 → 往自己右手侧让
+				if moving and u.moving and _vel_dir != Vector2.ZERO:
+					var right := Vector2(_vel_dir.y, -_vel_dir.x)    # 移动方向的右侧法线
+					push += right * (min_d - d) * 0.4
+				position += push
 
 ## 是否正在攻击这个目标（贴脸互殴中）：有 attack_target 且距离在攻击范围内
 func _is_attacking(other: Node2D) -> bool:
@@ -153,7 +196,7 @@ func _is_attacking(other: Node2D) -> bool:
 ## 撞上建筑被推向侧面，贴着边缘滑过去（轻量寻路）
 func _avoid_obstacles() -> void:
 	var push := Vector2.ZERO
-	for b in get_tree().get_nodes_in_group("buildings"):
+	for b in _group("buildings"):
 		if not is_instance_valid(b):
 			continue
 		var r: float = b.size * 0.5 + radius
@@ -171,7 +214,7 @@ func command_move(pos: Vector2) -> void:
 
 ## 从当前位置到目标点的寻路（有地形层就绕开阻挡，否则空=直线）
 func _find_path(pos: Vector2) -> PackedVector2Array:
-	var t := get_tree().get_first_node_in_group("terrain")
+	var t := Terrain.current
 	if t == null:
 		return PackedVector2Array()
 	var p: PackedVector2Array = t.find_path(position, pos)

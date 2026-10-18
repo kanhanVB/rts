@@ -50,10 +50,15 @@ func _step(delta: float) -> void:
 				_path = _find_path(node_target.position)
 				_path_idx = 0
 				return
-			carry_amount = min(CARRY_CAP, carry_amount + GATHER_RATE * delta)
-			node_target.amount -= GATHER_RATE * delta
-			if node_target.amount <= 0.0:
-				node_target.queue_free()
+			# 实采量 = min(采集速度, 剩余储量, 背包余量)：
+			# 以前最后一下会超采（储量扣成负数，背包照涨，多人同采时更明显），
+			# 背包满的那一帧又会多扣储量
+			var take := minf(GATHER_RATE * delta, minf(node_target.amount, CARRY_CAP - carry_amount))
+			carry_amount += maxf(take, 0.0)
+			node_target.amount -= maxf(take, 0.0)
+			if node_target.amount <= 0.001:
+				if not node_target.is_queued_for_deletion():
+					node_target.queue_free()
 				node_target = null
 			if carry_amount >= CARRY_CAP or node_target == null:
 				_back_to_base()
@@ -167,7 +172,7 @@ func _depot() -> Building:
 	# 自动：在仓库和基地里挑最近的——仓库盖得远就没意义了
 	var best: Building = null
 	var best_d := INF
-	for b in get_tree().get_nodes_in_group("buildings"):
+	for b in _group("buildings"):
 		if not is_instance_valid(b) or b.team != 0:
 			continue
 		if b.kind != "warehouse" and b.kind != "base":
@@ -190,7 +195,7 @@ func _output_kind(depot: Building) -> String:
 func _nearest_kind(kind: String) -> Building:
 	var best: Building = null
 	var best_d := INF
-	for b in get_tree().get_nodes_in_group("buildings"):
+	for b in _group("buildings"):
 		if not is_instance_valid(b) or b.team != 0 or b.kind != kind:
 			continue
 		var d := position.distance_to(b.position)
@@ -202,8 +207,9 @@ func _nearest_kind(kind: String) -> Building:
 func _nearest_node(kind: String) -> ResNode:
 	var best: ResNode = null
 	var best_d := INF
-	for n in get_tree().get_nodes_in_group("res_nodes"):
-		if n.kind == kind:
+	for n in _group("res_nodes"):
+		# 跳过已采空、等待销毁的资源点，别白跑一趟
+		if n.kind == kind and n.amount > 0.001 and not n.is_queued_for_deletion():
 			var d := position.distance_to(n.position)
 			if d < best_d:
 				best_d = d
