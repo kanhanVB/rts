@@ -4,106 +4,100 @@ extends RefCounted
 
 const SPRITES := {
  "units/worker_idle": {
-  "w": 160,
+  "w": 126,
   "h": 160,
-  "ax": 92.4,
+  "ax": 76.8,
   "ay": 160
  },
  "units/worker_act": {
-  "w": 169,
-  "h": 170,
-  "ax": 107.3,
-  "ay": 170
+  "w": 175,
+  "h": 159,
+  "ax": 66.5,
+  "ay": 159
  },
  "units/worker_carry": {
-  "w": 120,
-  "h": 182,
-  "ax": 54.7,
-  "ay": 182
+  "w": 130,
+  "h": 143,
+  "ax": 62.2,
+  "ay": 143
  },
  "units/engineer_idle": {
-  "w": 153,
+  "w": 155,
   "h": 160,
-  "ax": 90.5,
+  "ax": 60.4,
   "ay": 160
  },
  "units/engineer_act": {
-  "w": 154,
-  "h": 176,
-  "ax": 96.6,
-  "ay": 176
+  "w": 149,
+  "h": 195,
+  "ax": 93.7,
+  "ay": 195
+ },
+ "units/engineer_dead": {
+  "w": 190,
+  "h": 152,
+  "ax": 95.0,
+  "ay": 152
  },
  "units/swordsman_idle": {
-  "w": 149,
+  "w": 127,
   "h": 160,
-  "ax": 81.0,
+  "ax": 63.1,
   "ay": 160
  },
  "units/swordsman_act": {
-  "w": 178,
-  "h": 147,
-  "ax": 57.4,
-  "ay": 147
+  "w": 132,
+  "h": 174,
+  "ax": 62.2,
+  "ay": 174
  },
  "units/swordsman_dead": {
-  "w": 181,
-  "h": 106,
-  "ax": 90.5,
-  "ay": 106
+  "w": 202,
+  "h": 103,
+  "ax": 101.0,
+  "ay": 103
  },
  "units/archer_idle": {
-  "w": 157,
+  "w": 118,
   "h": 160,
-  "ax": 80.6,
+  "ax": 49.3,
   "ay": 160
  },
  "units/archer_act": {
-  "w": 173,
-  "h": 154,
-  "ax": 75.7,
-  "ay": 154
+  "w": 158,
+  "h": 172,
+  "ax": 61.4,
+  "ay": 172
  },
  "units/archer_dead": {
-  "w": 177,
-  "h": 109,
-  "ax": 88.5,
-  "ay": 109
+  "w": 190,
+  "h": 138,
+  "ax": 95.0,
+  "ay": 138
  },
  "units/goo_idle": {
-  "w": 169,
+  "w": 219,
   "h": 120,
-  "ax": 84.4,
+  "ax": 106.6,
   "ay": 120
  },
  "units/goo_act": {
-  "w": 171,
-  "h": 126,
-  "ax": 77.1,
-  "ay": 126
+  "w": 206,
+  "h": 155,
+  "ax": 92.0,
+  "ay": 155
  },
  "units/goo_dead": {
-  "w": 173,
-  "h": 64,
-  "ax": 86.5,
-  "ay": 64
+  "w": 306,
+  "h": 82,
+  "ax": 153.0,
+  "ay": 82
  },
- "buildings/barracks": {
+ "buildings/workshop": {
   "w": 320,
-  "h": 280,
+  "h": 317,
   "ax": 160.0,
-  "ay": 280
- },
- "buildings/base": {
-  "w": 320,
-  "h": 337,
-  "ax": 160.0,
-  "ay": 337
- },
- "buildings/base_damaged": {
-  "w": 320,
-  "h": 331,
-  "ax": 160.0,
-  "ay": 331
+  "ay": 317
  },
  "buildings/hive": {
   "w": 320,
@@ -135,11 +129,23 @@ const SPRITES := {
   "ax": 160.0,
   "ay": 306
  },
- "buildings/workshop": {
+ "buildings/barracks": {
   "w": 320,
-  "h": 317,
+  "h": 280,
   "ax": 160.0,
-  "ay": 317
+  "ay": 280
+ },
+ "buildings/base": {
+  "w": 320,
+  "h": 337,
+  "ax": 160.0,
+  "ay": 337
+ },
+ "buildings/base_damaged": {
+  "w": 320,
+  "h": 331,
+  "ax": 160.0,
+  "ay": 331
  },
  "resources/ore_full": {
   "w": 160,

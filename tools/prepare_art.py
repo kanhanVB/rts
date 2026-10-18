@@ -62,6 +62,12 @@ def key_out(im):
     for ch in range(3):
         v = a[..., ch]
         v[soft] = np.clip((v[soft] - bg[ch] * (1 - alpha[soft])) / np.maximum(alpha[soft], 0.05), 0, 255)
+    if bg[0] > 200 and bg[2] > 200 and bg[1] < 80:
+        # 品红底：描边上残留的紫边（红蓝都比绿高一截）压回去
+        r, g, b = a[..., 0], a[..., 1], a[..., 2]
+        m = (alpha > 0) & (np.minimum(r, b) - g > 18)
+        a[..., 0][m] = np.minimum(r[m], g[m] + 18)
+        a[..., 2][m] = np.minimum(b[m], g[m] + 12)
     a[..., 3] = alpha * 255
     return Image.fromarray(a.astype("uint8"), "RGBA")
 
@@ -71,6 +77,20 @@ def load(rel):
 
 def scaled(im, k):
     return im.resize((max(1, round(im.size[0] * k)), max(1, round(im.size[1] * k))), Image.LANCZOS)
+
+def pose_ratio(idle, im, has_skin):
+    import numpy as np
+    def areas(x):
+        a = np.asarray(x).astype(int)
+        r, g, b, al = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
+        sk = (al > 200) & (r > 170) & (g > 110) & (g < 185) & (b < 110) & (r - g > 25) & (r - g < 90)
+        return sk.sum(), (al > 200).sum()
+    si, ai = areas(idle)
+    sp, ap = areas(im)
+    ka = (ai / max(ap, 1)) ** 0.5
+    if has_skin and si > 200 and sp > 200:
+        return (ka * (si / sp) ** 0.5) ** 0.5
+    return ka
 
 # ---- 单位：同一个兵种所有姿势用同一个缩放系数（以站姿身高为准），锚点 = 脚底中心
 UNIT_H = 160
@@ -83,7 +103,8 @@ for key in ["worker", "engineer", "swordsman", "archer", "goo"]:
         im = load(f"units/{key}_{pose}.png")
         if im is None:
             continue
-        im = scaled(im, k)
+        # 动作图常常和站姿图画得不一样大：按"角色画了多少像素"（不透明面积 + 皮肤面积）对齐到站姿的大小
+        im = scaled(im, k * pose_ratio(idle, im, key != "goo"))
         save(f"units/{key}_{pose}.png", im, feet_x(im) if pose != "dead" else im.size[0] / 2, im.size[1])
 
 # ---- 建筑：统一宽度，锚点 = 底边中心

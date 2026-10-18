@@ -245,7 +245,13 @@ func attack_fx_to(pos: Vector2) -> void:
 
 ## ---------- 绘制：有美术素材就画贴图（_art_draw），没有就退回色块风 ----------
 ## 显示高度（像素，缩放 1 倍时）。素材是 160px 高的大图，缩小画更清晰
-const ART_H := {"worker": 40.0, "engineer": 46.0, "swordsman": 46.0, "archer": 44.0, "goo": 30.0}
+## 动作图和站姿图同一比例导出（tools/prepare_art.py），按贴图高度之比画，动作时人不会忽大忽小
+static func pose_scale(key: String, pkey: String) -> float:
+	var hi: float = Art.info("units/%s_idle" % key).get("h", 0.0)
+	var hp: float = Art.info(pkey).get("h", 0.0)
+	return hp / hi if hi > 0.0 and hp > 0.0 else 1.0
+
+const ART_H := {"worker": 30.0, "engineer": 35.0, "swordsman": 33.0, "archer": 32.0, "goo": 24.0}
 var _face := 1.0              # 朝向：1 右 / -1 左（停下也保持，不会突然转回去）
 var _hurt_until := 0          # 挨打闪红到这个时间（毫秒）
 
@@ -324,7 +330,7 @@ func _art_draw(key: String) -> void:
 	var pkey := "units/%s_%s" % [key, pose]
 	if not Art.has(pkey):
 		pkey = "units/%s_idle" % key
-	Art.draw(self, pkey, feet + Vector2(lunge, -bob), h, _face < 0.0, mod, rot * _face, sq)
+	Art.draw(self, pkey, feet + Vector2(lunge, -bob), h * pose_scale(key, pkey), _face < 0.0, mod, rot * _face, sq)
 	_art_extra(feet, h)
 	# 攻击特效：弓手射箭，其余打击火花
 	for fx in _attack_fx:
@@ -354,7 +360,7 @@ func _death_fx() -> void:
 	if key == "goo":
 		Fx.spawn(par, "splat", position + Vector2(0, radius * 0.55), {"size": 34.0, "life": 1.2})
 	if Art.has("units/%s_dead" % key):
-		Fx.spawn(par, "corpse", position + Vector2(0, radius * 0.55), {"key": "units/%s_dead" % key, "size": ART_H.get(key, 44.0) * (0.75 if key != "goo" else 0.6), "flip": _face < 0.0, "life": 1.8})
+		Fx.spawn(par, "corpse", position + Vector2(0, radius * 0.55), {"key": "units/%s_dead" % key, "size": ART_H.get(key, 44.0) * pose_scale(key, "units/%s_dead" % key), "flip": _face < 0.0, "life": 1.8})
 
 ## ---------- KR 风（王国保卫战）小工具：投影 / 描边 / 表情 ----------
 ## 椭圆软投影，垫在所有东西下面
