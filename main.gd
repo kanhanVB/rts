@@ -11,7 +11,7 @@ const UNIT_CAP := 40
 
 # 镜头
 const CAM_MIN_ZOOM := 1.0     # 缩放下限 = 视野正好铺满地图，杜绝看到地图外的灰底
-const CAM_MAX_ZOOM := 2.0     # 放大上限，贴近看单位
+const CAM_MAX_ZOOM := 2.4     # 放大上限，贴近看单位
 const CAM_EDGE := 40.0          # 鼠标贴边多少像素就开始滚屏
 const CAM_SPEED := 8.0          # 每像素滚屏速度（乘 delta）
 
@@ -65,10 +65,12 @@ var overlay_label: Label
 var _hud_msg_label: Label
 var _hud_msg_t := 0.0
 var info_label: Label        # 底部信息栏：点选 = 数值，框选 = "已选中 N 个"
-var panel: ColorRect         # 产能面板（C 键开关）
+var panel: Control           # 产能面板（C 键开关）
 var panel_label: Label
 var _panel_on := true
-var portraits: Node2D        # 挂在 CanvasLayer 上画选中单位的头像
+var hud: Hud                 # 王国保卫战风格 HUD（hud.gd）
+var view: View3D = null      # 3D 表现层（view3d.gd）；--2d 启动时为 null，退回原 2D 画面
+var _drag_start_screen := Vector2.ZERO
 
 func _ready() -> void:
 	add_to_group("game")
@@ -81,6 +83,10 @@ func _ready() -> void:
 	_build_map()
 	_build_ui()
 	_build_camera()
+	if not "--2d" in OS.get_cmdline_user_args():
+		view = View3D.new(self)
+		add_child(view)
+		visible = false    # 2D 绘制整体隐藏（逻辑照跑）；CanvasLayer 上的 HUD 不受影响
 	if "--test" in OS.get_cmdline_user_args():
 		_wave_mgr.wave_timer = 999.0    # 测试期间不来波次，保证断言确定性
 		_run_test()
@@ -159,8 +165,8 @@ func _process(delta: float) -> void:
 	_update_buttons()
 	_update_labels()
 	_update_panel()
-	portraits.queue_redraw()
 	_update_camera(delta)
+	hud.refresh()
 	if _hud_msg_t > 0.0:
 		_hud_msg_t -= delta
 		_hud_msg_label.visible = _hud_msg_t > 0.0
@@ -179,6 +185,16 @@ func _update_camera(delta: float) -> void:
 		dir.y -= 1.0
 	elif m.y > vp.y - CAM_EDGE:
 		dir.y += 1.0
+	if Input.is_key_pressed(KEY_LEFT):
+		dir.x -= 1.0
+	if Input.is_key_pressed(KEY_RIGHT):
+		dir.x += 1.0
+	if Input.is_key_pressed(KEY_UP):
+		dir.y -= 1.0
+	if Input.is_key_pressed(KEY_DOWN):
+		dir.y += 1.0
+	if not get_window().has_focus() or DisplayServer.get_name() == "headless":
+		dir = Vector2.ZERO
 	if dir != Vector2.ZERO:
 		cam.position += dir.normalized() * CAM_SPEED * 60.0 * delta / cam.zoom.x
 	var half := vp / cam.zoom / 2.0
@@ -244,27 +260,33 @@ func _unhandled_input(event: InputEvent) -> void:
 			if event.pressed:
 				if _placing_kind != "":
 					# 0=成功落工地 / 2=买不起 → 结束放置模式；1=位置不合适 → 可以再点
-					var r := _build_mgr.try_place(_placing_kind, _to_world(event.position), _build_eng)
+					var r := _build_mgr.try_place(_placing_kind, _screen_to_world(event.position), _build_eng)
 					if r != 1:
 						_placing_kind = ""
 					queue_redraw()
 				else:
-					_drag_start = _to_world(event.position)
+					_drag_start = _screen_to_world(event.position)
+					_drag_start_screen = event.position
 					_dragging = true
 					queue_redraw()
 			elif _dragging:
 				_dragging = false
-				var rect := Rect2(_drag_start, _to_world(event.position) - _drag_start).abs()
-				if rect.size.length() > 10.0 / cam.zoom.x:    # 拖框阈值也按缩放换算
-					_box_select(rect)
+				if view != null:
+					_release_select_3d(event.position)
 				else:
-					_point_select(_to_world(event.position))
+					var rect := Rect2(_drag_start, _to_world(event.position) - _drag_start).abs()
+					if rect.size.length() > 10.0 / cam.zoom.x:    # 拖框阈值也按缩放换算
+						_box_select(rect)
+					else:
+						_point_select(_to_world(event.position))
 				queue_redraw()
 		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 			if _placing_kind != "":
 				_hud_msg("已取消放置" + _place_name(_placing_kind))
 				_placing_kind = ""
 				queue_redraw()
+			elif view != null:
+				_right_click_3d(event.position)
 			else:
 				_issue_command(_to_world(event.position))
 	elif event is InputEventMouseMotion and _dragging:
@@ -277,6 +299,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.keycode == KEY_C and not event.echo:
 			_panel_on = not _panel_on
 			_update_panel()
+		elif event.keycode == KEY_F1 and not event.echo:
+			hud.toggle_help()
 		# 编队：Ctrl+数字 存队，数字键 召回
 		elif event.keycode >= KEY_1 and event.keycode <= KEY_9:
 			var idx := int(event.keycode) - int(KEY_1)
@@ -289,7 +313,52 @@ func _unhandled_input(event: InputEvent) -> void:
 func _to_world(screen: Vector2) -> Vector2:
 	return cam.get_canvas_transform().affine_inverse() * screen
 
+## 3D 模式：屏幕点 → 地面逻辑坐标；2D 模式同 _to_world
+func _screen_to_world(screen: Vector2) -> Vector2:
+	if view != null:
+		return view.ground_at(screen)
+	return _to_world(screen)
+
+## 3D 左键松开：拖得够远 = 屏幕框选，否则按模型投影点选（模型有高度，直接用地面点会点不中）
+func _release_select_3d(screen: Vector2) -> void:
+	var rect := Rect2(_drag_start_screen, screen - _drag_start_screen).abs()
+	if rect.size.length() > 10.0:
+		var units := view.units_in_rect(rect)
+		for u in selected:
+			if is_instance_valid(u):
+				u.selected = false
+		_clear_inspect()
+		selected = units
+		for u in selected:
+			u.selected = true
+		return
+	var hit = view.pick(screen, func(n): return n is Unit or n is Building)
+	_point_select(hit.position if hit != null else view.ground_at(screen))
+
+## 3D 右键：先按投影拾取目标（敌人/资源/建筑/工地），再把它的逻辑坐标交给原指令逻辑
+func _right_click_3d(screen: Vector2) -> void:
+	var hit = view.pick(screen, func(n): return n is Unit or n is Building or n is ResNode or n is ConstructionSite)
+	var pos: Vector2 = view.ground_at(screen)
+	if hit != null and not (hit is Unit and hit.team == 0):
+		pos = hit.position
+	if selected.is_empty():
+		return
+	var attack: bool = (hit != null and hit.team == 1) if (hit is Unit or hit is Building) else _a_move_next
+	_issue_command(pos)
+	view.marker(pos, attack)
+
 func _zoom_camera(factor: float) -> void:
+	if view != null:
+		# 3D：缩放后让鼠标指着的地面点保持不动
+		var mp := get_viewport().get_mouse_position()
+		var before := view.ground_at(mp)
+		cam.zoom = Vector2.ONE * clampf(cam.zoom.x * factor, CAM_MIN_ZOOM, CAM_MAX_ZOOM)
+		view.snap_camera()
+		cam.position += before - view.ground_at(mp)
+		_update_camera(0.0)
+		view.snap_camera()
+		return
+
 	var vp := get_viewport_rect().size
 	var m := get_viewport().get_mouse_position()
 	var world := cam.get_global_mouse_position()
@@ -509,117 +578,10 @@ func _player_engineers() -> Array:
 
 ## ================================ UI ================================
 func _build_ui() -> void:
-	ui = CanvasLayer.new()
-	add_child(ui)
-
-	# 深木色横条垫底，标签放上面才看得清（KR 的 UI 就是深板 + 奶油字）
-	var top_strip := ColorRect.new()
-	top_strip.color = Color(0.13, 0.1, 0.07, 0.6)
-	top_strip.position = Vector2.ZERO
-	top_strip.size = Vector2(W, 64)
-	top_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ui.add_child(top_strip)
-
-	var bottom_strip := ColorRect.new()
-	bottom_strip.color = Color(0.13, 0.1, 0.07, 0.6)
-	bottom_strip.position = Vector2(0, H - 72)
-	bottom_strip.size = Vector2(W, 72)
-	bottom_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ui.add_child(bottom_strip)
-
-	res_label = Label.new()
-	res_label.position = Vector2(16, 10)
-	res_label.add_theme_font_size_override("font_size", 18)
-	res_label.add_theme_color_override("font_color", Color(0.96, 0.92, 0.8))
-	ui.add_child(res_label)
-
-	wave_label = Label.new()
-	wave_label.position = Vector2(W - 320, 10)
-	wave_label.add_theme_font_size_override("font_size", 18)
-	wave_label.add_theme_color_override("font_color", Color(0.96, 0.92, 0.8))
-	ui.add_child(wave_label)
-
-	var tip := Label.new()
-	tip.text = "左键点选 / 拖框群选 · 点基地=造农民、点兵营=出兵、点工程师=建设施（仓库/熔炉/木工台/兵营） · 右键：空地=移动，矿/树=农民去采，己方仓库/熔炉/木工台=农民改送那里，敌人=攻击 · C 键=产能面板"
-	tip.position = Vector2(16, 42)
-	tip.add_theme_font_size_override("font_size", 13)
-	tip.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85))
-	ui.add_child(tip)
-
-	_hud_msg_label = Label.new()
-	_hud_msg_label.position = Vector2(W / 2 - 260, 72)
-	_hud_msg_label.size = Vector2(520, 30)
-	_hud_msg_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hud_msg_label.add_theme_font_size_override("font_size", 19)
-	_hud_msg_label.add_theme_color_override("font_color", Color(0.95, 0.8, 0.3))
-	_hud_msg_label.visible = false
-	ui.add_child(_hud_msg_label)
-
-	var bar := HBoxContainer.new()
-	bar.position = Vector2(16, H - 64)
-	bar.add_theme_constant_override("separation", 8)
-	ui.add_child(bar)
-
-	btn_worker = _mk_btn(bar, "造农民 30木", _on_worker_pressed)
-	btn_warehouse = _mk_btn(bar, "建仓库 60木", _on_warehouse_pressed)
-	btn_smelter = _mk_btn(bar, "建熔炉 40矿40木", _on_smelter_pressed)
-	btn_workshop = _mk_btn(bar, "木工台 20矿60木", _on_workshop_pressed)
-	btn_barracks = _mk_btn(bar, "建兵营 80矿60木", _on_barracks_pressed)
-	btn_sword = _mk_btn(bar, "剑士 40矿20木", _on_sword_pressed)
-	btn_archer = _mk_btn(bar, "弓手 30矿40木", _on_archer_pressed)
-	for b in [btn_worker, btn_warehouse, btn_smelter,
-			btn_workshop, btn_barracks, btn_sword, btn_archer]:
-		b.visible = false    # 按钮跟着选中对象出现（点基地/兵营/工程师）
-
-	# ---- 底部信息栏：点选单位 = 头像 + 数值；框选 = 头像排排站 ----
-	info_label = Label.new()
-	info_label.position = Vector2(608, H - 50)
-	info_label.add_theme_font_size_override("font_size", 15)
-	info_label.add_theme_color_override("font_color", Color(0.96, 0.92, 0.8))
-	ui.add_child(info_label)
-
-	portraits = Node2D.new()
-	ui.add_child(portraits)
-	portraits.draw.connect(_draw_portraits)
-
-	# ---- 产能面板（C 键开关）：基建看得见瓶颈才有得调 ----
-	panel = ColorRect.new()
-	panel.color = Color(0.13, 0.1, 0.07, 0.74)
-	panel.position = Vector2(W - 258, H - 210)
-	panel.size = Vector2(248, 148)
-	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ui.add_child(panel)
-	panel_label = Label.new()
-	panel_label.position = panel.position + Vector2(14, 10)
-	panel_label.add_theme_font_size_override("font_size", 14)
-	panel_label.add_theme_color_override("font_color", Color(0.96, 0.92, 0.8))
-	ui.add_child(panel_label)
-
-	overlay = ColorRect.new()
-	overlay.color = Color(0, 0, 0, 0.65)
-	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
-	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	overlay.visible = false
-	ui.add_child(overlay)
-
-	overlay_label = Label.new()
-	overlay_label.position = Vector2(W / 2 - 260, H / 2 - 60)
-	overlay_label.add_theme_font_size_override("font_size", 42)
-	overlay.add_child(overlay_label)
-
-	var restart := Button.new()
-	restart.text = "再来一局"
-	restart.position = Vector2(W / 2 - 60, H / 2 + 40)
-	restart.pressed.connect(func(): get_tree().reload_current_scene())
-	overlay.add_child(restart)
-
-func _mk_btn(parent: Control, text: String, cb: Callable) -> Button:
-	var b := Button.new()
-	b.text = text
-	b.add_theme_font_size_override("font_size", 15)
-	b.pressed.connect(cb)
-	parent.add_child(b)
-	return b
+	hud = Hud.new(self)
+	add_child(hud)
+	ui = hud
+	hud.build()    # 建好后 res_label / wave_label / info_label / btn_* / panel / overlay 等都已挂到 main 上
 
 ## ================================ 生产 ================================
 ## 点中的玩家建筑（基地出农民 / 兵营出兵）
@@ -775,14 +737,9 @@ func _selected_info_text() -> String:
 	return "已选中 %d 个：%s" % [list.size(), "  ".join(parts)]
 
 func _update_labels() -> void:
-	var list := _display_list()
 	var txt := _selected_info_text()
 	info_label.visible = txt != ""
 	info_label.text = txt
-	if list.size() == 1:
-		info_label.position = Vector2(668, H - 50)   # 单选：头像右边一行数值
-	else:
-		info_label.position = Vector2(608, H - 70)   # 多选：数量统计放头像排上方
 	var eng_txt := "英雄·工程 上阵"
 	if not respawn_timers.is_empty():
 		eng_txt = "英雄·工程 复活 %ds" % int(maxf(respawn_timers[0], 0.0))
@@ -850,96 +807,6 @@ func _has_processor(kind: String) -> bool:
 		if is_instance_valid(b) and b.kind == kind:
 			return true
 	return false
-
-## 选中头像：和场上同款的 KR 小人半身像（肩膀 + 大头 + 帽子）+ 血条
-func _draw_portraits() -> void:
-	var list := _display_list()
-	if list.is_empty():
-		return
-	var y := H - 34.0
-	var shown := mini(list.size(), 9)
-	for i in shown:
-		var u = list[i]
-		var cx := 616.0 + i * 46.0
-		portraits.draw_circle(Vector2(cx, y), 21.0, Color(0.2, 0.14, 0.1))      # 深色底圈
-		# 建筑：小房子头像（墙 + 屋顶 + 门）
-		if u is Building:
-			var roof_c: Color = Building.COLORS.get(u.kind, Color.GRAY)
-			portraits.draw_rect(Rect2(cx - 10, y - 2, 20, 16), Color(0.92, 0.84, 0.66))
-			portraits.draw_rect(Rect2(cx - 10, y - 2, 20, 16), Color(0.2, 0.14, 0.1), false, 2.0)
-			portraits.draw_colored_polygon(PackedVector2Array([
-				Vector2(cx - 13, y - 2), Vector2(cx + 13, y - 2), Vector2(cx, y - 16)
-			]), roof_c)
-			portraits.draw_polyline(PackedVector2Array([
-				Vector2(cx - 13, y - 2), Vector2(cx, y - 16), Vector2(cx + 13, y - 2), Vector2(cx - 13, y - 2)
-			]), Color(0.2, 0.14, 0.1), 2.0)
-			portraits.draw_rect(Rect2(cx - 3, y + 6, 6, 8), Color(0.5, 0.36, 0.2))
-			_portrait_hp(u, cx, y)
-			continue
-		# Goo 是黏液怪，画同款无脸黏液堆头像
-		if u is Goo:
-			portraits.draw_circle(Vector2(cx, y + 2), 10.5, Color(0.2, 0.14, 0.1))
-			portraits.draw_circle(Vector2(cx - 3, y - 3), 5.5, Color(0.2, 0.14, 0.1))
-			portraits.draw_circle(Vector2(cx, y + 2), 9.0, u.body_color)
-			portraits.draw_circle(Vector2(cx - 3, y - 3), 4.0, u.body_color)
-			portraits.draw_circle(Vector2(cx - 4, y - 4), 2.2, Color(0.72, 0.93, 0.55))
-			_portrait_hp(u, cx, y)
-			continue
-		portraits.draw_circle(Vector2(cx, y), 19.0, Color(0.88, 0.8, 0.62))       # 米色底
-		# 认兵种：躯干色 + 帽子
-		var torso: Color = u.body_color
-		var hat := "none"
-		if u is Worker:
-			torso = Color(0.7, 0.6, 0.38)
-			hat = "straw"
-		elif u is Engineer:
-			torso = Color(0.82, 0.46, 0.2)
-			hat = "hardhat"
-		elif u is Soldier:
-			if u.is_ranged:
-				torso = Color(0.5, 0.56, 0.6)
-				hat = "hood"
-			else:
-				torso = Color(0.44, 0.52, 0.62)
-				hat = "helm"
-		# 肩膀（躯干）
-		portraits.draw_rect(Rect2(cx - 9, y + 5, 18, 14), Color(0.2, 0.14, 0.1))
-		portraits.draw_rect(Rect2(cx - 7.5, y + 6.5, 15, 11), torso)
-		# 大头
-		var head := Vector2(cx, y - 4)
-		portraits.draw_circle(head, 8.0, Color(0.2, 0.14, 0.1))
-		portraits.draw_circle(head, 6.8, Unit.SKIN)
-		# 帽子（和场上同款，脸保持干净不画五官）
-		match hat:
-			"straw":
-				portraits.draw_set_transform(head + Vector2(0, -2.5), 0.0, Vector2(1.8, 0.5))
-				portraits.draw_circle(Vector2.ZERO, 7.0, Color(0.78, 0.66, 0.36))
-				portraits.draw_arc(Vector2.ZERO, 7.0, 0, TAU, 32, Unit.OUTLINE, 1.4)
-				portraits.draw_set_transform(head + Vector2(0, -3.5), 0.0, Vector2(1.0, 0.8))
-				portraits.draw_circle(Vector2.ZERO, 3.8, Color(0.84, 0.73, 0.44))
-				portraits.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-			"helm":
-				portraits.draw_set_transform(head + Vector2(0, -1.5), 0.0, Vector2(1.05, 0.9))
-				portraits.draw_circle(Vector2.ZERO, 6.2, Color(0.6, 0.63, 0.68))
-				portraits.draw_arc(Vector2.ZERO, 6.2, 0, TAU, 24, Unit.OUTLINE, 1.6)
-				portraits.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-			"hardhat":
-				portraits.draw_set_transform(head + Vector2(0, -2.0), 0.0, Vector2(1.15, 0.85))
-				portraits.draw_circle(Vector2.ZERO, 5.8, Color(0.85, 0.68, 0.25))
-				portraits.draw_arc(Vector2.ZERO, 5.8, 0, TAU, 24, Unit.OUTLINE, 1.6)
-				portraits.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-				portraits.draw_rect(Rect2(cx - 8.5, head.y - 3.2, 17.0, 2.0), Color(0.85, 0.68, 0.25))
-			"hood":
-				portraits.draw_circle(head, 7.4, Color(0.34, 0.44, 0.5))
-				portraits.draw_circle(head + Vector2(1.0, 1.5), 5.0, Unit.SKIN)
-		_portrait_hp(u, cx, y)
-	if list.size() > 9:
-		portraits.draw_string(ThemeDB.fallback_font, Vector2(616.0 + 9 * 46.0, y + 6),
-			"+%d" % (list.size() - 9), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.96, 0.92, 0.8))
-
-func _portrait_hp(u, cx: float, y: float) -> void:
-	portraits.draw_rect(Rect2(cx - 15.0, y + 24.0, 30.0, 3.0), Color(0, 0, 0, 0.5))
-	portraits.draw_rect(Rect2(cx - 15.0, y + 24.0, 30.0 * clampf(u.hp / u.max_hp, 0.0, 1.0), 3.0), Color(0.3, 0.9, 0.3))
 
 ## ================================ 绘制 ================================
 func _draw() -> void:
