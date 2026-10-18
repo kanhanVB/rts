@@ -345,7 +345,7 @@ func _art_draw(key: String) -> void:
 			Art.draw(self, "fx/hit", to - Vector2(0, 10), 10.0 + 12.0 * p, false, Color(1, 1, 1, 1.2 - p))
 	# 血条：掉血或选中时显示
 	if hp < max_hp or selected:
-		Art.hp_bar(self, feet - Vector2(0, h + 8.0), 26.0, hp / max_hp, team == 0)
+		Art.hp_bar(self, feet - Vector2(0, h + 6.0), 20.0, hp / max_hp, team == 0)
 
 ## 子类覆写：贴图之外的附加物（农民头顶的货、交货点蓝点）
 func _art_extra(_feet: Vector2, _h: float) -> void:

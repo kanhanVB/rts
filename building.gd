@@ -120,7 +120,7 @@ func _art_draw() -> bool:
 			w *= float(Art.info(key).w) / nw
 	var h := Art.draw_w(self, key, foot + Vector2(shake, 0), w, mod)
 	if hp < max_hp or selected:
-		Art.hp_bar(self, foot - Vector2(0, h + 6.0), size * 0.8, hp / max_hp, team == 0)
+		Art.hp_bar(self, foot - Vector2(0, h + 6.0), size * 0.7, hp / max_hp, team == 0, 4.0)
 	return true
 
 func _draw() -> void:

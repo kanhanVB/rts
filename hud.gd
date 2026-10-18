@@ -540,10 +540,9 @@ class Portraits extends Control:
 		else:
 			draw_arc(c, rad - 2.0, 0, TAU, 40, Hud.GOLD, 3.0)
 		var hb := Rect2(r.position.x + 4.0, r.end.y + 3.0, r.size.x - 8.0, bar_h)
-		draw_rect(hb, Hud.INK)
 		var ratio := clampf(u.hp / u.max_hp, 0.0, 1.0)
-		var bc := Color(0.4, 0.9, 0.3) if ratio > 0.5 else (Color(0.95, 0.8, 0.25) if ratio > 0.25 else Color(0.95, 0.3, 0.2))
-		draw_rect(Rect2(hb.position + Vector2(1, 1), Vector2((hb.size.x - 2.0) * ratio, hb.size.y - 2.0)), bc)
+		draw_rect(hb, Art.HP_BG)
+		draw_rect(Rect2(hb.position + Vector2(1, 1), Vector2((hb.size.x - 2.0) * ratio, hb.size.y - 2.0)), Art.hp_color(ratio, not enemy))
 
 ## 小地图：整张地图缩略图 + 建筑/单位/资源点 + 当前视野框，点击/拖动跳转镜头
 class Minimap extends Control:

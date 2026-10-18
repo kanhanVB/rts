@@ -49,10 +49,10 @@ func _art_draw() -> bool:
 		top = minf(top, foot.y - h * frac)
 	# 进度条 + 状态字
 	var by := top - 10.0
-	draw_rect(Rect2(-size * 0.45 - 1, by - 1, size * 0.9 + 2, 7), Art.OUTLINE)
-	draw_rect(Rect2(-size * 0.45, by, size * 0.9 * progress, 5), Color(1.0, 0.82, 0.3))
+	draw_rect(Rect2(-size * 0.35 - 1, by - 1, size * 0.7 + 2, 6), Art.HP_BG)
+	draw_rect(Rect2(-size * 0.35, by, size * 0.7 * progress, 4), Color(0.9, 0.76, 0.4))
 	if hp < max_hp:
-		Art.hp_bar(self, Vector2(0, by - 8.0), size * 0.9, hp / max_hp, true)
+		Art.hp_bar(self, Vector2(0, by - 8.0), size * 0.7, hp / max_hp, true, 4.0)
 	var txt := "等待工程师" if assigned == null else "施工中 %d%%" % int(progress * 100.0)
 	Art.text(self, Vector2(0, by - (16.0 if hp < max_hp else 5.0)), txt, 13)
 	return true

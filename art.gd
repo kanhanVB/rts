@@ -107,13 +107,23 @@ static func text(ci: CanvasItem, pos: Vector2, s: String, size := 13, col := Col
 	ci.draw_string(f, Vector2(x, pos.y), s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
 
 ## KR 式血条：深色底 + 亮色条
-static func hp_bar(ci: CanvasItem, center: Vector2, w: float, ratio: float, friendly := true) -> void:
-	var r := Rect2(center.x - w * 0.5, center.y, w, 5.0)
-	ci.draw_rect(r.grow(1.0), OUTLINE)
-	ci.draw_rect(r, Color(0.35, 0.08, 0.05))
-	var c := Color(0.45, 0.9, 0.25) if friendly else Color(0.95, 0.3, 0.2)
-	ci.draw_rect(Rect2(r.position, Vector2(w * clampf(ratio, 0.0, 1.0), 5.0)), c)
-	ci.draw_rect(Rect2(r.position, Vector2(w * clampf(ratio, 0.0, 1.0), 1.6)), c.lightened(0.35))
+static func hp_bar(ci: CanvasItem, center: Vector2, w: float, ratio: float, friendly := true, th := 3.0) -> void:
+	# 简约血条：细条 + 半透明深底，不描边、不加高光
+	var r := Rect2(center.x - w * 0.5, center.y, w, th)
+	ci.draw_rect(r.grow(1.0), HP_BG)
+	ci.draw_rect(Rect2(r.position, Vector2(w * clampf(ratio, 0.0, 1.0), th)), hp_color(ratio, friendly))
+
+const HP_BG := Color(0.1, 0.08, 0.06, 0.55)
+
+## 血条颜色：友军 绿 → 黄（半血）→ 红（残血），敌人一律暗红；都压低饱和，和画风一致
+static func hp_color(ratio: float, friendly := true) -> Color:
+	if not friendly:
+		return Color(0.82, 0.34, 0.27)
+	if ratio > 0.5:
+		return Color(0.58, 0.78, 0.38)
+	if ratio > 0.25:
+		return Color(0.88, 0.72, 0.32)
+	return Color(0.82, 0.34, 0.27)
 
 ## 脚下椭圆：投影 / 选中圈
 static func ellipse(ci: CanvasItem, center: Vector2, rx: float, col: Color, filled := true, width := 2.0) -> void:
