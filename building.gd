@@ -47,11 +47,47 @@ func _ready() -> void:
 
 func take_damage(amount: float, _from: Node2D = null) -> void:
 	hp -= amount
+	_hurt_until = Time.get_ticks_msec() + 160
 	queue_redraw()
 	if hp <= 0.0:
+		if not is_queued_for_deletion():
+			Fx.spawn(get_parent(), "dust", position + Vector2(0, size * 0.2), {"size": size * 1.6, "life": 0.8})
 		queue_free()
 
+## 挨打抖动 / 选中圈要持续刷新（便宜：只在需要时重画）
+var _was_selected := false
+func _process(_delta: float) -> void:
+	if Time.get_ticks_msec() < _hurt_until + 40 or selected != _was_selected:
+		_was_selected = selected
+		queue_redraw()
+
+## ---------- 贴图版 ----------
+const ART_W := 1.85            # 贴图显示宽度 = size × 这个系数
+var _hurt_until := 0
+
+func _art_draw() -> bool:
+	var key := "buildings/" + kind
+	if hp < max_hp * 0.5 and Art.has(key + "_damaged"):
+		key += "_damaged"
+	if not Art.has(key):
+		return false
+	var foot := Vector2(0, size * 0.42)
+	Art.ellipse(self, foot - Vector2(0, 4), size * 0.85, Color(0.05, 0.1, 0.02, 0.3))
+	if selected:
+		Art.ellipse(self, foot - Vector2(0, 4), size * 0.95, Color(0.55, 1.0, 0.35) if team == 0 else Color(1.0, 0.35, 0.25), false, 3.0)
+	var shake := 0.0
+	var mod := Color.WHITE
+	if Time.get_ticks_msec() < _hurt_until:
+		shake = sin(Time.get_ticks_msec() * 0.08) * 2.0
+		mod = Color(1.0, 0.75, 0.7)
+	var h := Art.draw_w(self, key, foot + Vector2(shake, 0), size * ART_W, mod)
+	if hp < max_hp or selected:
+		Art.hp_bar(self, foot - Vector2(0, h + 6.0), size * 0.8, hp / max_hp, team == 0)
+	return true
+
 func _draw() -> void:
+	if _art_draw():
+		return
 	# 选中白圈
 	if selected:
 		draw_arc(Vector2.ZERO, size * 0.78, 0, TAU, 36, Color(1, 1, 1, 0.9), 2.5)

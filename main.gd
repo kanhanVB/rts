@@ -69,8 +69,8 @@ var panel: Control           # 产能面板（C 键开关）
 var panel_label: Label
 var _panel_on := true
 var hud: Hud                 # 王国保卫战风格 HUD（hud.gd）
-var view: View3D = null      # 3D 表现层（view3d.gd）；--2d 启动时为 null，退回原 2D 画面
-var _drag_start_screen := Vector2.ZERO
+var _decor: Array = []       # 地图装饰：[{key, pos, flip}]（纯视觉）
+var _markers: Array = []     # 右键落点圈：[{pos, t0, attack}]
 
 func _ready() -> void:
 	add_to_group("game")
@@ -83,10 +83,14 @@ func _ready() -> void:
 	_build_map()
 	_build_ui()
 	_build_camera()
-	if not "--2d" in OS.get_cmdline_user_args():
-		view = View3D.new(self)
-		add_child(view)
-		visible = false    # 2D 绘制整体隐藏（逻辑照跑）；CanvasLayer 上的 HUD 不受影响
+	if "--noart" in OS.get_cmdline_user_args():
+		Art.enabled = false    # 对比用：退回原来的程序化色块画法
+	# 贴图有高度，必须按 y 排序（靠下的挡住靠上的）；建筑/工地挂在 BuildManager 下，一起参与排序
+	y_sort_enabled = true
+	_build_mgr.y_sort_enabled = true
+	_build_decor()
+	if Art.has("ui/cursor") and DisplayServer.get_name() != "headless":
+		Input.set_custom_mouse_cursor(Art.tex("ui/cursor"), Input.CURSOR_ARROW, Vector2(4, 2))
 	if "--test" in OS.get_cmdline_user_args():
 		_wave_mgr.wave_timer = 999.0    # 测试期间不来波次，保证断言确定性
 		_run_test()
@@ -260,35 +264,33 @@ func _unhandled_input(event: InputEvent) -> void:
 			if event.pressed:
 				if _placing_kind != "":
 					# 0=成功落工地 / 2=买不起 → 结束放置模式；1=位置不合适 → 可以再点
-					var r := _build_mgr.try_place(_placing_kind, _screen_to_world(event.position), _build_eng)
+					var r := _build_mgr.try_place(_placing_kind, _to_world(event.position), _build_eng)
 					if r != 1:
 						_placing_kind = ""
 					queue_redraw()
 				else:
-					_drag_start = _screen_to_world(event.position)
-					_drag_start_screen = event.position
+					_drag_start = _to_world(event.position)
 					_dragging = true
 					queue_redraw()
 			elif _dragging:
 				_dragging = false
-				if view != null:
-					_release_select_3d(event.position)
+				var rect := Rect2(_drag_start, _to_world(event.position) - _drag_start).abs()
+				if rect.size.length() > 10.0 / cam.zoom.x:    # 拖框阈值也按缩放换算
+					_box_select(rect)
 				else:
-					var rect := Rect2(_drag_start, _to_world(event.position) - _drag_start).abs()
-					if rect.size.length() > 10.0 / cam.zoom.x:    # 拖框阈值也按缩放换算
-						_box_select(rect)
-					else:
-						_point_select(_to_world(event.position))
+					_point_select(_pick_at(_to_world(event.position)))
 				queue_redraw()
 		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 			if _placing_kind != "":
 				_hud_msg("已取消放置" + _place_name(_placing_kind))
 				_placing_kind = ""
 				queue_redraw()
-			elif view != null:
-				_right_click_3d(event.position)
-			else:
-				_issue_command(_to_world(event.position))
+			elif not selected.is_empty():
+				var pos := _pick_at(_to_world(event.position), true)
+				var t := _thing_at(pos)
+				var attack: bool = _a_move_next or ((t is Unit or t is Building) and t.team == 1)
+				_issue_command(pos)
+				_markers.append({"pos": pos, "t0": Time.get_ticks_msec(), "attack": attack})
 	elif event is InputEventMouseMotion and _dragging:
 		queue_redraw()
 	elif event is InputEventKey and event.pressed:
@@ -313,51 +315,36 @@ func _unhandled_input(event: InputEvent) -> void:
 func _to_world(screen: Vector2) -> Vector2:
 	return cam.get_canvas_transform().affine_inverse() * screen
 
-## 3D 模式：屏幕点 → 地面逻辑坐标；2D 模式同 _to_world
-func _screen_to_world(screen: Vector2) -> Vector2:
-	if view != null:
-		return view.ground_at(screen)
-	return _to_world(screen)
-
-## 3D 左键松开：拖得够远 = 屏幕框选，否则按模型投影点选（模型有高度，直接用地面点会点不中）
-func _release_select_3d(screen: Vector2) -> void:
-	var rect := Rect2(_drag_start_screen, screen - _drag_start_screen).abs()
-	if rect.size.length() > 10.0:
-		var units := view.units_in_rect(rect)
-		for u in selected:
-			if is_instance_valid(u):
-				u.selected = false
-		_clear_inspect()
-		selected = units
-		for u in selected:
-			u.selected = true
-		return
-	var hit = view.pick(screen, func(n): return n is Unit or n is Building)
-	_point_select(hit.position if hit != null else view.ground_at(screen))
-
-## 3D 右键：先按投影拾取目标（敌人/资源/建筑/工地），再把它的逻辑坐标交给原指令逻辑
-func _right_click_3d(screen: Vector2) -> void:
-	var hit = view.pick(screen, func(n): return n is Unit or n is Building or n is ResNode or n is ConstructionSite)
-	var pos: Vector2 = view.ground_at(screen)
-	if hit != null and not (hit is Unit and hit.team == 0):
-		pos = hit.position
-	if selected.is_empty():
-		return
-	var attack: bool = (hit != null and hit.team == 1) if (hit is Unit or hit is Building) else _a_move_next
-	_issue_command(pos)
-	view.marker(pos, attack)
+## 点中贴图：单位/建筑的贴图比碰撞圈高得多，点在头顶、屋顶上也要算点中。
+## 命中就返回它的逻辑坐标（交给原来的点选/指令逻辑），否则原样返回
+func _pick_at(world: Vector2, include_res := false) -> Vector2:
+	if not Art.enabled:
+		return world
+	var best = null
+	var best_y := -INF
+	var tree := get_tree()
+	for u in tree.get_nodes_in_group("units"):
+		var h: float = Unit.ART_H.get(u._art_key(), 0.0)
+		if h <= 0.0:
+			continue
+		var d: Vector2 = world - u.position
+		if absf(d.x) < u.radius * 1.4 and d.y > -h + u.radius * 0.4 and d.y < u.radius * 0.9 and u.position.y > best_y:
+			best = u
+			best_y = u.position.y
+	for g in (["buildings", "sites", "res_nodes"] if include_res else ["buildings"]):
+		for b in tree.get_nodes_in_group(g):
+			var d: Vector2 = world - b.position
+			var hit := false
+			if b is ResNode:
+				hit = absf(d.x) < 22.0 and d.y > -56.0 and d.y < 14.0
+			else:
+				hit = absf(d.x) < b.size * 0.8 and d.y > -b.size * 1.5 and d.y < b.size * 0.45
+			if hit and b.position.y > best_y:
+				best = b
+				best_y = b.position.y
+	return best.position if best != null else world
 
 func _zoom_camera(factor: float) -> void:
-	if view != null:
-		# 3D：缩放后让鼠标指着的地面点保持不动
-		var mp := get_viewport().get_mouse_position()
-		var before := view.ground_at(mp)
-		cam.zoom = Vector2.ONE * clampf(cam.zoom.x * factor, CAM_MIN_ZOOM, CAM_MAX_ZOOM)
-		view.snap_camera()
-		cam.position += before - view.ground_at(mp)
-		_update_camera(0.0)
-		view.snap_camera()
-		return
 
 	var vp := get_viewport_rect().size
 	var m := get_viewport().get_mouse_position()
@@ -809,32 +796,93 @@ func _has_processor(kind: String) -> bool:
 	return false
 
 ## ================================ 绘制 ================================
+## 地图装饰：固定随机种子撒灌木/花丛/石头/篱笆，避开土路、建筑、资源点和边缘树林
+func _build_decor() -> void:
+	_decor.clear()
+	var keys := ["decor/bush_1", "decor/bush_2", "decor/flowers", "decor/flowers", "decor/rock_1", "decor/fence"]
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 20261018
+	var tries := 0
+	while _decor.size() < 34 and tries < 2000:
+		tries += 1
+		var p := Vector2(rng.randf_range(140, W - 140), rng.randf_range(90, H - 100))
+		var ok := true
+		for i in DIRT_PATH.size() - 1:
+			if Geometry2D.get_closest_point_to_segment(p, DIRT_PATH[i], DIRT_PATH[i + 1]).distance_to(p) < 52.0:
+				ok = false
+				break
+		for n in get_tree().get_nodes_in_group("res_nodes"):
+			if n.position.distance_to(p) < 46.0:
+				ok = false
+		for b in get_tree().get_nodes_in_group("buildings"):
+			if b.position.distance_to(p) < b.size + 30.0:
+				ok = false
+		for d in _decor:
+			if d.pos.distance_to(p) < 60.0:
+				ok = false
+		if ok:
+			_decor.append({"key": keys[rng.randi() % keys.size()], "pos": p, "flip": rng.randf() < 0.5})
+	_decor.sort_custom(func(a, b): return a.pos.y < b.pos.y)
+
+const DECOR_H := {"decor/bush_1": 26.0, "decor/bush_2": 26.0, "decor/flowers": 16.0, "decor/rock_1": 16.0, "decor/fence": 20.0}
+
 func _draw() -> void:
-	# ---- 地面（Main 最先画，垫在所有节点底下）----
-	draw_rect(Rect2(0, 0, W, H), Color(0.46, 0.69, 0.34))
-	for p in GRASS_DARK:
-		draw_circle(p, 58.0, Color(0.41, 0.63, 0.29))
-	for p in GRASS_LIGHT:
-		draw_circle(p, 48.0, Color(0.52, 0.75, 0.38))
-	# 土路：基地 -> 巢穴，先粗深边再细浅心
-	var path := PackedVector2Array(DIRT_PATH)
-	draw_polyline(path, Color(0.42, 0.33, 0.22), 54.0)
-	draw_polyline(path, Color(0.56, 0.45, 0.3), 46.0)
-	for p in STONES:
-		draw_circle(p, 4.0, Color(0.52, 0.44, 0.34))
+	# ---- 地面：有手绘地图就整张铺上，否则用原来的色块草地 ----
+	if Art.has("map/map"):
+		draw_texture_rect(Art.tex("map/map"), Rect2(0, 0, W, H), false)
+		for d in _decor:
+			if Art.has(d.key):
+				Art.draw(self, d.key, d.pos, DECOR_H.get(d.key, 20.0), d.flip)
+	else:
+		draw_rect(Rect2(0, 0, W, H), Color(0.46, 0.69, 0.34))
+		for p in GRASS_DARK:
+			draw_circle(p, 58.0, Color(0.41, 0.63, 0.29))
+		for p in GRASS_LIGHT:
+			draw_circle(p, 48.0, Color(0.52, 0.75, 0.38))
+		var path := PackedVector2Array(DIRT_PATH)
+		draw_polyline(path, Color(0.42, 0.33, 0.22), 54.0)
+		draw_polyline(path, Color(0.56, 0.45, 0.3), 46.0)
+		for p in STONES:
+			draw_circle(p, 4.0, Color(0.52, 0.44, 0.34))
+
+	# ---- 右键落点圈：移动 = 绿，攻击 = 红，缩小淡出 ----
+	var now := Time.get_ticks_msec()
+	_markers = _markers.filter(func(m): return now - m.t0 < 500)
+	for m in _markers:
+		var k: float = (now - m.t0) / 500.0
+		var c: Color = Color(1.0, 0.35, 0.25) if m.attack else Color(0.55, 1.0, 0.35)
+		c.a = 1.0 - k
+		Art.ellipse(self, m.pos, 16.0 * (1.2 - k * 0.6), c, false, 3.0)
+		Art.ellipse(self, m.pos, 6.0 * (1.2 - k * 0.6), c, false, 2.0)
 
 	# ---- 拖框 ----
 	if _dragging:
 		var rect := Rect2(_drag_start, get_global_mouse_position() - _drag_start).abs()
-		draw_rect(rect, Color(1, 1, 1, 0.08))
-		draw_rect(rect, Color(1, 1, 1, 0.7), false, 1.5)
-	# ---- 放置设施的幽灵预览 ----
+		draw_rect(rect, Color(0.6, 1.0, 0.5, 0.1))
+		draw_rect(rect, Color(0.75, 1.0, 0.6, 0.85), false, 2.0 / cam.zoom.x)
+	# ---- 放置设施的幽灵预览：半透明建筑贴图，能放 = 绿，不能放 = 红 ----
 	if _placing_kind != "":
 		var p := get_global_mouse_position()
-		var half: float = 30.0    # 工地半宽
-		var r := Rect2(p - Vector2(half, half), Vector2(half * 2.0, half * 2.0))
-		draw_rect(r, Color(0.15, 0.6, 0.55, 0.5))
-		draw_rect(r, Color(1, 1, 1, 0.6), false, 1.0)
+		var ok := _placement_ok(_placing_kind, p)
+		var tint := Color(0.6, 1.0, 0.6, 0.6) if ok else Color(1.0, 0.45, 0.4, 0.6)
+		if Art.has("buildings/" + _placing_kind):
+			var sz: float = {"barracks": 60.0, "warehouse": 64.0, "smelter": 56.0, "workshop": 56.0}.get(_placing_kind, 60.0)
+			Art.ellipse(self, p + Vector2(0, sz * 0.38), sz * 0.95, Color(tint, 0.35))
+			Art.draw_w(self, "buildings/" + _placing_kind, p + Vector2(0, sz * 0.42), sz * Building.ART_W, tint)
+		else:
+			var half: float = 30.0    # 工地半宽
+			var r := Rect2(p - Vector2(half, half), Vector2(half * 2.0, half * 2.0))
+			draw_rect(r, Color(0.15, 0.6, 0.55, 0.5))
+			draw_rect(r, Color(1, 1, 1, 0.6), false, 1.0)
+
+## 放置预览用：和 BuildManager.try_place 同一套规则（只判断，不提示）
+func _placement_ok(kind: String, pos: Vector2) -> bool:
+	if pos.x < 40.0 or pos.x > W - 40.0 or pos.y < 90.0 or pos.y > H - 80.0:
+		return false
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if pos.distance_to(b.position) < b.size + 40.0:
+			return false
+	return economy.can_afford(BuildManager.COST_TABLE.get(kind, {}))
 
 ## ================================ 自测 ================================
 ## 套件本体已拆到 test_suite.gd。入口和用法不变：

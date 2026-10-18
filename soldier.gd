@@ -153,6 +153,16 @@ func command_attack_move(pos: Vector2) -> void:
 	_amove_dest = pos
 	_ignore_aggro = false
 
+## ---------- 贴图版 ----------
+func _art_key() -> String:
+	return "archer" if is_ranged else "swordsman"
+
+func _art_pose() -> String:
+	# 弓手：有目标就一直拉弓瞄着；剑士出手那一下换劈砍姿势
+	if is_ranged and (attack_anim > 0.05 or is_instance_valid(_auto_target) or is_instance_valid(attack_target)):
+		return "act"
+	return "act" if attack_anim > 0.35 else "idle"
+
 ## ---------- 绘制：KR 小人（剑士铁盔配剑 / 弓手兜帽配弓） ----------
 func _body_draw() -> void:
 	if is_ranged:

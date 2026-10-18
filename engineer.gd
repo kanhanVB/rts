@@ -159,5 +159,14 @@ func _drop_site() -> void:
 	build_site = null
 
 ## ---------- 绘制：KR 小人（橙色工装 + 黄安全帽 + 大锤） ----------
+## ---------- 贴图版 ----------
+func _art_key() -> String:
+	return "engineer"
+
+func _face_x() -> float:
+	if state == State.BUILDING and build_site != null and is_instance_valid(build_site):
+		return build_site.position.x
+	return NAN
+
 func _body_draw() -> void:
 	_kr_body(Color(0.82, 0.46, 0.2), Color(0.35, 0.3, 0.26), "hardhat", "hammer")

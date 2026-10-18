@@ -1,0 +1,354 @@
+## 由 tools/prepare_art.py 自动生成，别手改：每张图的尺寸和锚点（像素）
+class_name ArtData
+extends RefCounted
+
+const SPRITES := {
+ "units/worker_idle": {
+  "w": 160,
+  "h": 160,
+  "ax": 92.4,
+  "ay": 160
+ },
+ "units/worker_act": {
+  "w": 169,
+  "h": 170,
+  "ax": 107.3,
+  "ay": 170
+ },
+ "units/worker_carry": {
+  "w": 120,
+  "h": 182,
+  "ax": 54.7,
+  "ay": 182
+ },
+ "units/engineer_idle": {
+  "w": 153,
+  "h": 160,
+  "ax": 90.5,
+  "ay": 160
+ },
+ "units/engineer_act": {
+  "w": 154,
+  "h": 176,
+  "ax": 96.6,
+  "ay": 176
+ },
+ "units/swordsman_idle": {
+  "w": 149,
+  "h": 160,
+  "ax": 81.0,
+  "ay": 160
+ },
+ "units/swordsman_act": {
+  "w": 178,
+  "h": 147,
+  "ax": 57.4,
+  "ay": 147
+ },
+ "units/swordsman_dead": {
+  "w": 181,
+  "h": 106,
+  "ax": 90.5,
+  "ay": 106
+ },
+ "units/archer_idle": {
+  "w": 157,
+  "h": 160,
+  "ax": 80.6,
+  "ay": 160
+ },
+ "units/archer_act": {
+  "w": 173,
+  "h": 154,
+  "ax": 75.7,
+  "ay": 154
+ },
+ "units/archer_dead": {
+  "w": 177,
+  "h": 109,
+  "ax": 88.5,
+  "ay": 109
+ },
+ "units/goo_idle": {
+  "w": 169,
+  "h": 120,
+  "ax": 84.4,
+  "ay": 120
+ },
+ "units/goo_act": {
+  "w": 171,
+  "h": 126,
+  "ax": 77.1,
+  "ay": 126
+ },
+ "units/goo_dead": {
+  "w": 173,
+  "h": 64,
+  "ax": 86.5,
+  "ay": 64
+ },
+ "buildings/barracks": {
+  "w": 320,
+  "h": 280,
+  "ax": 160.0,
+  "ay": 280
+ },
+ "buildings/base": {
+  "w": 320,
+  "h": 337,
+  "ax": 160.0,
+  "ay": 337
+ },
+ "buildings/base_damaged": {
+  "w": 320,
+  "h": 331,
+  "ax": 160.0,
+  "ay": 331
+ },
+ "buildings/hive": {
+  "w": 320,
+  "h": 314,
+  "ax": 160.0,
+  "ay": 314
+ },
+ "buildings/hive_damaged": {
+  "w": 320,
+  "h": 314,
+  "ax": 160.0,
+  "ay": 314
+ },
+ "buildings/site": {
+  "w": 320,
+  "h": 256,
+  "ax": 160.0,
+  "ay": 256
+ },
+ "buildings/smelter": {
+  "w": 320,
+  "h": 338,
+  "ax": 160.0,
+  "ay": 338
+ },
+ "buildings/warehouse": {
+  "w": 320,
+  "h": 306,
+  "ax": 160.0,
+  "ay": 306
+ },
+ "buildings/workshop": {
+  "w": 320,
+  "h": 317,
+  "ax": 160.0,
+  "ay": 317
+ },
+ "resources/ore_full": {
+  "w": 160,
+  "h": 155,
+  "ax": 80.0,
+  "ay": 155
+ },
+ "resources/ore_half": {
+  "w": 160,
+  "h": 91,
+  "ax": 80.0,
+  "ay": 91
+ },
+ "resources/ore_low": {
+  "w": 105,
+  "h": 59,
+  "ax": 52.5,
+  "ay": 59
+ },
+ "resources/tree_1": {
+  "w": 254,
+  "h": 230,
+  "ax": 134.6,
+  "ay": 230
+ },
+ "resources/tree_2": {
+  "w": 141,
+  "h": 230,
+  "ax": 70.8,
+  "ay": 230
+ },
+ "resources/tree_3": {
+  "w": 182,
+  "h": 230,
+  "ax": 107.0,
+  "ay": 230
+ },
+ "decor/bush_1": {
+  "w": 128,
+  "h": 99,
+  "ax": 64.0,
+  "ay": 99
+ },
+ "decor/bush_2": {
+  "w": 128,
+  "h": 113,
+  "ax": 64.0,
+  "ay": 113
+ },
+ "decor/fence": {
+  "w": 128,
+  "h": 103,
+  "ax": 64.0,
+  "ay": 103
+ },
+ "decor/flowers": {
+  "w": 128,
+  "h": 99,
+  "ax": 64.0,
+  "ay": 99
+ },
+ "decor/rock_1": {
+  "w": 128,
+  "h": 96,
+  "ax": 64.0,
+  "ay": 96
+ },
+ "decor/stump": {
+  "w": 128,
+  "h": 103,
+  "ax": 64.0,
+  "ay": 103
+ },
+ "items/ingot": {
+  "w": 128,
+  "h": 103,
+  "ax": 64.0,
+  "ay": 51.5
+ },
+ "items/ore": {
+  "w": 113,
+  "h": 128,
+  "ax": 56.5,
+  "ay": 64.0
+ },
+ "items/plank": {
+  "w": 128,
+  "h": 123,
+  "ax": 64.0,
+  "ay": 61.5
+ },
+ "items/wood": {
+  "w": 128,
+  "h": 94,
+  "ax": 64.0,
+  "ay": 47.0
+ },
+ "fx/arrow": {
+  "w": 160,
+  "h": 38,
+  "ax": 80.0,
+  "ay": 19.0
+ },
+ "fx/dust": {
+  "w": 160,
+  "h": 137,
+  "ax": 80.0,
+  "ay": 68.5
+ },
+ "fx/goo_splat": {
+  "w": 160,
+  "h": 117,
+  "ax": 80.0,
+  "ay": 58.5
+ },
+ "fx/hit": {
+  "w": 160,
+  "h": 150,
+  "ax": 80.0,
+  "ay": 75.0
+ },
+ "ui/panel": {
+  "w": 384,
+  "h": 370,
+  "ax": 192.0,
+  "ay": 185.0
+ },
+ "ui/parchment": {
+  "w": 384,
+  "h": 360,
+  "ax": 192.0,
+  "ay": 180.0
+ },
+ "ui/portrait_frame": {
+  "w": 188,
+  "h": 192,
+  "ax": 94.0,
+  "ay": 96.0
+ },
+ "ui/banner": {
+  "w": 640,
+  "h": 97,
+  "ax": 320.0,
+  "ay": 48.5
+ },
+ "ui/icon_victory": {
+  "w": 480,
+  "h": 383,
+  "ax": 240.0,
+  "ay": 191.5
+ },
+ "ui/icon_defeat": {
+  "w": 480,
+  "h": 248,
+  "ax": 240.0,
+  "ay": 124.0
+ },
+ "ui/icon_worker": {
+  "w": 128,
+  "h": 119,
+  "ax": 64.0,
+  "ay": 59.5
+ },
+ "ui/icon_hero": {
+  "w": 126,
+  "h": 128,
+  "ax": 63.0,
+  "ay": 64.0
+ },
+ "ui/icon_wave": {
+  "w": 128,
+  "h": 127,
+  "ax": 64.0,
+  "ay": 63.5
+ },
+ "ui/cursor": {
+  "w": 38,
+  "h": 44,
+  "ax": 19.0,
+  "ay": 22.0
+ },
+ "ui/button": {
+  "w": 360,
+  "h": 106,
+  "ax": 180.0,
+  "ay": 53.0
+ },
+ "ui/button_hover": {
+  "w": 361,
+  "h": 107,
+  "ax": 180.5,
+  "ay": 53.5
+ },
+ "ui/button_pressed": {
+  "w": 361,
+  "h": 106,
+  "ax": 180.5,
+  "ay": 53.0
+ },
+ "ui/button_disabled": {
+  "w": 360,
+  "h": 107,
+  "ax": 180.0,
+  "ay": 53.5
+ },
+ "map/map": {
+  "w": 1672,
+  "h": 941,
+  "ax": 0,
+  "ay": 0
+ }
+}

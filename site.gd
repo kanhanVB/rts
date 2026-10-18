@@ -28,7 +28,38 @@ func take_damage(amount: float, _from: Node2D = null) -> void:
 		return
 	queue_redraw()
 
+## 贴图版：脚手架工地 + 目标建筑从地基往上"长"出来
+func _art_draw() -> bool:
+	if not Art.has("buildings/site"):
+		return false
+	var foot := Vector2(0, size * 0.42)
+	Art.ellipse(self, foot - Vector2(0, 4), size * 0.85, Color(0.05, 0.1, 0.02, 0.3))
+	var sh := Art.draw_w(self, "buildings/site", foot, size * 1.85)
+	var bkey := "buildings/" + kind
+	var top := foot.y - sh
+	if Art.has(bkey) and progress > 0.01:
+		var t := Art.tex(bkey)
+		var d := Art.info(bkey)
+		var w := size * 1.85
+		var h := w * float(d.h) / float(d.w)
+		var frac := clampf(progress, 0.0, 1.0)
+		var src := Rect2(0, d.h * (1.0 - frac), d.w, d.h * frac)
+		var dst := Rect2(-w * 0.5, foot.y - h * frac, w, h * frac)
+		draw_texture_rect_region(t, dst, src, Color(1, 1, 1, 0.92))
+		top = minf(top, foot.y - h * frac)
+	# 进度条 + 状态字
+	var by := top - 10.0
+	draw_rect(Rect2(-size * 0.45 - 1, by - 1, size * 0.9 + 2, 7), Art.OUTLINE)
+	draw_rect(Rect2(-size * 0.45, by, size * 0.9 * progress, 5), Color(1.0, 0.82, 0.3))
+	if hp < max_hp:
+		Art.hp_bar(self, Vector2(0, by - 8.0), size * 0.9, hp / max_hp, true)
+	var txt := "等待工程师" if assigned == null else "施工中 %d%%" % int(progress * 100.0)
+	Art.text(self, Vector2(0, by - (16.0 if hp < max_hp else 5.0)), txt, 13)
+	return true
+
 func _draw() -> void:
+	if _art_draw():
+		return
 	var dark := Color(0.16, 0.13, 0.09)
 	var r := Rect2(-size / 2.0, -size / 2.0, size, size)
 	draw_rect(r, Color(0.16, 0.66, 0.58, 0.25))

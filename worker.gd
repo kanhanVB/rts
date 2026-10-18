@@ -58,6 +58,7 @@ func _step(delta: float) -> void:
 			node_target.amount -= maxf(take, 0.0)
 			if node_target.amount <= 0.001:
 				if not node_target.is_queued_for_deletion():
+					Fx.spawn(get_parent(), "dust", node_target.position, {"size": 46.0, "life": 0.6})
 					node_target.queue_free()
 				node_target = null
 			if carry_amount >= CARRY_CAP or node_target == null:
@@ -74,7 +75,12 @@ func _step(delta: float) -> void:
 				# 加工厂把原料加工成二级材料入账，仓库/基地则原样入库（保住原料）
 				var game := get_tree().get_first_node_in_group("game")
 				if game:
-					game.economy.add(_output_kind(depot), carry_amount)
+					var out_k := _output_kind(depot)
+					game.economy.add(out_k, carry_amount)
+					# 入账漂字（纯视觉）
+					Fx.spawn(get_parent(), "floater", position + Vector2(0, -44), {"life": 1.1,
+						"text": "+%d %s" % [int(round(carry_amount)), Economy.KIND_SHORT.get(out_k, out_k)],
+						"color": Color(1.0, 0.86, 0.3) if out_k in ["ore", "ingot"] else Color(0.65, 1.0, 0.45)})
 				carry_amount = 0.0
 				# 换工种的农民交完货要按新岗位认货种，否则"扛着木材去挖矿"会把木材记成矿石。
 				# node_target 空了就保持原货种，好让它接着找同类的下一处（树砍完换棵树）
@@ -215,6 +221,32 @@ func _nearest_node(kind: String) -> ResNode:
 				best_d = d
 				best = n
 	return best
+
+## ---------- 贴图版 ----------
+func _art_key() -> String:
+	return "worker"
+
+func _art_pose() -> String:
+	if state == State.GATHERING:
+		return "act" if sin(anim_t * 0.9) > 0.0 else "idle"
+	if carry_amount > 0.5 and moving:
+		return "carry"
+	return "idle"
+
+func _face_x() -> float:
+	if state == State.GATHERING and is_instance_valid(node_target):
+		return node_target.position.x
+	return NAN
+
+func _art_extra(feet: Vector2, h: float) -> void:
+	if is_instance_valid(deliver_to):
+		# 脚下亮蓝点 = 玩家手动指派过交货点
+		Art.ellipse(self, feet + Vector2(0, 1), 4.0, Color(0.2, 0.15, 0.1))
+		Art.ellipse(self, feet + Vector2(0, 1), 3.0, Color(0.35, 0.82, 1.0))
+	if carry_amount > 0.5:
+		var item := "items/ore" if carry_kind == "ore" else "items/wood"
+		var top := feet - Vector2(-_face * 1.0, h - 2.0)
+		Art.draw(self, item, top, 13.0)
 
 ## ---------- 绘制：KR 小人（草帽 + 镐），采集时挥镐，扛货顶头上 ----------
 func _body_draw() -> void:

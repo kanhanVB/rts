@@ -233,7 +233,9 @@ func command_attack_move(pos: Vector2) -> void:
 
 func take_damage(amount: float, from: Node2D = null) -> void:
 	hp -= maxf(amount - armor, 1.0)    # 护甲减免，保底 1 点伤害
+	_hurt_until = Time.get_ticks_msec() + 140
 	if hp <= 0.0:
+		_death_fx()
 		died.emit(self)
 		queue_free()
 
@@ -241,8 +243,29 @@ func take_damage(amount: float, from: Node2D = null) -> void:
 func attack_fx_to(pos: Vector2) -> void:
 	_attack_fx.append({"to": pos, "t": 0.12})
 
-## ---------- 绘制（色块风） ----------
+## ---------- 绘制：有美术素材就画贴图（_art_draw），没有就退回色块风 ----------
+## 显示高度（像素，缩放 1 倍时）。素材是 160px 高的大图，缩小画更清晰
+const ART_H := {"worker": 40.0, "engineer": 46.0, "swordsman": 46.0, "archer": 44.0, "goo": 30.0}
+var _face := 1.0              # 朝向：1 右 / -1 左（停下也保持，不会突然转回去）
+var _hurt_until := 0          # 挨打闪红到这个时间（毫秒）
+
+## 子类覆写：素材 key（"worker" / "swordsman" ...），空串 = 没有素材
+func _art_key() -> String:
+	return ""
+
+## 子类覆写：当前用哪张姿势图（idle / act / carry）
+func _art_pose() -> String:
+	return "act" if attack_anim > 0.35 else "idle"
+
+## 子类覆写：朝向参考点（返回 NAN 表示没有，按移动方向）
+func _face_x() -> float:
+	return NAN
+
 func _draw() -> void:
+	var key := _art_key()
+	if key != "" and Art.has("units/%s_idle" % key):
+		_art_draw(key)
+		return
 	_shadow()
 	for fx in _attack_fx:
 		draw_line(Vector2.ZERO, fx.to - position, Color(1, 1, 1, 0.7), 1.5)
@@ -257,6 +280,81 @@ func _draw() -> void:
 ## 子类覆写：画自己的身体
 func _body_draw() -> void:
 	draw_circle(Vector2.ZERO, radius, body_color)
+
+## 贴图版：脚下投影/选中圈 → 身体（走路颠、待机呼吸、出手前冲、挨打闪红）→ 箭/打击火花 → 血条
+func _art_draw(key: String) -> void:
+	var fx_x := _face_x()
+	if not _attack_fx.is_empty():
+		var dx: float = _attack_fx[0].to.x - position.x
+		if absf(dx) > 1.0:
+			_face = signf(dx)
+	elif not is_nan(fx_x) and absf(fx_x - position.x) > 1.0:
+		_face = signf(fx_x - position.x)
+	elif moving and absf(move_target.x - position.x) > 2.0:
+		_face = signf(move_target.x - position.x)
+	var h: float = ART_H.get(key, 44.0)
+	var feet := Vector2(0, radius * 0.55)
+	var is_goo := key == "goo"
+	# 投影 + 选中圈
+	Art.ellipse(self, feet, radius * 1.25, Color(0.05, 0.1, 0.02, 0.32))
+	if selected:
+		var ring := Color(0.55, 1.0, 0.35) if team == 0 else Color(1.0, 0.35, 0.25)
+		Art.ellipse(self, feet, radius * 1.6, ring, false, 2.4)
+	# 身体动作
+	var now := Time.get_ticks_msec() / 1000.0
+	var bob := 0.0
+	var rot := 0.0
+	var sq := Vector2.ONE
+	if moving:
+		if is_goo:
+			var ph := absf(sin(anim_t * 0.5))
+			bob = ph * 5.0
+			sq = Vector2(1.0 - ph * 0.08 + (1.0 - ph) * 0.08, 1.0 + ph * 0.1 - (1.0 - ph) * 0.08)
+		else:
+			bob = absf(sin(anim_t * 0.6)) * 2.6
+			rot = sin(anim_t * 0.6) * 0.07
+	else:
+		var br := sin(now * 2.6 + float(get_instance_id() % 97)) * 0.025
+		sq = Vector2(1.0 - br * 0.5, 1.0 + br)
+	var lunge := attack_anim * 5.0 * _face
+	var mod := Color.WHITE
+	if Time.get_ticks_msec() < _hurt_until:
+		mod = Color(1.0, 0.5, 0.45)
+	var pose := _art_pose()
+	var pkey := "units/%s_%s" % [key, pose]
+	if not Art.has(pkey):
+		pkey = "units/%s_idle" % key
+	Art.draw(self, pkey, feet + Vector2(lunge, -bob), h, _face < 0.0, mod, rot * _face, sq)
+	_art_extra(feet, h)
+	# 攻击特效：弓手射箭，其余打击火花
+	for fx in _attack_fx:
+		var p: float = clampf(1.0 - fx.t / 0.12, 0.0, 1.0)
+		var to: Vector2 = fx.to - position
+		if atk_range > 60.0 and Art.has("fx/arrow"):
+			var from := Vector2(_face * 8.0, -h * 0.55)
+			var pt := from.lerp(to, p) - Vector2(0, sin(p * PI) * 14.0)
+			var nx := from.lerp(to, minf(p + 0.08, 1.0)) - Vector2(0, sin(minf(p + 0.08, 1.0) * PI) * 14.0)
+			Art.draw(self, "fx/arrow", pt, 5.0, false, Color.WHITE, (nx - pt).angle())
+		elif p > 0.3 and Art.has("fx/hit"):
+			Art.draw(self, "fx/hit", to - Vector2(0, 10), 10.0 + 12.0 * p, false, Color(1, 1, 1, 1.2 - p))
+	# 血条：掉血或选中时显示
+	if hp < max_hp or selected:
+		Art.hp_bar(self, feet - Vector2(0, h + 8.0), 26.0, hp / max_hp, team == 0)
+
+## 子类覆写：贴图之外的附加物（农民头顶的货、交货点蓝点）
+func _art_extra(_feet: Vector2, _h: float) -> void:
+	pass
+
+## 死亡：留一具会淡出的尸体（Goo 是一滩黏液），纯视觉
+func _death_fx() -> void:
+	var key := _art_key()
+	if key == "" or not Art.enabled or is_queued_for_deletion():
+		return
+	var par := get_parent()
+	if key == "goo":
+		Fx.spawn(par, "splat", position + Vector2(0, radius * 0.55), {"size": 34.0, "life": 1.2})
+	if Art.has("units/%s_dead" % key):
+		Fx.spawn(par, "corpse", position + Vector2(0, radius * 0.55), {"key": "units/%s_dead" % key, "size": ART_H.get(key, 44.0) * (0.75 if key != "goo" else 0.6), "flip": _face < 0.0, "life": 1.8})
 
 ## ---------- KR 风（王国保卫战）小工具：投影 / 描边 / 表情 ----------
 ## 椭圆软投影，垫在所有东西下面

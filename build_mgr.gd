@@ -1,5 +1,5 @@
 class_name BuildManager
-extends Node
+extends Node2D
 ## 建造系统：设施放置（扣款 → 工地）+ 施工完工 → 真建筑 + 工地被拆。
 ## 基建方向要加设施种类（仓库/熔炉/木工台）时，只改 COST_TABLE 和
 ## _place_label 两处，main 那边通过 building_built 信号按 kind 归类。

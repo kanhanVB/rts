@@ -14,3 +14,7 @@ window/size/viewport_height=720
 ; stretch: scale canvas from 1280x720 logical resolution
 window/stretch/mode="canvas_items"
 window/stretch/aspect="keep"
+
+[rendering]
+
+textures/canvas_textures/default_texture_filter=3

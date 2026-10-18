@@ -108,6 +108,10 @@ func _scan_target() -> Node2D:
 			best = s
 	return best
 
+## ---------- 贴图版 ----------
+func _art_key() -> String:
+	return "goo"
+
 ## ---------- 绘制：KR 黏液怪：无脸纯剪影——堆叠圆山包 + 厚描边 + 暗面色带 + 高光 ----------
 func _body_draw() -> void:
 	var s := radius / 11.0

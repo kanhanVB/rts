@@ -10,7 +10,36 @@ var radius: float = 16.0    # 绕障用的碰撞半径
 func _ready() -> void:
 	add_to_group("res_nodes")
 
+## ---------- 贴图版 ----------
+const START_AMOUNT := 250.0
+var _variant := -1
+var _stage := ""
+
+func _art_key() -> String:
+	if kind == "ore":
+		var r := amount / START_AMOUNT
+		return "resources/ore_full" if r > 0.66 else ("resources/ore_half" if r > 0.33 else "resources/ore_low")
+	if _variant < 0:
+		_variant = int(absf(position.x * 7.0 + position.y * 13.0)) % 3 + 1
+	return "resources/tree_%d" % _variant
+
+## 采矿会让矿堆变小：换档时重画
+func _process(_delta: float) -> void:
+	if kind == "ore":
+		var k := _art_key()
+		if k != _stage:
+			_stage = k
+			queue_redraw()
+
 func _draw() -> void:
+	var key := _art_key()
+	if Art.has(key):
+		Art.ellipse(self, Vector2(0, 10), 17.0, Color(0.05, 0.1, 0.02, 0.3))
+		if kind == "ore":
+			Art.draw_w(self, key, Vector2(0, 12), 44.0 * float(Art.info(key).w) / float(Art.info("resources/ore_full").w))
+		else:
+			Art.draw(self, key, Vector2(0, 12), 66.0, _variant == 2)
+		return
 	var dark := Color(0.16, 0.13, 0.09)
 	# 软投影
 	draw_set_transform(Vector2(0, 11), 0.0, Vector2(1.0, 0.4))
