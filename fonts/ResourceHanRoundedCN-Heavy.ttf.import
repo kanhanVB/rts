@@ -2,13 +2,13 @@
 
 importer="font_data_dynamic"
 type="FontFile"
-uid="uid://cgvvi6femksoe"
-path="res://.godot/imported/ZCOOLKuaiLe-Regular.ttf-873e31fe8b31803ed553173947e80596.fontdata"
+uid="uid://dbussp1bo1hx1"
+path="res://.godot/imported/ResourceHanRoundedCN-Heavy.ttf-af4d6d0062a95e29e6280ffd4b80f929.fontdata"
 
 [deps]
 
-source_file="res://fonts/ZCOOLKuaiLe-Regular.ttf"
-dest_files=["res://.godot/imported/ZCOOLKuaiLe-Regular.ttf-873e31fe8b31803ed553173947e80596.fontdata"]
+source_file="res://fonts/ResourceHanRoundedCN-Heavy.ttf"
+dest_files=["res://.godot/imported/ResourceHanRoundedCN-Heavy.ttf-af4d6d0062a95e29e6280ffd4b80f929.fontdata"]
 
 [params]
 

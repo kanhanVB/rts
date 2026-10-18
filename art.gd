@@ -69,9 +69,12 @@ static func open_point(p: Vector2) -> Vector2:
 			return best
 	return p
 
+## 圆黑粗体（接近王国保卫战：起源 中文版那种厚实圆润的 UI 字）
+const FONT_PATH := "res://fonts/ResourceHanRoundedCN-Heavy.ttf"
+
 static func font() -> Font:
 	if _font == null:
-		_font = load("res://fonts/ZCOOLKuaiLe-Regular.ttf") if ResourceLoader.exists("res://fonts/ZCOOLKuaiLe-Regular.ttf") else ThemeDB.fallback_font
+		_font = load(FONT_PATH) if ResourceLoader.exists(FONT_PATH) else ThemeDB.fallback_font
 	return _font
 
 ## 以锚点（单位=脚底，建筑=底边中心）对准 pos，按显示高度 height 画出来。

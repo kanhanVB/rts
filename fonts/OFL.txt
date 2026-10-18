@@ -1,4 +1,5 @@
-Copyright 2018 The ZCOOL KuaiLe Project Authors (https://github.com/googlefonts/zcool-kuaile)
+ResourceHanRoundedCN-Heavy.ttf（资源圆黑 / 思源柔黑，已按 GB2312 常用字精简）
+Copyright © 2018—2019 Cyano Hao (https://github.com/CyanoHao/Resource-Han-Rounded). Portions © 2014, 2015, 2018 Adobe (http://www.adobe.com/).
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:
