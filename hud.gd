@@ -14,13 +14,13 @@ const RED_TEXT := Color(1.0, 0.55, 0.45)
 
 ## 九宫格边距（原图像素：左、上、右、下）
 const SLICE := {
-	"ui/panel": [56, 56, 56, 56],
-	"ui/parchment": [44, 80, 44, 74],
-	"ui/button": [40, 36, 40, 36],
-	"ui/button_hover": [40, 36, 40, 36],
-	"ui/button_pressed": [40, 36, 40, 36],
-	"ui/button_disabled": [40, 36, 40, 36],
-	"ui/banner": [140, 22, 140, 34],
+	"ui/panel": [48, 48, 48, 48],
+	"ui/parchment": [30, 14, 30, 16],
+	"ui/button": [36, 24, 36, 24],
+	"ui/button_hover": [36, 24, 36, 24],
+	"ui/button_pressed": [36, 24, 36, 24],
+	"ui/button_disabled": [36, 24, 36, 24],
+	"ui/banner": [72, 12, 72, 40],
 }
 
 var main: Node2D

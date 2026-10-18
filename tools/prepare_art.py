@@ -73,7 +73,7 @@ def key_out(im):
 
 # 地图 / 建筑 / 树石摆设统一"压灰"，和低饱和的角色画风对上（1.0 = 不处理）
 MUTE_SAT, MUTE_VAL, MUTE_WARM = 0.55, 0.92, 0.10
-MUTED = ("map/", "buildings/", "resources/", "decor/")
+MUTED = ("map/", "resources/", "decor/")   # 建筑 / UI 是按角色画风新画的，本来就低饱和，不再压
 
 def mute(im):
     import numpy as np
@@ -127,8 +127,29 @@ for key in ["worker", "engineer", "swordsman", "archer", "goo"]:
         save(f"units/{key}_{pose}.png", im, feet_x(im) if pose != "dead" else im.size[0] / 2, im.size[1])
 
 # ---- 建筑：统一宽度，锚点 = 底边中心
-for p in glob.glob(os.path.join(SRC, "buildings/*.png")):
+def load_raw(rel):
+    im = key_out(Image.open(os.path.join(SRC, rel)).convert("RGBA"))
+    return mute(im) if rel.startswith(MUTED) else im
+
+done = set()
+for p in sorted(glob.glob(os.path.join(SRC, "buildings/*.png"))):
     rel = os.path.relpath(p, SRC)
+    if rel in done:
+        continue
+    dmg = rel[:-4] + "_damaged.png"
+    if os.path.exists(os.path.join(SRC, dmg)) and not rel.endswith("_damaged.png"):
+        # 正常 / 受损两张同画布同位置：按正常版的范围裁、同一个缩放，受损时房子不会跳
+        a, b = load_raw(rel), load_raw(dmg)
+        bb = a.getchannel("A").point(lambda v: 255 if v > 10 else 0).getbbox()
+        k = 320 / (bb[2] - bb[0])
+        for r2, im in [(rel, a), (dmg, b)]:
+            ib = im.getchannel("A").point(lambda v: 255 if v > 10 else 0).getbbox()
+            u = (min(bb[0], ib[0]), min(bb[1], ib[1]), max(bb[2], ib[2]), max(bb[3], ib[3]))
+            c = scaled(im.crop(u), k)
+            # 锚点 = 正常版底边中心（换算到这张裁剪后的坐标）
+            save(r2, c, ((bb[0] + bb[2]) / 2 - u[0]) * k, (bb[3] - u[1]) * k)
+            done.add(r2)
+        continue
     im = load(rel)
     im = scaled(im, 320 / im.size[0])
     save(rel, im, im.size[0] / 2, im.size[1])
@@ -217,6 +238,19 @@ for rel, mx in [("ui/panel.png", 384), ("ui/parchment.png", 384), ("ui/portrait_
                 ("ui/icon_worker.png", 128), ("ui/icon_hero.png", 128), ("ui/icon_wave.png", 128),
                 ("ui/cursor.png", 44)]:
     fit(rel, mx)
+# 头像框：中间那块实心底挖空（头像画在框下面，框中间不透明会把头像盖住）
+pf = os.path.join(DST, "ui/portrait_frame.png")
+if os.path.exists(os.path.join(SRC, "ui/portrait_frame.png")):
+    import numpy as np, cv2
+    a = np.asarray(Image.open(pf).convert("RGBA")).copy()
+    h, w = a.shape[:2]
+    c = a[h // 2, w // 2, :3].astype(int)
+    near = (np.abs(a[..., :3].astype(int) - c).sum(axis=2) < 60) & (a[..., 3] > 200)
+    n, lab = cv2.connectedComponents(near.astype("uint8"), connectivity=4)
+    hole = lab == lab[h // 2, w // 2]
+    hole = cv2.dilate(hole.astype("uint8"), np.ones((3, 3), np.uint8)).astype(bool)   # 带上一圈抗锯齿边
+    a[..., 3][hole] = 0
+    Image.fromarray(a, "RGBA").save(pf, optimize=True)
 btn = load("ui/button.png")
 if btn is not None:
     k = 360 / btn.size[0]

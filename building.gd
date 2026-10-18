@@ -112,7 +112,13 @@ func _art_draw() -> bool:
 	if Time.get_ticks_msec() < _hurt_until:
 		shake = sin(Time.get_ticks_msec() * 0.08) * 2.0
 		mod = Color(1.0, 0.75, 0.7)
-	var h := Art.draw_w(self, key, foot + Vector2(shake, 0), size * ART_W, mod)
+	# 受损版和正常版同一比例导出：按两张图宽度之比画，换图时房子不会缩放跳动
+	var w := size * ART_W
+	if key.ends_with("_damaged"):
+		var nw: float = Art.info(key.trim_suffix("_damaged")).get("w", 0.0)
+		if nw > 0.0:
+			w *= float(Art.info(key).w) / nw
+	var h := Art.draw_w(self, key, foot + Vector2(shake, 0), w, mod)
 	if hp < max_hp or selected:
 		Art.hp_bar(self, foot - Vector2(0, h + 6.0), size * 0.8, hp / max_hp, team == 0)
 	return true
