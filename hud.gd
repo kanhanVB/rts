@@ -263,6 +263,7 @@ func _build_card() -> void:
 	_portraits.hud = self
 	hb.add_child(_portraits)
 	var info := Label.new()
+	info.add_theme_font_override("font", Art.body_font())
 	info.add_theme_font_size_override("font_size", 16)
 	info.add_theme_constant_override("outline_size", 5)
 	info.custom_minimum_size = Vector2(250, 0)
@@ -316,6 +317,7 @@ func _build_side() -> void:
 	_side.add_child(p)
 	main.panel = p
 	var l := Label.new()
+	l.add_theme_font_override("font", Art.body_font())
 	l.add_theme_font_size_override("font_size", 15)
 	l.add_theme_constant_override("line_spacing", 1)
 	l.add_theme_constant_override("outline_size", 5)
@@ -337,6 +339,7 @@ func _build_help() -> void:
 	var l := Label.new()
 	l.add_theme_color_override("font_color", INK)
 	l.add_theme_constant_override("outline_size", 0)
+	l.add_theme_font_override("font", Art.body_font())
 	l.add_theme_font_size_override("font_size", 17)
 	l.text = """操作说明
 左键：点选单位/建筑 · 拖动：框选己方单位
