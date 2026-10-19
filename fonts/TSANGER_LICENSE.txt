@@ -1,9 +1,0 @@
-仓耳周珂正大榜书 (TsangerZhoukeZhengdabangshu)
-© 北京仓耳文字技术有限公司 Beijing Tsanger Character Technology Co., Ltd.
-
-字体内嵌授权声明（name 表 ID 13）：
-  本字体任何用户可以全领域永久免费商用。
-  This font is permanently free.
-
-本仓库内的文件已按游戏实际用字裁剪（tools/subset_fonts.py），未修改字形。
-原始字体来源：仓耳字库官网 / https://github.com/jaywcjlove/free-font

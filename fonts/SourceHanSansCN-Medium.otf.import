@@ -2,13 +2,13 @@
 
 importer="font_data_dynamic"
 type="FontFile"
-uid="uid://cwl4wvx6bscfp"
-path="res://.godot/imported/TsangerZhoukeZhengdabangshu.ttf-d2a5d0335a0a489ba9e44a585de2e3ee.fontdata"
+uid="uid://bt70nc3t2frkx"
+path="res://.godot/imported/SourceHanSansCN-Medium.otf-f86656fa0e2919bd7a070e7c3a7bead7.fontdata"
 
 [deps]
 
-source_file="res://fonts/TsangerZhoukeZhengdabangshu.ttf"
-dest_files=["res://.godot/imported/TsangerZhoukeZhengdabangshu.ttf-d2a5d0335a0a489ba9e44a585de2e3ee.fontdata"]
+source_file="res://fonts/SourceHanSansCN-Medium.otf"
+dest_files=["res://.godot/imported/SourceHanSansCN-Medium.otf-f86656fa0e2919bd7a070e7c3a7bead7.fontdata"]
 
 [params]
 

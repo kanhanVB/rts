@@ -70,24 +70,20 @@ static func open_point(p: Vector2) -> Vector2:
 			return best
 	return p
 
-## 标题字：仓耳周珂正大榜书（王国保卫战：起源 中文版那种粗毛笔榜书），只裁了代码里用到的字；
-## 缺的字/符号落到思源柔黑 Heavy（GB2312 全集）。重新裁字：tools/subset_fonts.py
-const FONT_PATH := "res://fonts/TsangerZhoukeZhengdabangshu.ttf"
-const FONT_FALLBACK_PATH := "res://fonts/ResourceHanRoundedCN-Heavy.ttf"
+## 字体参照王国保卫战：起源 中文版（苹方那类干净黑体）：思源黑体 Bold 做 UI，Medium 做说明文字。
+## 已裁到 GB2312 + 代码用字，重新裁字：tools/subset_fonts.py
+const FONT_PATH := "res://fonts/SourceHanSansCN-Bold.otf"
+const BODY_FONT_PATH := "res://fonts/SourceHanSansCN-Medium.otf"
 
 static func font() -> Font:
 	if _font == null:
-		var fb: Font = load(FONT_FALLBACK_PATH) if ResourceLoader.exists(FONT_FALLBACK_PATH) else null
-		var f: Font = load(FONT_PATH) if ResourceLoader.exists(FONT_PATH) else fb
-		if f != null and fb != null and f != fb:
-			f.fallbacks = [fb]
-		_font = f if f != null else ThemeDB.fallback_font
+		_font = load(FONT_PATH) if ResourceLoader.exists(FONT_PATH) else ThemeDB.fallback_font
 	return _font
 
-## 正文字：长说明/数值面板用圆黑（起源 中文版里的说明文字也是黑体，不用毛笔字）
+## 正文字：长说明/数值面板
 static func body_font() -> Font:
 	if _body_font == null:
-		_body_font = load(FONT_FALLBACK_PATH) if ResourceLoader.exists(FONT_FALLBACK_PATH) else font()
+		_body_font = load(BODY_FONT_PATH) if ResourceLoader.exists(BODY_FONT_PATH) else font()
 	return _body_font
 
 ## 以锚点（单位=脚底，建筑=底边中心）对准 pos，按显示高度 height 画出来。

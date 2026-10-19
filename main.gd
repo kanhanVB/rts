@@ -719,7 +719,7 @@ func _selected_info_text() -> String:
 		var rng_txt := "—"
 		if u.atk > 0.0:
 			rng_txt = "%.0f（近战）" % u.atk_range if u.atk_range <= 35.0 else "%.0f（远程）" % u.atk_range
-		var line := "%s   血量 %.0f/%.0f · 护甲 %.0f · 攻击 %s · 移速 %.0f · 射程 %s" % [
+		var line := "%s   血量 %.0f/%.0f · 护甲 %.0f · 攻击 %s\n移速 %.0f · 射程 %s" % [
 			u.display_name, u.hp, u.max_hp, u.armor, atk_txt, u.speed, rng_txt]
 		if u is Worker and u.team == 0:
 			var w: Worker = u

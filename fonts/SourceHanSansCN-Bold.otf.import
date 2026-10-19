@@ -2,13 +2,13 @@
 
 importer="font_data_dynamic"
 type="FontFile"
-uid="uid://dbussp1bo1hx1"
-path="res://.godot/imported/ResourceHanRoundedCN-Heavy.ttf-af4d6d0062a95e29e6280ffd4b80f929.fontdata"
+uid="uid://cllwgjsgiu1mc"
+path="res://.godot/imported/SourceHanSansCN-Bold.otf-a59012c5cf35e5eb8e8807ebd88dc051.fontdata"
 
 [deps]
 
-source_file="res://fonts/ResourceHanRoundedCN-Heavy.ttf"
-dest_files=["res://.godot/imported/ResourceHanRoundedCN-Heavy.ttf-af4d6d0062a95e29e6280ffd4b80f929.fontdata"]
+source_file="res://fonts/SourceHanSansCN-Bold.otf"
+dest_files=["res://.godot/imported/SourceHanSansCN-Bold.otf-a59012c5cf35e5eb8e8807ebd88dc051.fontdata"]
 
 [params]
 

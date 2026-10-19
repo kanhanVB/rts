@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""把字体裁成游戏要用的字，减小体积。
+"""把字体裁成 GB2312 + 游戏代码里用到的字，减小体积。
 
-用法: python3 tools/subset_fonts.py <榜书原始ttf> <思源柔黑Heavy原始ttf>
+用法: python3 tools/subset_fonts.py <SourceHanSansCN-Bold.otf> <SourceHanSansCN-Medium.otf>
+原始字体: https://github.com/adobe-fonts/source-han-sans (SubsetOTF/CN，OFL)
 
-- 标题字（仓耳周珂正大榜书，免费商用）：只保留代码里实际出现的字 + ASCII
-  （原字体 17MB，笔画轮廓点很多，全量太大）。新加文案后重跑一遍即可。
-- 兜底字（思源柔黑 Heavy，OFL）：GB2312 全集 + ASCII + 代码里的字。
-  榜书缺的字（新文案里还没裁进来的字、·×—…→（）「」等符号）自动落到这里。
+字体参照王国保卫战：起源 中文版（它用的是系统黑体 苹方，思源黑体是同类开源字体）：
+- Bold：按钮 / 标题 / 顶栏 / 提示条 / 地图上的标签
+- Medium：说明文字、数值面板
 """
 import glob, os, sys
 from fontTools import subset
@@ -50,7 +50,6 @@ def run(src: str, dst: str, chars: set) -> None:
 
 
 if __name__ == "__main__":
-    title_src, body_src = sys.argv[1], sys.argv[2]
-    cc = code_chars()
-    run(title_src, os.path.join(OUT, "TsangerZhoukeZhengdabangshu.ttf"), cc)
-    run(body_src, os.path.join(OUT, "ResourceHanRoundedCN-Heavy.ttf"), cc | gb2312())
+    cc = code_chars() | gb2312()
+    run(sys.argv[1], os.path.join(OUT, "SourceHanSansCN-Bold.otf"), cc)
+    run(sys.argv[2], os.path.join(OUT, "SourceHanSansCN-Medium.otf"), cc)
