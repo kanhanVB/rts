@@ -71,11 +71,22 @@ def key_out(im):
     a[..., 3] = alpha * 255
     return Image.fromarray(a.astype("uint8"), "RGBA")
 
-# 地图 / 建筑 / 树石摆设统一"压灰"，和低饱和的角色画风对上（1.0 = 不处理）
-MUTE_SAT, MUTE_VAL, MUTE_WARM = 0.62, 1.06, 0.08
-MUTED = ("map/", "resources/", "decor/")   # 建筑 / UI 是按角色画风新画的，本来就低饱和，不再压
+def clean_alpha(im):
+    """已经抠好的透明图：抠图工具会在整张画布上留一层 alpha≈5~20 的雾（会把裁边撑到整张画布），
+    实心部分的 alpha 也只有 ~250。把 <24 归零、>=230 拉满，中间线性拉开"""
+    import numpy as np
+    a = np.asarray(im).copy()
+    al = a[..., 3].astype(float)
+    a[..., 3] = np.clip((al - 24.0) / (230.0 - 24.0), 0.0, 1.0) * 255
+    return Image.fromarray(a.astype("uint8"), "RGBA")
+
+# 压灰（1.0 = 不处理）。v6 美术按 KR 鲜亮配色重画了，不再压色
+MUTE_SAT, MUTE_VAL, MUTE_WARM = 1.0, 1.0, 0.0
+MUTED = ()
 
 def mute(im):
+    if MUTE_SAT == 1.0 and MUTE_VAL == 1.0 and MUTE_WARM == 0.0:
+        return im
     import numpy as np
     from PIL import ImageEnhance
     alpha = im.getchannel("A") if im.mode == "RGBA" else None
@@ -91,7 +102,7 @@ def load(rel):
     p = os.path.join(SRC, rel)
     if not os.path.exists(p):
         return None
-    im = trim(key_out(Image.open(p).convert("RGBA")))
+    im = trim(clean_alpha(key_out(Image.open(p).convert("RGBA"))))
     return mute(im) if rel.startswith(MUTED) else im
 
 def scaled(im, k):
@@ -128,7 +139,7 @@ for key in ["worker", "engineer", "swordsman", "archer", "goo"]:
 
 # ---- 建筑：统一宽度，锚点 = 底边中心
 def load_raw(rel):
-    im = key_out(Image.open(os.path.join(SRC, rel)).convert("RGBA"))
+    im = clean_alpha(key_out(Image.open(os.path.join(SRC, rel)).convert("RGBA")))
     return mute(im) if rel.startswith(MUTED) else im
 
 done = set()
@@ -240,11 +251,15 @@ for rel, mx in [("ui/panel.png", 384), ("ui/parchment.png", 384), ("ui/portrait_
     fit(rel, mx)
 # 头像框：中间那块实心底挖空（头像画在框下面，框中间不透明会把头像盖住）
 pf = os.path.join(DST, "ui/portrait_frame.png")
+c = None
 if os.path.exists(os.path.join(SRC, "ui/portrait_frame.png")):
     import numpy as np, cv2
     a = np.asarray(Image.open(pf).convert("RGBA")).copy()
     h, w = a.shape[:2]
     c = a[h // 2, w // 2, :3].astype(int)
+    if a[h // 2, w // 2, 3] < 128:
+        c = None    # 新框中间本来就是空的
+if c is not None:
     near = (np.abs(a[..., :3].astype(int) - c).sum(axis=2) < 60) & (a[..., 3] > 200)
     n, lab = cv2.connectedComponents(near.astype("uint8"), connectivity=4)
     hole = lab == lab[h // 2, w // 2]
