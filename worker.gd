@@ -15,6 +15,7 @@ var carry_amount: float = 0.0
 ## 加工厂不会自动抢货——全自动加工会把原料烧光，连农民都造不出来；
 ## 想加工就得玩家自己圈农民右键加工厂，这个选择权在玩家手上。
 var deliver_to: Building = null
+var _want_kind := ""    # 玩家最后派的工种（先回去交旧货时记着，交完按它找下一处）
 
 func _ready() -> void:
 	super()
@@ -95,6 +96,8 @@ func _step(delta: float) -> void:
 				# node_target 空了就保持原货种，好让它接着找同类的下一处（树砍完换棵树）
 				if is_instance_valid(node_target):
 					carry_kind = node_target.kind
+				elif _want_kind != "":
+					carry_kind = _want_kind    # 派去的矿点在回程路上被采空了：照新工种找下一处，别回去砍树
 				if node_target == null or not is_instance_valid(node_target):
 					node_target = _nearest_node(carry_kind)
 				if node_target == null:
@@ -111,6 +114,7 @@ func _step(delta: float) -> void:
 ## ---------- 指令 ----------
 func command_gather(node: ResNode) -> void:
 	node_target = node
+	_want_kind = node.kind
 	# 帝国式：手上扛着别的东西被派去新岗位，先把旧货交回仓库再上岗。
 	# 直接改 carry_kind 会把"木材"记成"矿石"，账就错了
 	if carry_amount >= 0.5 and carry_kind != node.kind:

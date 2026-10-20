@@ -269,7 +269,14 @@ func _unhandled_input(event: InputEvent) -> void:
 					if r != 1:
 						_placing_kind = ""
 					queue_redraw()
+				elif _a_move_next and selected.any(func(u): return u is Unit and is_instance_valid(u)):
+					# 按了 A 再左键 = 往那里 A 移动（和右键一样）；以前左键选人后 A 状态还挂着，
+					# 下一次普通右键会莫名其妙变成攻击移动
+					var pos := _pick_at(_to_world(event.position), true)
+					_issue_command(pos)
+					_markers.append({"pos": pos, "t0": Time.get_ticks_msec(), "attack": true})
 				else:
+					_a_move_next = false
 					_drag_start = _to_world(event.position)
 					_dragging = true
 					queue_redraw()
@@ -298,7 +305,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		# A 键 = 攻击移动（下次右键就是 A 移动）
 		if event.keycode == KEY_A and not event.echo:
 			_a_move_next = true
-			_hud_msg("A 移动：右键目的地，路上遇到敌人就开打")
+			_hud_msg("A 移动：点目的地（左右键都行），路上遇到敌人就开打 · Esc 取消")
+		elif event.keycode == KEY_ESCAPE and not event.echo:
+			# Esc：取消 A 移动 / 放置建筑
+			if _placing_kind != "":
+				_hud_msg("已取消放置" + _place_name(_placing_kind))
+				_placing_kind = ""
+				queue_redraw()
+			elif _a_move_next:
+				_hud_msg("已取消 A 移动")
+			_a_move_next = false
 		elif event.keycode == KEY_C and not event.echo:
 			_panel_on = not _panel_on
 			_update_panel()
@@ -429,12 +445,14 @@ func _issue_command(pos: Vector2) -> void:
 			u.command_move(_spread_pos(move_idx, pos))
 			move_idx += 1
 		elif target != null and target.team == 1 and (u is Soldier or u is Engineer):
-			# 攻击指令有距离门槛：超出射程责任圈就转成移动，别追杀到天涯海角
+			# 攻击指令有距离门槛：远处的怪转成 A 移动（路上遇敌就打），别追杀到天涯海角。
+			# 以前转成普通移动：走到巢穴脚下就站着不打，一路挨打也不还手。
+			# 建筑不会跑，点名多远都直接打
 			var cmd_range := 70.0 if u is Engineer else 250.0
-			if u.position.distance_to(target.position) <= cmd_range:
+			if target is Building or u.position.distance_to(target.position) <= cmd_range:
 				u.command_attack(target)
 			else:
-				u.command_move(_spread_pos(move_idx, pos))
+				u.command_attack_move(_spread_pos(move_idx, pos))
 				move_idx += 1
 		elif _a_move_next and (u is Soldier or u is Engineer):
 			# A 移动：走到目的地，路上自动索敌（战斗单位专属）
@@ -814,7 +832,7 @@ func _has_processor(kind: String) -> bool:
 	return false
 
 ## ================================ 绘制 ================================
-## 地图装饰：固定随机种子撒灌木/花丛/石头/篱笆，避开土路、建筑、资源点和边缘树林
+## 地图装饰：固定随机种子撒灌木/花丛/石头，避开土路、建筑、资源点和边缘树林
 ## 敌人行军路线 = 地图上画的土路（有手绘地图时从图里分析出来），否则用老的折线
 func road() -> Array:
 	if Art.has("map/map") and not ArtData.ROAD.is_empty():
@@ -823,7 +841,7 @@ func road() -> Array:
 
 func _build_decor() -> void:
 	_decor.clear()
-	var keys := ["decor/bush_1", "decor/bush_2", "decor/flowers", "decor/flowers", "decor/rock_1", "decor/fence"]
+	var keys := ["decor/bush_1", "decor/bush_2", "decor/flowers", "decor/flowers", "decor/rock_1"]    # 木栅栏去掉了：没碰撞，看着像能挡路其实不能，容易误会
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 20261018
 	var tries := 0
@@ -849,7 +867,7 @@ func _build_decor() -> void:
 			_decor.append({"key": keys[rng.randi() % keys.size()], "pos": p, "flip": rng.randf() < 0.5})
 	_decor.sort_custom(func(a, b): return a.pos.y < b.pos.y)
 
-const DECOR_H := {"decor/bush_1": 26.0, "decor/bush_2": 26.0, "decor/flowers": 16.0, "decor/rock_1": 16.0, "decor/fence": 20.0}
+const DECOR_H := {"decor/bush_1": 26.0, "decor/bush_2": 26.0, "decor/flowers": 16.0, "decor/rock_1": 16.0}
 
 func _draw() -> void:
 	# ---- 地面：有手绘地图就整张铺上，否则用原来的色块草地 ----
@@ -891,11 +909,11 @@ func _draw() -> void:
 		var ok := _placement_ok(_placing_kind, p)
 		var tint := Color(0.6, 1.0, 0.6, 0.6) if ok else Color(1.0, 0.45, 0.4, 0.6)
 		if Art.has("buildings/" + _placing_kind):
-			var sz: float = {"barracks": 60.0, "warehouse": 64.0, "smelter": 56.0, "workshop": 56.0}.get(_placing_kind, 60.0)
+			var sz: float = {"barracks": 60.0, "warehouse": 64.0, "smelter": 56.0, "workshop": 56.0}.get(_placing_kind, 60.0) * Building.SIZE_SCALE    # 和盖好后一样大
 			Art.ellipse(self, p + Vector2(0, sz * 0.38), sz * 0.95, Color(tint, 0.35))
 			Art.draw_w(self, "buildings/" + _placing_kind, p + Vector2(0, sz * 0.42), sz * Building.ART_W, tint)
 		else:
-			var half: float = 30.0    # 工地半宽
+			var half: float = 30.0 * Building.SIZE_SCALE    # 工地半宽
 			var r := Rect2(p - Vector2(half, half), Vector2(half * 2.0, half * 2.0))
 			draw_rect(r, Color(0.15, 0.6, 0.55, 0.5))
 			draw_rect(r, Color(1, 1, 1, 0.6), false, 1.0)

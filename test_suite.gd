@@ -502,6 +502,49 @@ func run() -> void:
 	if is_instance_valid(gl):
 		gl.take_damage(99999.0)
 
+	# ---- 回归：第二轮查 bug 修过的问题 ----
+	# 工程师同一帧挨两下致死，只能复活一个
+	var eng_list: Array = m._player_engineers()
+	if not eng_list.is_empty():
+		var timers0: int = m.respawn_timers.size()
+		eng_list[0].take_damage(99999.0)
+		eng_list[0].take_damage(99999.0)
+		_check(m.respawn_timers.size() == timers0 + 1, "同帧两次致死只排一次复活（%d -> %d）" % [timers0, m.respawn_timers.size()])
+	# 农民要去的矿被采空：换新矿点要重新寻路，不能先跑到旧点
+	var rw: Worker = null
+	for u in m._player_workers():
+		rw = u
+		break
+	var ores: Array = m.get_tree().get_nodes_in_group("res_nodes").filter(func(n): return n.kind == "ore" and not n.is_queued_for_deletion())
+	if rw != null and ores.size() >= 2:
+		ores.sort_custom(func(a, b): return a.position.distance_to(rw.position) > b.position.distance_to(rw.position))
+		var far_ore: ResNode = ores[0]
+		rw.carry_amount = 0.0    # 空手、自动交货，排除"先回去交别的货"的分支
+		rw.carry_kind = "ore"
+		rw.deliver_to = null
+		rw.command_gather(far_ore)
+		await m.get_tree().create_timer(0.3).timeout
+		far_ore.queue_free()
+		await m.get_tree().create_timer(0.1).timeout
+		var last: Vector2 = rw._path[rw._path.size() - 1] if rw._path.size() > 0 else rw.node_target.position
+		_check(is_instance_valid(rw.node_target) and last.distance_to(rw.node_target.position) < 40.0,
+			"矿点被采空换矿后重新寻路（状态 %d，路径终点离新矿 %.0fpx）" % [rw.state, last.distance_to(rw.node_target.position) if is_instance_valid(rw.node_target) else -1.0])
+	# 选中基地右键地面：建筑不会走路，跳过（以前报 command_move 不存在）
+	m._point_select(m.base.position)
+	m._issue_command(m.base.position + Vector2(160, 0))
+	_check(m.selected.size() == 1 and m.selected[0] == m.base, "选中基地右键地面不出错")
+	# 远处右键巢穴：剑士走过去要真的打，不能站在脚下发呆
+	var hs := Soldier.new()
+	hs.setup(false)
+	hs.position = m.hive.position + Vector2(-300, 170)
+	m.add_child(hs)
+	await m.get_tree().create_timer(0.1).timeout
+	m.selected = [hs]
+	m._issue_command(m.hive.position)
+	var hive_hp0: float = m.hive.hp
+	await m.get_tree().create_timer(7.0).timeout
+	_check(is_instance_valid(m.hive) and m.hive.hp < hive_hp0, "远处右键巢穴，剑士走过去开打（%.0f -> %.0f）" % [hive_hp0, m.hive.hp])
+
 	# 拆巢穴触发胜利
 	m.hive.take_damage(99999.0)
 	await m.get_tree().create_timer(0.5).timeout

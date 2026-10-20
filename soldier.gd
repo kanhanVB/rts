@@ -98,6 +98,16 @@ func _nearest_enemy(dist: float) -> Node2D:
 		if d < best_d:
 			best_d = d
 			best = e
+	if best != null:
+		return best
+	# 附近没有怪，就打索敌圈里的敌方建筑（巢穴）：以前站在巢穴脚下都不会自己动手
+	for b in _group("buildings"):
+		if not is_instance_valid(b) or b.team != 1:
+			continue
+		var d: float = position.distance_to(b.position) - b.size * 0.5
+		if d < best_d:
+			best_d = d
+			best = b
 	return best
 
 ## 玩家指定的目标优先追到底；否则自动索敌。
