@@ -41,7 +41,7 @@ func _step(delta: float) -> void:
 			_move_toward(build_site.position, delta)
 			# 到达判定用真实距离：_move_toward 返回的是到当前路径点的距离，
 			# 拐点会让它提前小于阈值，导致半路凭空开工
-			if position.distance_to(build_site.position) < build_site.size * 0.5 + 20.0:
+			if position.distance_to(build_site.position) < build_site.size * 0.5 + 30.0:
 				state = State.BUILDING
 		State.BUILDING:
 			if build_site == null or not is_instance_valid(build_site):
@@ -177,6 +177,21 @@ func command_attack_move(pos: Vector2) -> void:
 	attack_target = null
 	_drop_site()
 	state = State.IDLE
+
+func command_stop() -> void:
+	super()
+	_drop_site()
+	state = State.IDLE
+	move_order = true     # 站住别动，别马上又去认领工地（下一次闲下来再说）
+	_amove = false
+	_amove_fight = false
+
+## 只有闲着的工程师才给队友让路（施工中的不动）
+func _can_yield() -> bool:
+	return state == State.IDLE and super()
+
+func _done_with_order() -> bool:
+	return state == State.IDLE and not move_order and attack_target == null
 
 func _drop_site() -> void:
 	if build_site != null and is_instance_valid(build_site):

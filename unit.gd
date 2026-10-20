@@ -33,6 +33,7 @@ var _lane_off := Vector2.ZERO     # 天生车道偏移：同路径的群单位�
 # 动画状态（KR 式小人用）
 var anim_t := 0.0        # 动画相位：走路摆腿、待机轻晃
 var moving := false      # 本帧是否在移动（_move_toward 里置位）
+var walk_ph := 0.0       # 走路步态相位：按实际走过的距离推进，跑得快步子就快，停下就停
 var _vel_dir := Vector2.ZERO   # 本帧移动方向（靠右让路用）
 var attack_anim := 0.0   # 1 → 0 递减，驱动挥刀/抡锤动画
 
@@ -83,6 +84,15 @@ func _process(delta: float) -> void:
 		_vel_dir = Vector2.ZERO    # 停下就清方向，下次起步重新加速转向
 	_separate()           # 单位之间互相推开，别叠成一坨
 	_avoid_obstacles()    # 撞上建筑/树就往侧面滑，别顶死
+	if not waypoints.is_empty() and _done_with_order():
+		var wp: Dictionary = waypoints.pop_front()
+		if wp.attack:
+			command_attack_move(wp.pos)
+		else:
+			command_move(wp.pos)
+	var ter := Terrain.current
+	if ter != null and ter.has_solids():
+		position += ter.push_out(position, radius * 0.8)    # 被挤进树林/矿堆就推回来，贴着林边走会顺着边滑
 	# 卡住检测：0.7 秒挪了不到 2.5px（被人群挤住）→ 就地停下列队
 	if moving:
 		if position.distance_to(_stuck_pos) < 2.5:
@@ -134,6 +144,7 @@ func _move_toward(pos: Vector2, delta: float) -> float:
 		if _vel_dir == Vector2.ZERO:
 			_vel_dir = want
 		position += _vel_dir * speed_now * delta
+		walk_ph += speed_now * delta * WALK_RATE
 		moving = true
 	if _path_idx >= _path.size():
 		_path = PackedVector2Array()
@@ -162,6 +173,7 @@ func _separate() -> void:
 	_sync_frame(get_tree())
 	var cx := floori(position.x / HASH_CELL)
 	var cy := floori(position.y / HASH_CELL)
+	var yielded := false
 	# 直接遍历 3×3 桶，不拼临时数组（混战里这是每帧最热的循环）
 	for dy in range(-1, 2):
 		for dx in range(-1, 2):
@@ -180,11 +192,21 @@ func _separate() -> void:
 					continue
 				var d := sqrt(d2)
 				var push: Vector2 = off / d * (min_d - d) * 0.3
+				# 闲着的己方被走路的队友挤：主动让开（帝国式让路），别当路障
+				if not moving and u.moving and u.team == team and _can_yield():
+					push = off / d * (min_d - d) * 0.6
+					yielded = true
 				# 双方都在走 + 大致对向/交汇 → 往自己右手侧让
 				if moving and u.moving and _vel_dir != Vector2.ZERO:
 					var right := Vector2(_vel_dir.y, -_vel_dir.x)    # 移动方向的右侧法线
 					push += right * (min_d - d) * 0.4
 				position += push
+	if yielded:
+		move_target = position    # 让完就站在新位置，别再走回去
+
+## 能不能给队友让路：没路要走、没在打、已经到位（子类再加条件）
+func _can_yield() -> bool:
+	return _path.is_empty() and attack_target == null and position.distance_to(move_target) < 24.0
 
 ## 是否正在攻击这个目标（贴脸互殴中）：有 attack_target 且距离在攻击范围内
 func _is_attacking(other: Node2D) -> bool:
@@ -207,6 +229,44 @@ func _avoid_obstacles() -> void:
 		position += push.limit_length(speed * 0.16)
 
 ## ---------- 玩家指令 ----------
+## Shift+右键排的后续路点（帝国式）：手上这一步走完了才接着走下一个
+var waypoints: Array = []    # [{pos, attack}]
+
+## 新的普通指令会冲掉排好的路点 / 巡逻 / 原地驻守（main 下令前调用）
+func cancel_orders() -> void:
+	waypoints.clear()
+
+## 手上的指令干完了没有（排的下一个路点可以接上了）；子类按自己的状态机细化
+func _done_with_order() -> bool:
+	return not moving and attack_target == null and position.distance_to(move_target) < 20.0
+
+## Shift+右键：闲着就马上走，忙着就排到后面
+func queue_move(pos: Vector2, attack := false) -> void:
+	if waypoints.is_empty() and _done_with_order():
+		if attack:
+			command_attack_move(pos)
+		else:
+			command_move(pos)
+	else:
+		waypoints.append({"pos": pos, "attack": attack})
+
+## S 停止：扔下手上所有事，原地站着
+func command_stop() -> void:
+	waypoints.clear()
+	attack_target = null
+	move_target = position
+	_path = PackedVector2Array()
+	_path_idx = 0
+
+## 最后一个排队路点（画路点连线用）
+func order_points() -> Array:
+	var pts: Array = []
+	if position.distance_to(move_target) > 20.0:
+		pts.append(move_target)
+	for w in waypoints:
+		pts.append(w.pos)
+	return pts
+
 func command_move(pos: Vector2) -> void:
 	move_target = pos
 	_path = _find_path(pos)
@@ -243,6 +303,16 @@ func take_damage(amount: float, from: Node2D = null) -> void:
 		_death_fx()
 		died.emit(self)
 		queue_free()
+
+## 直接删掉（Del 键）：照常走死亡流程，编队/统计都会跟着更新
+func kill() -> void:
+	if dead:
+		return
+	dead = true
+	hp = 0.0
+	_death_fx()
+	died.emit(self)
+	queue_free()
 
 ## 攻击时画一条亮线，纯反馈
 func attack_fx_to(pos: Vector2) -> void:
@@ -318,14 +388,20 @@ func _art_draw(key: String) -> void:
 	var bob := 0.0
 	var rot := 0.0
 	var sq := Vector2.ONE
+	var pose := _art_pose()
+	var pkey := "units/%s_%s" % [key, pose]
+	if not Art.has(pkey):
+		pkey = "units/%s_idle" % key
+	var walking := moving and pose != "act"
 	if moving:
 		if is_goo:
 			var ph := absf(sin(anim_t * 0.5))
 			bob = ph * 5.0
 			sq = Vector2(1.0 - ph * 0.08 + (1.0 - ph) * 0.08, 1.0 + ph * 0.1 - (1.0 - ph) * 0.08)
 		else:
-			bob = absf(sin(anim_t * 0.6)) * 2.6
-			rot = sin(anim_t * 0.6) * 0.07
+			# 迈步：两腿分开最大时身体最低，并拢经过时最高（一步一颠，一个周期颠两次）；身子微微前倾
+			bob = (1.0 - absf(sin(walk_ph))) * 1.3
+			rot = 0.05 + sin(walk_ph * 2.0) * 0.02
 	else:
 		var br := sin(now * 2.6 + float(get_instance_id() % 97)) * 0.025
 		sq = Vector2(1.0 - br * 0.5, 1.0 + br)
@@ -333,11 +409,17 @@ func _art_draw(key: String) -> void:
 	var mod := Color.WHITE
 	if Time.get_ticks_msec() < _hurt_until:
 		mod = Color(1.0, 0.5, 0.45)
-	var pose := _art_pose()
-	var pkey := "units/%s_%s" % [key, pose]
-	if not Art.has(pkey):
-		pkey = "units/%s_idle" % key
-	Art.draw(self, pkey, feet + Vector2(lunge, -bob), h * pose_scale(key, pkey), _face < 0.0, mod, rot * _face, sq)
+	var hh := h * pose_scale(key, pkey)
+	var at := feet + Vector2(lunge, -bob)
+	# 有逐帧走路图（units/<key>_walk1..N）就播帧；没有就把站姿图切成 上身 + 左右腿 程序化迈步
+	var frames := _walk_frames(key) if walking else 0
+	if frames > 0:
+		var fk := "units/%s_walk%d" % [key, int(walk_ph / TAU * frames) % frames + 1]
+		Art.draw(self, fk, at, h * pose_scale(key, fk), _face < 0.0, mod, rot * _face, sq)
+	elif walking and not is_goo and _draw_stride(pkey, at, hh, mod, rot * _face):
+		pass
+	else:
+		Art.draw(self, pkey, at, hh, _face < 0.0, mod, rot * _face, sq)
 	_art_extra(feet, h)
 	# 攻击特效：弓手射箭，其余打击火花
 	for fx in _attack_fx:
@@ -353,6 +435,110 @@ func _art_draw(key: String) -> void:
 	# 血条：掉血或选中时显示
 	if hp < max_hp or selected:
 		Art.hp_bar(self, feet - Vector2(0, h + 5.0), 16.0, hp / max_hp, team == 0)
+
+## ---------- 走路动画 ----------
+const WALK_RATE := 0.21        # 每走 1px 步态相位前进多少弧度（约 30px 一个完整步态 = 左右各迈一步）
+const SWING := 0.42            # 腿绕胯前后摆的角度（弧度）：脚尖前后约 ±10 贴图像素（160px 高的原图上），显示时约 ±1.5px
+const LIFT := 7.0              # 往前迈的脚抬多高（贴图像素）
+static var _legs := {}         # 贴图 key → 腿部切分 {gx, top, cut, l, r}，空字典 = 这张图找不到两条腿
+static var _walk_n := {}       # 角色 key → 逐帧走路图张数
+
+## 逐帧走路图有几张（units/<key>_walk1、_walk2…；美术补上就自动用，不用改代码）
+static func _walk_frames(key: String) -> int:
+	if not _walk_n.has(key):
+		var n := 0
+		while Art.has("units/%s_walk%d" % [key, n + 1]):
+			n += 1
+		_walk_n[key] = n
+	return _walk_n[key]
+
+## 从贴图 alpha 里找两腿：底部往上，两脚之间那道透明缝一直到裆部 → 缝的 x、裆的高度、两脚左右边界。
+## 每张图只分析一次。找不到（Goo 这种没腿的、腿太短的）返回空字典。
+static func leg_split(pkey: String) -> Dictionary:
+	if _legs.has(pkey):
+		return _legs[pkey]
+	var out := {}
+	var t := Art.tex(pkey)
+	var d := Art.info(pkey)
+	if t != null and not d.is_empty():
+		var img := t.get_image()
+		if img != null:
+			if img.is_compressed():
+				img.decompress()
+			var w := img.get_width()
+			var h := img.get_height()
+			var bottom := h - 1
+			while bottom > h / 2 and not _row_solid(img, bottom, 0, w):
+				bottom -= 1
+			var ax := int(d.ax)
+			var best_x := -1
+			var best_top := bottom
+			for cx in range(maxi(1, ax - 25), mini(w - 1, ax + 25)):
+				var y := bottom
+				while y > h / 2 and not _row_solid(img, y, cx - 1, cx + 2):
+					y -= 1
+				if y < best_top:
+					best_top = y
+					best_x = cx
+			var gap := bottom - best_top
+			if best_x >= 0 and gap > h * 0.06:
+				# 脚的左右边界：最底下几行的不透明范围
+				var l := w
+				var r := 0
+				for y in range(bottom - 6, bottom + 1):
+					for x in w:
+						if img.get_pixel(x, y).a > 0.25:
+							l = mini(l, x)
+							r = maxi(r, x)
+				out = {"gx": best_x, "top": best_top, "cut": best_top + int(gap * 0.3), "l": maxi(0, l - 3), "r": mini(w, r + 4), "h": h, "w": w}
+	_legs[pkey] = out
+	return out
+
+static func _row_solid(img: Image, y: int, x0: int, x1: int) -> bool:
+	for x in range(x0, x1):
+		if img.get_pixel(x, y).a > 0.25:
+			return true
+	return false
+
+## 程序化迈步：先画两条腿（反相前后摆 + 前伸那条抬起），再画上身盖住腿根，腿两侧的东西（盾、镐把）跟着身子不动。
+## 画不了（没找到腿）返回 false，调用方退回整张画。
+func _draw_stride(pkey: String, pos: Vector2, height: float, mod: Color, rot: float) -> bool:
+	var L := leg_split(pkey)
+	if L.is_empty():
+		return false
+	var t := Art.tex(pkey)
+	var d := Art.info(pkey)
+	var k := height / float(d.h)
+	var ox: float = -d.ax
+	var oy: float = -d.ay
+	var w: float = L.w
+	var th: float = L.h
+	var gx: float = L.gx
+	var top: float = L.top - 6.0       # 腿块从裆上一点开始，被上身盖住，摆动时不露缝
+	var cut: float = L.cut             # 上身画到这里，往下是露出来会动的小腿和脚
+	var l: float = L.l
+	var r: float = L.r
+	var s := sin(walk_ph)
+	var c := cos(walk_ph)
+	var base := Transform2D(rot, Vector2(k * _face, k), 0.0, pos)
+	# 两腿反相：绕胯部转（脚往前踢 / 往后蹬），往前迈的那条同时抬脚。
+	# 贴图右半那条腿离镜头近，后画压在上面（翻转后也一样）
+	for leg in [[l, gx, s, c], [gx, r, -s, -c]]:
+		var x0: float = leg[0]
+		var x1: float = leg[1]
+		var hip := Vector2(ox + (x0 + x1) * 0.5, oy + top)
+		var xf := base.translated_local(hip + Vector2(0, -maxf(0.0, float(leg[3])) * LIFT)).rotated_local(-float(leg[2]) * SWING).translated_local(-hip)
+		draw_set_transform_matrix(xf)
+		draw_texture_rect_region(t, Rect2(ox + x0, oy + top, x1 - x0, th - top), Rect2(x0, top, x1 - x0, th - top), mod)
+	draw_set_transform_matrix(base)
+	# 上身 + 腿两侧不随腿动的部分
+	draw_texture_rect_region(t, Rect2(ox, oy, w, cut), Rect2(0, 0, w, cut), mod)
+	if l > 0.0:
+		draw_texture_rect_region(t, Rect2(ox, oy + cut, l, th - cut), Rect2(0, cut, l, th - cut), mod)
+	if r < w:
+		draw_texture_rect_region(t, Rect2(ox + r, oy + cut, w - r, th - cut), Rect2(r, cut, w - r, th - cut), mod)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	return true
 
 ## 子类覆写：贴图之外的附加物（农民头顶的货、交货点蓝点）
 func _art_extra(_feet: Vector2, _h: float) -> void:

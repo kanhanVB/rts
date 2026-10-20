@@ -4,9 +4,6 @@ extends Node2D
 ## 基建方向要加设施种类（仓库/熔炉/木工台）时，只改 COST_TABLE 和
 ## _place_label 两处，main 那边通过 building_built 信号按 kind 归类。
 
-const W := 1280
-const H := 720
-
 ## 设施成本表：kind -> 成本字典
 const COST_TABLE := {
 	"barracks": Economy.COST_BARRACKS,
@@ -39,7 +36,10 @@ func add_building(kind: String, pos: Vector2, team_: int) -> Building:
 ## 放设施：0=成功落工地  1=可重试的失败（位置不合适）  2=买不起，该取消放置
 ## 放置校验（放置预览和真正落地共用）：返回 "" = 能放，否则是给玩家看的原因
 func placement_error(pos: Vector2) -> String:
-	if pos.x < 40.0 or pos.x > W - 40.0 or pos.y < 90.0 or pos.y > H - 80.0:
+	var g := _game()
+	var w: float = g.W if g != null else 1280.0
+	var h: float = g.H if g != null else 720.0
+	if pos.x < 40.0 or pos.x > w - 40.0 or pos.y < 90.0 or pos.y > h - 80.0:
 		return "放不下：离边界太近，往中间点"
 	for b in get_tree().get_nodes_in_group("buildings"):
 		if pos.distance_to(b.position) < b.size + 40.0:
@@ -50,7 +50,7 @@ func placement_error(pos: Vector2) -> String:
 	for n in get_tree().get_nodes_in_group("res_nodes"):
 		if is_instance_valid(n) and pos.distance_to(n.position) < 52.0:
 			return "放不下：压到矿/树了，挪开一点"
-	if Art.forest_at(pos) or Art.forest_at(pos + Vector2(0, 26)):
+	if g != null and g.area_blocked(pos, 26.0):
 		return "放不下：那里是树林"
 	return ""
 

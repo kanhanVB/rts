@@ -1,18 +1,21 @@
 extends Node2D
 ## 主脚本：地图、选择、指令、UI、波次、胜负，外加一套无头自测。
-## 操作：左键点选 / 拖框群选；右键 = 移动 / 采集 / 攻击（看点的什么）。
+## 操作照帝国时代：左键点选 / 拖框 / Shift 加减选 / 双击选同类；右键 = 智能指令；命令卡热键按 5×3 位置（详见“输入”一节）。
 
-const W := 1280
-const H := 720
+## 地图尺寸：经典测试图 1280×720；随机图 3200×2048（约 2.5×2.8 屏）
+var W := 1280.0
+var H := 720.0
+const MAP_W := 3200.0
+const MAP_H := 2048.0
 
 const WORKER_CAP := 12
 const ENGINEER_RESPAWN := 15.0    # 英雄工程师阵亡后的复活倒计时
 const UNIT_CAP := 40
 
 # 镜头
-const CAM_MIN_ZOOM := 1.0     # 缩放下限 = 视野正好铺满地图，杜绝看到地图外的灰底
+var CAM_MIN_ZOOM := 1.0       # 缩放下限：经典图 = 视野正好铺满地图；随机图大，可以缩到 0.55 看大局
 const CAM_MAX_ZOOM := 2.4     # 放大上限，贴近看单位
-const CAM_EDGE := 40.0          # 鼠标贴边多少像素就开始滚屏
+const CAM_EDGE := 10.0          # 鼠标贴边多少像素就开始滚屏
 const CAM_SPEED := 8.0          # 每像素滚屏速度（乘 delta）
 
 # ---- 地面装饰（固定坐标：KR 式草地深浅斑 + 基地到巢穴的土路）----
@@ -27,7 +30,16 @@ var _build_mgr: BuildManager
 var _wave_mgr: WaveManager
 
 var base: Building
-var hive: Building
+var hive: Building                 # 第一个巢穴（兼容老代码/测试）；全部巢穴在 hives
+var hives: Array = []
+var roads: Array = []              # 每个巢穴一条行军土路（点从主城端排到巢穴端），和 hives 一一对应
+var classic := false               # 经典固定图（--test / --classic）：测试断言用的老坐标
+var map_seed := 0
+var layout := {}                   # 随机图布局（MapGen.generate 的结果）
+var ground: Ground
+var decor_layer: DecorLayer
+var minimap_img: Image             # 小地图底图（每格一像素：草/树/矿/路），砍树时改像素
+var minimap_tex: ImageTexture
 var barracks_list: Array = []
 var warehouses_list: Array = []
 var processors_list: Array = []   # 熔炉 / 木工台：加工链上的设施
@@ -47,19 +59,11 @@ var _fail := 0
 # 镜头
 var cam: Camera2D
 var control_groups: Array = []    # 编队：control_groups[i] = 该队的单位数组
-var _a_move_next := false         # 按了 A 后，下一次右键 = 攻击移动
 
 # UI 引用
 var ui: CanvasLayer
 var res_label: Label
 var wave_label: Label
-var btn_worker: Button
-var btn_warehouse: Button
-var btn_smelter: Button
-var btn_workshop: Button
-var btn_barracks: Button
-var btn_sword: Button
-var btn_archer: Button
 var overlay: ColorRect
 var overlay_label: Label
 var _hud_msg_label: Label
@@ -76,6 +80,12 @@ var _rally_i := 0            # 新兵在兵营前排队的序号     # 右键落
 func _ready() -> void:
 	add_to_group("game")
 	randomize()
+	var args := OS.get_cmdline_user_args()
+	classic = "--test" in args or "--classic" in args
+	map_seed = randi() % 1000000
+	for a in args:
+		if a.begins_with("--seed="):
+			map_seed = int(a.substr(7))
 	_build_mgr = BuildManager.new()
 	add_child(_build_mgr)
 	_build_mgr.building_built.connect(_on_building_built)
@@ -89,11 +99,13 @@ func _ready() -> void:
 	# 贴图有高度，必须按 y 排序（靠下的挡住靠上的）；建筑/工地挂在 BuildManager 下，一起参与排序
 	y_sort_enabled = true
 	_build_mgr.y_sort_enabled = true
-	_build_decor()
+	if classic:
+		_build_decor()
 	if Art.has("ui/cursor") and DisplayServer.get_name() != "headless":
 		Input.set_custom_mouse_cursor(Art.tex("ui/cursor"), Input.CURSOR_ARROW, Vector2(4, 2))
 	if "--test" in OS.get_cmdline_user_args():
 		_wave_mgr.wave_timer = 999.0    # 测试期间不来波次，保证断言确定性
+		train_scale = 0.0               # 老断言按"点了就出"写的；读条另有专门的测试
 		_run_test()
 
 ## 建造系统完工回调：按 kind 归档（基建加设施种类时在这里加分支）
@@ -106,8 +118,9 @@ func _on_building_built(b: Building) -> void:
 		processors_list.append(b)
 func _build_camera() -> void:
 	cam = Camera2D.new()
-	cam.position = Vector2(W / 2.0, H / 2.0)
+	cam.position = Vector2(W / 2.0, H / 2.0) if classic else base.position + Vector2(0, 60)
 	cam.zoom = Vector2.ONE
+	CAM_MIN_ZOOM = 1.0 if classic else 0.55
 	add_child(cam)
 	cam.make_current()    # 必须在 add_child 之后，否则报 "not inside tree"
 
@@ -116,18 +129,10 @@ func _build_map() -> void:
 	# 地形层（先建，垫在最下面）
 	terrain = Terrain.new()
 	add_child(terrain)
-	_build_terrain()
-
-	base = _build_mgr.add_building("base", Vector2(170, 560), 0)
-	hive = _build_mgr.add_building("hive", Vector2(1110, 160), 1)
-
-	for c in [Vector2(430, 470), Vector2(720, 260), Vector2(960, 560)]:
-		for i in 3:
-			_add_res("ore", c + Vector2((i - 1) * 46.0, 0.0 if i == 1 else 36.0))
-	for c in [Vector2(320, 240), Vector2(620, 570), Vector2(1010, 420)]:
-		for i in 3:
-			_add_res("wood", c + Vector2((i - 1) * 46.0, 0.0 if i == 1 else 36.0))
-
+	if classic:
+		_build_classic_map()
+	else:
+		_build_random_map()
 	# 开局 3 工人自动分工：2 采矿 1 伐木，开局就有供应链在转
 	for i in 3:
 		var w := Worker.new()
@@ -138,11 +143,123 @@ func _build_map() -> void:
 	# 开局 1 名工程师，负责建造
 	_spawn_engineer(base.position + Vector2(90.0, 40.0))
 
-func _add_res(kind: String, pos: Vector2) -> void:
+## 经典固定图（测试用）：1280×720，基地左下、巢穴右上，三片矿三片树，资源点不占格
+func _build_classic_map() -> void:
+	terrain.setup(W, H)
+	_build_terrain()
+	base = _build_mgr.add_building("base", Vector2(170, 560), 0)
+	hive = _build_mgr.add_building("hive", Vector2(1110, 160), 1)
+	hives = [hive]
+	roads = [ArtData.ROAD if Art.has("map/map") and not ArtData.ROAD.is_empty() else DIRT_PATH]
+	for c in [Vector2(430, 470), Vector2(720, 260), Vector2(960, 560)]:
+		for i in 3:
+			_add_res("ore", c + Vector2((i - 1) * 46.0, 0.0 if i == 1 else 36.0))
+	for c in [Vector2(320, 240), Vector2(620, 570), Vector2(1010, 420)]:
+		for i in 3:
+			_add_res("wood", c + Vector2((i - 1) * 46.0, 0.0 if i == 1 else 36.0))
+
+## 随机图：主城在正中，巢穴在两侧边缘，土路、树林、矿都由 MapGen 按种子生成
+func _build_random_map() -> void:
+	W = MAP_W
+	H = MAP_H
+	layout = MapGen.generate(map_seed, W, H)
+	terrain.setup(W, H)
+	terrain.draw_cells = false
+	ground = Ground.new()
+	add_child(ground)
+	ground.build(layout, W, H)
+	decor_layer = DecorLayer.new()
+	add_child(decor_layer)
+	decor_layer.items = layout.decor.duplicate()
+	var gw: int = layout.gw
+	var gh: int = layout.gh
+	# 边缘密林：格子挡路，树按行合成节点画
+	var rng := RandomNumberGenerator.new()
+	rng.seed = map_seed + 7
+	var rows := {}
+	for i in gw * gh:
+		if layout.cells[i] != MapGen.C_WOODS:
+			continue
+		var c := Vector2i(i % gw, i / gw)
+		terrain.set_cell(c, Terrain.T.WOODS)
+		if not rows.has(c.y):
+			rows[c.y] = []
+		rows[c.y].append({"x": (c.x + 0.5) * Terrain.CELL + rng.randf_range(-6.0, 6.0), "dy": rng.randf_range(-4.0, 4.0),
+			"v": rng.randi_range(1, 3), "flip": rng.randf() < 0.5, "h": rng.randf_range(62.0, 74.0),
+			"mod": Color(1, 1, 1).darkened(rng.randf_range(0.0, 0.12))})
+	for y in rows:
+		var r := WoodsRow.new()
+		r.position = Vector2(0, (y + 0.5) * Terrain.CELL)
+		r.trees = rows[y]
+		add_child(r)
+	base = _build_mgr.add_building("base", layout.base, 0)
+	hives = []
+	for hp in layout.hives:
+		hives.append(_build_mgr.add_building("hive", hp, 1))
+	hive = hives[0]
+	roads = layout.roads
+	# 能砍的树（每棵 100 木）和矿堆（每堆 250 矿），都占格挡路
+	for p in layout.trees:
+		var n := _add_res("wood", p, true)
+		n.amount = 100.0
+		n.tree_h = rng.randf_range(58.0, 70.0)
+	for p in layout.ore:
+		_add_res("ore", p, true)
+	_build_minimap_img()
+
+## 小地图底图：每格一个像素
+func _build_minimap_img() -> void:
+	var gw: int = layout.gw
+	var gh: int = layout.gh
+	minimap_img = Image.create(gw, gh, false, Image.FORMAT_RGBA8)
+	for i in gw * gh:
+		minimap_img.set_pixel(i % gw, i / gw, MINI_COLORS[layout.cells[i]])
+	for rd in roads:
+		for p in rd:
+			minimap_img.set_pixel(clampi(int(p.x / Terrain.CELL), 0, gw - 1), clampi(int(p.y / Terrain.CELL), 0, gh - 1), MINI_ROAD)
+	minimap_tex = ImageTexture.create_from_image(minimap_img)
+
+const MINI_COLORS := [Color(0.49, 0.65, 0.16), Color(0.2, 0.42, 0.12), Color(0.12, 0.3, 0.08), Color(0.95, 0.78, 0.25)]
+const MINI_ROAD := Color(0.88, 0.72, 0.35)
+
+## 树砍光 / 矿采空：小地图上那格变回草地
+func on_cell_cleared(c: Vector2i) -> void:
+	if minimap_img != null and c.x >= 0 and c.y >= 0 and c.x < minimap_img.get_width() and c.y < minimap_img.get_height():
+		minimap_img.set_pixel(c.x, c.y, MINI_COLORS[0])
+		minimap_tex.update(minimap_img)
+
+func add_stump(pos: Vector2) -> void:
+	if decor_layer != null:
+		decor_layer.add_item("decor/stump", pos, randf() < 0.5)
+
+## 某个巢穴的行军路线
+func road_for(h: Node2D) -> Array:
+	var i := hives.find(h)
+	return roads[i] if i >= 0 and i < roads.size() else road()
+
+## 点到树林/矿里（不能站人）→ 最近的空地。经典图看手绘地图的树林，随机图看地形格子
+func open_point(p: Vector2) -> Vector2:
+	if classic:
+		return Art.open_point(p)
+	return terrain.open_point(p)
+
+## 这里能不能盖房：脚下一圈（半径约 r）有树/矿/密林就不行
+func area_blocked(p: Vector2, r: float) -> bool:
+	if classic:
+		return Art.forest_at(p) or Art.forest_at(p + Vector2(0, 26))
+	for dy in [-r, 0.0, r]:
+		for dx in [-r, 0.0, r]:
+			if terrain.solid_at(p + Vector2(dx, dy)):
+				return true
+	return false
+
+func _add_res(kind: String, pos: Vector2, solid := false) -> ResNode:
 	var n := ResNode.new()
 	n.kind = kind
 	n.position = pos
+	n.solid = solid
 	add_child(n)
+	return n
 
 ## 铺设地形：当前是纯平原（森林/河/悬崖暂时撤掉，等方向定完再铺）
 ## 寻路、移速/射程修正都长在 Terrain 上，重新 paint 就能用回来
@@ -163,11 +280,14 @@ func _process(delta: float) -> void:
 	warehouses_list = warehouses_list.filter(func(b): return is_instance_valid(b))
 	if inspected != null and not is_instance_valid(inspected):
 		inspected = null
+	# 鼠标在 HUD 上松开时 _unhandled_input 收不到抬起事件：这里兜底收尾拖框
+	if _dragging and DisplayServer.get_name() != "headless" and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		_finish_drag(get_viewport().get_mouse_position())
 	if game_state == "play":
+		game_time += delta
 		_wave_mgr.update(delta)
 		_update_respawn(delta)
 		_check_end()
-	_update_buttons()
 	_update_labels()
 	_update_panel()
 	_update_camera(delta)
@@ -202,16 +322,29 @@ func _update_camera(delta: float) -> void:
 		dir = Vector2.ZERO
 	if dir != Vector2.ZERO:
 		cam.position += dir.normalized() * CAM_SPEED * 60.0 * delta / cam.zoom.x
+	_clamp_camera()
+
+## 镜头限制在地图内；上下多留出顶栏/底栏的高度（地图边沿能露到 HUD 外面）
+func _clamp_camera() -> void:
+	var vp := get_viewport_rect().size
 	var half := vp / cam.zoom / 2.0
+	var top := -hud_top_h() / cam.zoom.y
+	var bottom := H + hud_bottom_h() / cam.zoom.y
 	# 视野比地图还大时（缩小过头），镜头锁死在地图中心，避免 clamp 上下限颠倒
 	if half.x * 2.0 >= W:
 		cam.position.x = W / 2.0
 	else:
 		cam.position.x = clampf(cam.position.x, half.x, W - half.x)
-	if half.y * 2.0 >= H:
-		cam.position.y = H / 2.0
+	if half.y * 2.0 >= bottom - top:
+		cam.position.y = (top + bottom) / 2.0
 	else:
-		cam.position.y = clampf(cam.position.y, half.y, H - half.y)
+		cam.position.y = clampf(cam.position.y, top + half.y, bottom - half.y)
+
+func hud_bottom_h() -> float:
+	return hud.bottom_h() if hud != null and hud.has_method("bottom_h") else 0.0
+
+func hud_top_h() -> float:
+	return hud.top_h() if hud != null and hud.has_method("top_h") else 0.0
 
 ## 工程师免费复活：死了就排队，到点在基地重生
 func _on_engineer_died(u) -> void:
@@ -234,8 +367,8 @@ func _update_respawn(delta: float) -> void:
 func _check_end() -> void:
 	if not is_instance_valid(base):
 		_end("lose", "基地被拆了")
-	elif not is_instance_valid(hive):
-		_end("win", "巢穴被拆了！")
+	elif not hives.any(func(h): return is_instance_valid(h)):
+		_end("win", "巢穴被拆了！" if hives.size() <= 1 else "所有巢穴都被拆了！")
 
 func _end(result: String, msg: String) -> void:
 	if game_state != "play":
@@ -251,13 +384,42 @@ func _hud_msg(text: String) -> void:
 	_hud_msg_t = 3.0
 	_hud_msg_label.visible = true
 
-## ================================ 输入 ================================
+## ================================ 输入（帝国时代式） ================================
+## 左键：点选 / 拖框；Shift+左键 加减选；双击或 Ctrl+左键 = 选屏幕内同类
+## 右键：智能指令（移动 / 采集 / 攻击 / 交货）；选中基地/兵营右键 = 集结点；Shift+右键 = 排路点
+## 命令卡热键按 5×3 网格：QWERT / ASDFG / ZXCVB，和底栏按钮位置一一对应
+## H 基地 · . 闲置农民 · , 闲置军队 · 空格 = 镜头回到选中 · Del 删除 · Esc 取消/取消选中
+## Ctrl+数字 编队 · 数字 选队（连按两下跳过去）· Shift+数字 把该队加进当前选择 · 中键拖动平移
+const GRID_KEYS := ["Q", "W", "E", "R", "T", "A", "S", "D", "F", "G", "Z", "X", "C", "V", "B"]
+var _target_mode := ""            # "attack" / "patrol"：按了热键，等左/右键点目的地
+## 兼容老代码 / 机器人脚本：A 移动待命 = 目标模式是 attack
+var _a_move_next: bool:
+	get:
+		return _target_mode == "attack"
+	set(v):
+		_target_mode = "attack" if v else ""
+var _mid_drag := false
+var _drag_shift := false
+var _drag_ctrl := false
+var _drag_double := false
+var _last_group := -1
+var _last_group_t := 0
+var _idle_i := 0
+var game_time := 0.0
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
 			_zoom_camera(1.15)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
 			_zoom_camera(1.0 / 1.15)
+		elif event.button_index == MOUSE_BUTTON_MIDDLE:
+			_mid_drag = event.pressed    # 中键按住拖动 = 平移镜头
+			return
+	if event is InputEventMouseMotion and _mid_drag:
+		cam.position -= event.relative / cam.zoom.x
+		_clamp_camera()
+		return
 	if game_state != "play":
 		return
 	if event is InputEventMouseButton:
@@ -269,64 +431,389 @@ func _unhandled_input(event: InputEvent) -> void:
 					if r != 1:
 						_placing_kind = ""
 					queue_redraw()
-				elif _a_move_next and selected.any(func(u): return u is Unit and is_instance_valid(u)):
-					# 按了 A 再左键 = 往那里 A 移动（和右键一样）；以前左键选人后 A 状态还挂着，
-					# 下一次普通右键会莫名其妙变成攻击移动
-					var pos := _pick_at(_to_world(event.position), true)
-					_issue_command(pos)
-					_markers.append({"pos": pos, "t0": Time.get_ticks_msec(), "attack": true})
+				elif _target_mode != "" and _has_units_selected():
+					# 按了 A / F 再左键 = 往那里 A 移动 / 巡逻
+					_command_at(_to_world(event.position), event.shift_pressed)
 				else:
-					_a_move_next = false
+					_target_mode = ""
 					_drag_start = _to_world(event.position)
 					_dragging = true
+					_drag_shift = event.shift_pressed
+					_drag_ctrl = event.ctrl_pressed or event.meta_pressed
+					_drag_double = event.double_click
 					queue_redraw()
 			elif _dragging:
-				_dragging = false
-				var rect := Rect2(_drag_start, _to_world(event.position) - _drag_start).abs()
-				if rect.size.length() > 10.0 / cam.zoom.x:    # 拖框阈值也按缩放换算
-					_box_select(rect)
-				else:
-					_point_select(_pick_at(_to_world(event.position)))
-				queue_redraw()
+				_finish_drag(event.position)
 		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 			if _placing_kind != "":
 				_hud_msg("已取消放置" + _place_name(_placing_kind))
 				_placing_kind = ""
 				queue_redraw()
-			elif selected.any(func(u): return u is Unit and is_instance_valid(u)):
-				var pos := _pick_at(_to_world(event.position), true)
-				var t := _thing_at(pos)
-				var attack: bool = _a_move_next or ((t is Unit or t is Building) and t.team == 1)
-				_issue_command(pos)
-				_markers.append({"pos": pos, "t0": Time.get_ticks_msec(), "attack": attack})
+			elif _has_units_selected():
+				_command_at(_to_world(event.position), event.shift_pressed)
+			else:
+				var b := _selected_building()
+				if b != null and b.trains():
+					set_rally(b, _pick_at(_to_world(event.position), true))
 	elif event is InputEventMouseMotion and _dragging:
 		queue_redraw()
-	elif event is InputEventKey and event.pressed:
-		# A 键 = 攻击移动（下次右键就是 A 移动）
-		if event.keycode == KEY_A and not event.echo:
-			_a_move_next = true
-			_hud_msg("A 移动：点目的地（左右键都行），路上遇到敌人就开打 · Esc 取消")
-		elif event.keycode == KEY_ESCAPE and not event.echo:
-			# Esc：取消 A 移动 / 放置建筑
-			if _placing_kind != "":
-				_hud_msg("已取消放置" + _place_name(_placing_kind))
-				_placing_kind = ""
-				queue_redraw()
-			elif _a_move_next:
-				_hud_msg("已取消 A 移动")
-			_a_move_next = false
-		elif event.keycode == KEY_C and not event.echo:
-			_panel_on = not _panel_on
-			_update_panel()
-		elif event.keycode == KEY_F1 and not event.echo:
+	elif event is InputEventKey and event.pressed and not event.echo:
+		_on_key(event)
+
+## 松开左键：拖得够远 = 框选，否则点选（Shift 加减选、双击/Ctrl 选同类）
+func _finish_drag(screen: Vector2) -> void:
+	_dragging = false
+	var rect := Rect2(_drag_start, _to_world(screen) - _drag_start).abs()
+	if rect.size.length() > 10.0 / cam.zoom.x:    # 拖框阈值也按缩放换算
+		_box_select(rect, _drag_shift)
+	else:
+		var p := _pick_at(_to_world(screen))
+		if _drag_double or _drag_ctrl:
+			_select_same_type(p)
+		elif _drag_shift:
+			_toggle_select(p)
+		else:
+			_point_select(p)
+	queue_redraw()
+
+func _on_key(event: InputEventKey) -> void:
+	var k := event.keycode
+	if k == KEY_ESCAPE:
+		# Esc：先取消放置 / 目标模式，再关帮助，最后取消选中
+		if _placing_kind != "":
+			_hud_msg("已取消放置" + _place_name(_placing_kind))
+			_placing_kind = ""
+			queue_redraw()
+		elif _target_mode != "":
+			_hud_msg("已取消" + ("A 移动" if _target_mode == "attack" else "巡逻"))
+			_target_mode = ""
+		elif hud.help_visible():
 			hud.toggle_help()
-		# 编队：Ctrl+数字 存队，数字键 召回
-		elif event.keycode >= KEY_1 and event.keycode <= KEY_9:
-			var idx := int(event.keycode) - int(KEY_1)
-			if event.ctrl_pressed or event.meta_pressed:
-				_save_control_group(idx)
-			else:
-				_recall_control_group(idx)
+		else:
+			_deselect_all()
+	elif k == KEY_F1:
+		hud.toggle_help()
+	elif k == KEY_F2:
+		toggle_panel()
+	elif k == KEY_DELETE:
+		_delete_selected()
+	elif k == KEY_H:
+		select_base()
+	elif k == KEY_PERIOD:
+		select_next_idle(true)
+	elif k == KEY_COMMA:
+		select_next_idle(false)
+	elif k == KEY_SPACE:
+		_center_on_selection()
+	elif k >= KEY_1 and k <= KEY_9:
+		# 编队：Ctrl+数字 存队，数字 选队（连按两下镜头跳过去），Shift+数字 并进当前选择
+		var idx := int(k) - int(KEY_1)
+		if event.ctrl_pressed or event.meta_pressed:
+			_save_control_group(idx)
+		elif event.shift_pressed:
+			_recall_control_group(idx, true)
+		else:
+			var now := Time.get_ticks_msec()
+			_recall_control_group(idx)
+			if _last_group == idx and now - _last_group_t < 450:
+				_center_on_selection()
+			_last_group = idx
+			_last_group_t = now
+	elif not run_hotkey(OS.get_keycode_string(k)) and k == KEY_C:
+		toggle_panel()
+
+func toggle_panel() -> void:
+	_panel_on = not _panel_on
+	_update_panel()
+
+func _has_units_selected() -> bool:
+	return selected.any(func(u): return u is Unit and is_instance_valid(u))
+
+func _sel_units() -> Array:
+	return selected.filter(func(u): return u is Unit and is_instance_valid(u))
+
+## 左/右键在世界里点了一下：按当前模式下指令
+func _command_at(world: Vector2, shift := false) -> void:
+	var pos := _pick_at(world, true)
+	var t := _thing_at(pos)
+	var mode := _target_mode
+	var attack: bool = mode != "" or ((t is Unit or t is Building) and t.team == 1)
+	if mode == "patrol":
+		_issue_patrol(pos)
+	elif shift and t == null:
+		_issue_queued(pos, mode == "attack")
+	else:
+		_issue_command(pos)
+	_target_mode = ""
+	_markers.append({"pos": pos, "t0": Time.get_ticks_msec(), "attack": attack})
+
+## Shift+右键：路点排到队尾（闲着的马上出发）
+func _issue_queued(pos: Vector2, attack: bool) -> void:
+	pos = open_point(pos)
+	var i := 0
+	for u in _sel_units():
+		u.queue_move(_spread_pos(i, pos), attack and (u is Soldier or u is Engineer))
+		i += 1
+
+## F 巡逻：士兵在当前位置和目标点之间来回 A 移动；工程师就 A 移动过去，农民走过去
+func _issue_patrol(pos: Vector2) -> void:
+	pos = open_point(pos)
+	var i := 0
+	for u in _sel_units():
+		u.cancel_orders()
+		var p := _spread_pos(i, pos)
+		if u is Soldier:
+			u.command_patrol(p)
+		elif u is Engineer:
+			u.command_attack_move(p)
+		else:
+			u.command_move(p)
+		i += 1
+
+func _deselect_all() -> void:
+	_clear_inspect()
+	for s in selected:
+		if is_instance_valid(s):
+			s.selected = false
+	selected.clear()
+
+## 换一批选中
+func _set_selection(list: Array) -> void:
+	_deselect_all()
+	for u in list:
+		if is_instance_valid(u) and not selected.has(u):
+			u.selected = true
+			selected.append(u)
+
+## 点中的己方单位（点选/加减选共用的命中规则）
+func _unit_at(pos: Vector2) -> Unit:
+	var best: Unit = null
+	var best_d := 18.0
+	for u in get_tree().get_nodes_in_group("player_units"):
+		var d := pos.distance_to(u.position)
+		if d < best_d:
+			best_d = d
+			best = u
+	return best
+
+## Shift+左键：把点中的单位加进 / 移出当前选择（和建筑混选时只留单位，帝国式）
+func _toggle_select(pos: Vector2) -> void:
+	var u := _unit_at(pos)
+	if u == null:
+		return
+	_clear_inspect()
+	for s in selected.duplicate():
+		if s is Building:
+			s.selected = false
+			selected.erase(s)
+	if selected.has(u):
+		u.selected = false
+		selected.erase(u)
+	else:
+		u.selected = true
+		selected.append(u)
+
+## 单位类型（双击选同类用）：worker / swordsman / archer / engineer；建筑 = b_兵种
+static func type_key(n: Node) -> String:
+	if n is Unit:
+		return n._art_key()
+	if n is Building:
+		return "b_" + n.kind
+	return ""
+
+## 屏幕内（顶栏和底栏之间）的世界矩形
+func view_rect() -> Rect2:
+	var vp := get_viewport_rect().size
+	var a := _to_world(Vector2(0, hud_top_h()))
+	var b := _to_world(Vector2(vp.x, vp.y - hud_bottom_h()))
+	return Rect2(a, b - a)
+
+## 双击 / Ctrl+左键：选中屏幕上所有同类单位（点在建筑上 = 同类建筑）
+func _select_same_type(pos: Vector2) -> void:
+	var u: Node2D = _unit_at(pos)
+	if u == null:
+		for b in get_tree().get_nodes_in_group("buildings"):
+			if b.team == 0 and pos.distance_to(b.position) < b.size * 0.6:
+				u = b
+				break
+	if u == null:
+		_point_select(pos)
+		return
+	select_type(type_key(u), view_rect())
+
+func select_type(key: String, rect := Rect2()) -> void:
+	var list: Array = []
+	var group := "buildings" if key.begins_with("b_") else "player_units"
+	for n in get_tree().get_nodes_in_group(group):
+		if not is_instance_valid(n) or n.team != 0 or type_key(n) != key:
+			continue
+		if rect.has_area() and not rect.has_point(n.position):
+			continue
+		list.append(n)
+	_set_selection(list)
+
+## H：选中基地并把镜头拉过去
+func select_base() -> void:
+	if not is_instance_valid(base):
+		return
+	_set_selection([base])
+	center_on(base.position)
+
+## . 闲置农民 / , 闲置军队：轮流选中下一个并跳镜头
+func idle_units(workers: bool) -> Array:
+	var r: Array = []
+	for u in get_tree().get_nodes_in_group("player_units"):
+		if workers and u is Worker and u.is_idle():
+			r.append(u)
+		elif not workers and u is Soldier and u.is_idle():
+			r.append(u)
+	r.sort_custom(func(a, b): return a.get_instance_id() < b.get_instance_id())
+	return r
+
+func select_next_idle(workers: bool) -> void:
+	var list := idle_units(workers)
+	if list.is_empty():
+		_hud_msg("没有闲着的" + ("农民" if workers else "士兵"))
+		return
+	_idle_i = (_idle_i + 1) % list.size()
+	_set_selection([list[_idle_i]])
+	center_on(list[_idle_i].position)
+
+## 镜头对准某点（底栏挡住的部分不算，点落在可视区正中）
+func center_on(p: Vector2) -> void:
+	cam.position = p + Vector2(0, (hud_bottom_h() - hud_top_h()) * 0.5 / cam.zoom.y)
+	_clamp_camera()
+
+func _center_on_selection() -> void:
+	var list := selected.filter(func(u): return is_instance_valid(u))
+	if list.is_empty():
+		return
+	var c := Vector2.ZERO
+	for u in list:
+		c += u.position
+	center_on(c / list.size())
+
+## Del：删除选中的己方单位/建筑（英雄工程师和基地不能删）；排队的训练全额退
+func _delete_selected() -> void:
+	var n := 0
+	for u in selected.duplicate():
+		if not is_instance_valid(u) or u.team != 0:
+			continue
+		if u is Engineer or (u is Building and u.kind == "base"):
+			continue
+		if u is Building:
+			while not u.queue.is_empty():
+				cancel_train(u, u.queue.size() - 1)
+			u.take_damage(u.hp + 1.0)
+		else:
+			u.kill()
+		n += 1
+	if n > 0:
+		_hud_msg("已删除 %d 个" % n)
+	elif not selected.is_empty():
+		_hud_msg("英雄工程师和基地不能删除")
+
+## ---------- 命令卡（底栏 5×3 按钮 + 热键共用一张表）----------
+## 每项：{id, slot(0-14 → 热键 GRID_KEYS[slot]), key, title, icon, cost, tip}
+func commands() -> Array:
+	if game_state != "play":
+		return []
+	var out: Array = []
+	var bs: Array = selected.filter(func(u): return u is Building and is_instance_valid(u) and u.team == 0)
+	if not bs.is_empty() and not _has_units_selected():
+		var b: Building = bs[0]
+		match b.kind:
+			"base":
+				out.append(_cmd_entry("worker", 0, "农民", "worker", Economy.COST_WORKER, "采矿、伐木、搬运（训练 %d 秒）" % int(TRAIN.worker.time)))
+			"barracks":
+				out.append(_cmd_entry("sword", 0, "剑士", "sword", Economy.COST_SWORD, "近战前排，护甲高（训练 %d 秒）" % int(TRAIN.sword.time)))
+				out.append(_cmd_entry("archer", 1, "弓手", "archer", Economy.COST_ARCHER, "远程输出，躲在剑士后面（训练 %d 秒）" % int(TRAIN.archer.time)))
+		if b.kind != "base":
+			out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "拆掉这座建筑（不退资源）", "Del"))
+		return out
+	var us := _sel_units()
+	if us.is_empty():
+		return out
+	var all_workers := us.all(func(u): return u is Worker)
+	if us.size() == 1 and us[0] is Engineer:
+		out.append(_cmd_entry("warehouse", 0, "仓库", "warehouse", Economy.COST_WAREHOUSE, "就近交货点，缩短农民跑路"))
+		out.append(_cmd_entry("smelter", 1, "熔炉", "smelter", Economy.COST_SMELTER, "矿石 → 铁锭（剑士要用）。农民右键熔炉送矿"))
+		out.append(_cmd_entry("workshop", 2, "木工台", "workshop", Economy.COST_WORKSHOP, "木材 → 木板（弓手要用）。农民右键木工台送木"))
+		out.append(_cmd_entry("barracks", 3, "兵营", "barracks", Economy.COST_BARRACKS, "训练剑士和弓手"))
+		out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌就打"))
+		out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
+		return out
+	if all_workers:
+		out.append(_cmd_entry("mine", 0, "采矿", "ore", {}, "去最近的矿堆采矿"))
+		out.append(_cmd_entry("chop", 1, "伐木", "wood", {}, "去最近的树林伐木"))
+		out.append(_cmd_entry("auto_deliver", 2, "自动交货", "base", {}, "货送最近的基地/仓库（取消指定的熔炉/木工台）"))
+		out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
+	else:
+		out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌就打"))
+		out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
+		out.append(_cmd_entry("hold", 7, "驻守", "hold", {}, "原地不动：敌人进射程就打，不追"))
+		out.append(_cmd_entry("patrol", 8, "巡逻", "patrol", {}, "在这里和目标点之间来回走，遇敌就打"))
+	if not us.any(func(u): return u is Engineer):
+		out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "删除选中的单位", "Del"))
+	return out
+
+func _cmd_entry(id: String, slot: int, title: String, icon_key: String, cost: Dictionary, tip: String, key := "") -> Dictionary:
+	return {"id": id, "slot": slot, "key": key if key != "" else GRID_KEYS[slot], "title": title,
+		"icon": icon_key, "cost": cost, "tip": tip}
+
+## 热键 → 命令卡上同位置的按钮
+func run_hotkey(letter: String) -> bool:
+	for c in commands():
+		if c.key == letter:
+			run_command(c.id)
+			return true
+	return false
+
+func run_command(id: String) -> void:
+	if game_state != "play":
+		return
+	match id:
+		"worker":
+			_on_worker_pressed()
+		"sword":
+			_on_sword_pressed()
+		"archer":
+			_on_archer_pressed()
+		"warehouse", "smelter", "workshop", "barracks":
+			_start_placing(id)
+		"attack":
+			_target_mode = "attack"
+			_hud_msg("A 移动：点目的地（左右键都行），路上遇到敌人就开打 · Esc 取消")
+		"patrol":
+			_target_mode = "patrol"
+			_hud_msg("巡逻：点另一头（左右键都行），在两点之间来回 · Esc 取消")
+		"stop":
+			for u in _sel_units():
+				u.command_stop()
+		"hold":
+			for u in _sel_units():
+				if u is Soldier:
+					u.command_hold()
+				else:
+					u.command_stop()
+			_hud_msg("原地驻守：只打进射程的敌人，不追")
+		"mine", "chop":
+			var kind := "ore" if id == "mine" else "wood"
+			var n := 0
+			for w in _selected_workers():
+				w.cancel_orders()
+				var node: ResNode = w._nearest_node(kind)
+				if node != null:
+					w.command_gather(node)
+					n += 1
+			if n == 0:
+				_hud_msg("附近找不到能采的" + ("矿" if kind == "ore" else "树"))
+		"auto_deliver":
+			for w in _selected_workers():
+				w.set_deliver_to(null)
+			_hud_msg("交货改回自动：送最近的基地/仓库")
+		"delete":
+			_delete_selected()
 
 ## 屏幕坐标 → 世界坐标（考虑镜头缩放和位移）
 func _to_world(screen: Vector2) -> Vector2:
@@ -384,17 +871,8 @@ func _display_list() -> Array:
 	return selected.filter(func(u): return is_instance_valid(u))
 
 func _point_select(pos: Vector2) -> void:
-	_clear_inspect()
-	for s in selected:
-		s.selected = false
-	selected.clear()
-	var best: Unit = null
-	var best_d := 18.0
-	for u in get_tree().get_nodes_in_group("player_units"):
-		var d := pos.distance_to(u.position)
-		if d < best_d:
-			best_d = d
-			best = u
+	_deselect_all()
+	var best := _unit_at(pos)
 	if best:
 		best.selected = true
 		selected.append(best)
@@ -414,13 +892,18 @@ func _point_select(pos: Vector2) -> void:
 			e.selected = true
 			return
 
-func _box_select(rect: Rect2) -> void:
-	_clear_inspect()
-	for s in selected:
-		s.selected = false
-	selected.clear()
+## 框选：只框单位；Shift 拖框 = 加进当前选择（建筑先剔掉，帝国式）
+func _box_select(rect: Rect2, add := false) -> void:
+	if add:
+		_clear_inspect()
+		for s in selected.duplicate():
+			if s is Building:
+				s.selected = false
+				selected.erase(s)
+	else:
+		_deselect_all()
 	for u in get_tree().get_nodes_in_group("player_units"):
-		if rect.has_point(u.position):
+		if rect.has_point(u.position) and not selected.has(u):
 			u.selected = true
 			selected.append(u)
 
@@ -430,12 +913,13 @@ func _issue_command(pos: Vector2) -> void:
 		return
 	var target := _thing_at(pos)
 	if target == null:
-		pos = Art.open_point(pos)    # 点进画着的树林里 = 走到林子边上
+		pos = open_point(pos)    # 点进树林里 = 走到林子边上
 	var depot := _friendly_depot_at(pos)     # 选农民右键己方收货建筑 = 指派交货点
 	var move_idx := 0    # 纯移动的单位排队领环形散点，别全挤向同一个坐标
 	for u in selected:
 		if not (u is Unit) or not is_instance_valid(u):
 			continue    # 选中的是建筑（基地/兵营）：建筑不会走路，跳过
+		u.cancel_orders()    # 新指令覆盖排队路点 / 巡逻 / 原地坚守
 		if target is ResNode and u is Worker:
 			u.command_gather(target)
 		elif depot != null and u is Worker:
@@ -486,20 +970,21 @@ func _save_control_group(idx: int) -> void:
 	control_groups[idx] = selected.filter(func(u): return is_instance_valid(u)).duplicate()
 	_hud_msg("编队 %d 已存（%d 个单位）" % [idx + 1, control_groups[idx].size()])
 
-func _recall_control_group(idx: int) -> void:
-	_clear_inspect()
-	for s in selected:
-		s.selected = false
-	selected.clear()
-	if idx >= control_groups.size():
+func _recall_control_group(idx: int, add := false) -> void:
+	if not add:
+		_deselect_all()
+	else:
+		_clear_inspect()
+	if idx >= control_groups.size() or control_groups[idx] == null:
 		return
 	var grp: Array = control_groups[idx]
 	var alive: Array = []
 	for u in grp:
 		if is_instance_valid(u):
-			u.selected = true
-			selected.append(u)
 			alive.append(u)
+			if not selected.has(u):
+				u.selected = true
+				selected.append(u)
 	control_groups[idx] = alive
 
 ## 第 i 个移动单位的目标点：中心 + 环形散开（每圈 8 个，圈距 26px）
@@ -591,16 +1076,50 @@ func _build_ui() -> void:
 	hud = Hud.new(self)
 	add_child(hud)
 	ui = hud
-	hud.build()    # 建好后 res_label / wave_label / info_label / btn_* / panel / overlay 等都已挂到 main 上
+	hud.build()    # 建好后 res_label / wave_label / info_label / panel / overlay 等都已挂到 main 上
 
 ## ================================ 生产 ================================
 ## 点中的玩家建筑（基地出农民 / 兵营出兵）
+## 多选同种建筑（帝国式）：排进队列最短的那个
 func _selected_building() -> Building:
-	if selected.size() == 1 and selected[0] is Building and is_instance_valid(selected[0]):
-		return selected[0]
-	return null
+	var best: Building = null
+	for s in selected:
+		if not (s is Building) or not is_instance_valid(s):
+			return null
+		if best != null and s.kind != best.kind:
+			return null
+		if best == null or s.queue.size() < best.queue.size():
+			best = s
+	return best
 
-## 点基地 → 造农民
+## 训练表：成本 / 读条秒数 / 在哪造
+const TRAIN := {
+	"worker": {"cost": Economy.COST_WORKER, "time": 6.0, "at": "base", "name": "农民"},
+	"sword": {"cost": Economy.COST_SWORD, "time": 8.0, "at": "barracks", "name": "剑士"},
+	"archer": {"cost": Economy.COST_ARCHER, "time": 8.0, "at": "barracks", "name": "弓手"},
+}
+var train_scale := 1.0    # 读条时间倍率；自测（--test）设 0 = 立刻出，老断言照旧
+
+func train_name(kind: String) -> String:
+	return TRAIN[kind].name if TRAIN.has(kind) else kind
+
+## 排队中的单位数（kind 为空 = 全部）
+func queued_count(kind := "") -> int:
+	var n := 0
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if is_instance_valid(b) and b.team == 0:
+			for q in b.queue:
+				if kind == "" or q.kind == kind:
+					n += 1
+	return n
+
+## 出兵时人口满了没有（农民有单独上限）
+func pop_blocked(kind: String) -> bool:
+	if get_tree().get_nodes_in_group("player_units").size() >= UNIT_CAP:
+		return true
+	return kind == "worker" and _player_workers().size() >= WORKER_CAP
+
+## 点基地 → 造农民（排进基地的生产队列）
 func _on_worker_pressed() -> void:
 	if game_state != "play":
 		return
@@ -608,29 +1127,80 @@ func _on_worker_pressed() -> void:
 	if home == null or home.kind != "base":
 		_hud_msg("先点基地才能造农民")
 		return
-	if _player_workers().size() >= WORKER_CAP:
+	if _player_workers().size() + queued_count("worker") >= WORKER_CAP:
 		_hud_msg("农民已到上限（%d），够用就好" % WORKER_CAP)
 		return
-	if get_tree().get_nodes_in_group("player_units").size() >= UNIT_CAP:
+	_enqueue(home, "worker")
+
+## 排队：检查人口 / 队列 / 钱 → 先扣钱再排（帝国式，取消全额退）
+func _enqueue(b: Building, kind: String) -> bool:
+	if get_tree().get_nodes_in_group("player_units").size() + queued_count() >= UNIT_CAP:
 		_hud_msg("全军已到上限（%d）" % UNIT_CAP)
+		return false
+	if b.queue.size() >= Building.QUEUE_MAX:
+		_hud_msg("%s的队列满了（最多排 %d 个）" % [b.display_name, Building.QUEUE_MAX])
+		return false
+	var cost: Dictionary = TRAIN[kind].cost
+	if not _can_afford(cost):
+		_hud_msg(economy.short_msg(cost))
+		return false
+	_spend(cost)
+	var t: float = TRAIN[kind].time * train_scale
+	if t <= 0.0:
+		on_trained(b, kind)
+	else:
+		b.queue.append({"kind": kind, "left": t, "total": t, "cost": cost})
+	return true
+
+## 取消队列里第 i 个：全额退钱
+func cancel_train(b: Building, i: int) -> void:
+	if not is_instance_valid(b) or i < 0 or i >= b.queue.size():
 		return
-	if not _can_afford(Economy.COST_WORKER):
-		_hud_msg(economy.short_msg(Economy.COST_WORKER))
+	var q: Dictionary = b.queue[i]
+	for k in q.cost:
+		economy.add(k, float(q.cost[k]))
+	b.queue.remove_at(i)
+	if i == 0:
+		b.waiting_pop = false
+	_hud_msg("已取消%s，退回 %s" % [train_name(q.kind), economy.cost_text(q.cost)])
+
+## 读条完成：在建筑门口出人，按集结点走（没设集结点：农民自动上岗，兵在门口列队）
+func on_trained(b: Building, kind: String) -> void:
+	if kind == "worker":
+		var w := Worker.new()
+		w.position = b.position + Vector2(60, 40)
+		add_child(w)
+		if is_instance_valid(b.rally_node) and b.rally_node is ResNode:
+			w.command_gather(b.rally_node)
+			return
+		if b.rally != Vector2.INF:
+			w.command_move(open_point(b.rally))
+			return
+		# 新农民自动上岗：哪种资源干活的人少就去哪（玩家随时可以右键改派）
+		var n_ore := 0
+		var n_wood := 0
+		for o in _player_workers():
+			if o != w and is_instance_valid(o.node_target):
+				if o.node_target.kind == "ore":
+					n_ore += 1
+				else:
+					n_wood += 1
+		w.auto_assign("wood" if n_wood < n_ore else "ore")
 		return
-	_spend(Economy.COST_WORKER)
-	var w := Worker.new()
-	w.position = home.position + Vector2(60, 40)
-	add_child(w)
-	# 新农民自动上岗：哪种资源干活的人少就去哪（玩家随时可以右键改派）
-	var n_ore := 0
-	var n_wood := 0
-	for o in _player_workers():
-		if o != w and is_instance_valid(o.node_target):
-			if o.node_target.kind == "ore":
-				n_ore += 1
-			else:
-				n_wood += 1
-	w.auto_assign("wood" if n_wood < n_ore else "ore")
+	var s := Soldier.new()
+	s.setup(kind == "archer")
+	s.position = b.position + Vector2(0, 60)
+	add_child(s)
+	_rally_i += 1
+	var at := b.rally if b.rally != Vector2.INF else b.position + Vector2(0, 86)
+	s.command_move(open_point(_spread_pos(_rally_i % 24, at)))
+
+## 设集结点：选中基地/兵营右键地面（点在矿/树上 = 新农民直接去采）
+func set_rally(b: Building, pos: Vector2) -> void:
+	var t := _thing_at(pos)
+	b.rally_node = t if t is ResNode else null
+	b.rally = t.position if t is ResNode else open_point(pos)
+	_hud_msg("集结点已设到%s" % ("这片%s" % ("矿" if t.kind == "ore" else "树林") if t is ResNode else "这里"))
 
 ## 点英雄工程师 → 建兵营（帝国式：建造是工程师的活）
 ## 两种设施共用一个放置入口：工程师选中 → 检查成本 → 进入放置模式
@@ -678,7 +1248,7 @@ func _on_sword_pressed() -> void:
 func _on_archer_pressed() -> void:
 	_train_soldier(true)
 
-## 点兵营 → 出兵
+## 点兵营 → 出兵（排进兵营的生产队列）
 func _train_soldier(ranged: bool) -> void:
 	if game_state != "play":
 		return
@@ -688,40 +1258,7 @@ func _train_soldier(ranged: bool) -> void:
 			_hud_msg("先建兵营才能出兵")
 			return
 		b = barracks_list[0]
-	var cost: Dictionary = Economy.COST_ARCHER if ranged else Economy.COST_SWORD
-	if not _can_afford(cost):
-		_hud_msg(economy.short_msg(cost))
-		return
-	if get_tree().get_nodes_in_group("player_units").size() >= UNIT_CAP:
-		_hud_msg("全军已到上限（%d）" % UNIT_CAP)
-		return
-	_spend(cost)
-	var s := Soldier.new()
-	s.setup(ranged)
-	s.position = b.position + Vector2(0, 60)
-	add_child(s)
-	_rally_i += 1
-	s.command_move(Art.open_point(_spread_pos(_rally_i % 24, b.position + Vector2(0, 86))))
-
-## 按钮跟随选中对象出现：点基地出农民、点兵营出兵、点工程师建房子
-func _update_buttons() -> void:
-	var playing := game_state == "play"
-	var b := _selected_building()
-	btn_worker.visible = playing and b != null and b.kind == "base"
-	btn_sword.visible = playing and b != null and b.kind == "barracks"
-	btn_archer.visible = btn_sword.visible
-	var eng_sel := playing and selected.size() == 1 and selected[0] is Engineer
-	btn_warehouse.visible = eng_sel
-	btn_smelter.visible = eng_sel
-	btn_workshop.visible = eng_sel
-	btn_barracks.visible = eng_sel
-	btn_worker.disabled = not playing
-	btn_warehouse.disabled = not playing
-	btn_smelter.disabled = not playing
-	btn_workshop.disabled = not playing
-	btn_barracks.disabled = not playing
-	btn_sword.disabled = not playing
-	btn_archer.disabled = not playing
+	_enqueue(b, "archer" if ranged else "sword")
 
 ## ================================ 选中信息栏 ================================
 ## 点选 1 个 = 头像 + 数值面板；框选多个 = 头像排排站 + 数量统计
@@ -733,7 +1270,12 @@ func _selected_info_text() -> String:
 		var t = list[0]
 		if t is Building:
 			var extra := " · 箭塔 %.0f 伤害 / %.1f 秒 · 射程 %.0f" % [Building.TOWER_DMG, Building.TOWER_CD, Building.TOWER_RANGE] if t.has_tower() else ""
-			return "%s   血量 %.0f/%.0f · 建筑%s" % [t.display_name, t.hp, t.max_hp, extra]
+			var txt := "%s   血量 %.0f/%.0f · 建筑%s" % [t.display_name, t.hp, t.max_hp, extra]
+			if t.trains():
+				txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
+				if t.waiting_pop:
+					txt += " · 人口满了，等空位"
+			return txt
 		var u: Unit = t
 		var atk_txt := "—" if u.atk <= 0.0 else "%.0f（%.1f秒/下）" % [u.atk, u.atk_cd]
 		var rng_txt := "—"
@@ -835,6 +1377,8 @@ func _has_processor(kind: String) -> bool:
 ## 地图装饰：固定随机种子撒灌木/花丛/石头，避开土路、建筑、资源点和边缘树林
 ## 敌人行军路线 = 地图上画的土路（有手绘地图时从图里分析出来），否则用老的折线
 func road() -> Array:
+	if not roads.is_empty():
+		return roads[0]
 	if Art.has("map/map") and not ArtData.ROAD.is_empty():
 		return ArtData.ROAD
 	return DIRT_PATH
@@ -870,8 +1414,10 @@ func _build_decor() -> void:
 const DECOR_H := {"decor/bush_1": 26.0, "decor/bush_2": 26.0, "decor/flowers": 16.0, "decor/rock_1": 16.0}
 
 func _draw() -> void:
-	# ---- 地面：有手绘地图就整张铺上，否则用原来的色块草地 ----
-	if Art.has("map/map"):
+	# ---- 地面：随机图由 Ground 节点（着色器）画；经典图有手绘地图就整张铺上，否则用原来的色块草地 ----
+	if not classic:
+		pass
+	elif Art.has("map/map"):
 		draw_texture_rect(Art.tex("map/map"), Rect2(0, 0, W, H), false)
 		for d in _decor:
 			if Art.has(d.key):
@@ -898,6 +1444,29 @@ func _draw() -> void:
 		Art.ellipse(self, m.pos, 16.0 * (1.2 - k * 0.6), c, false, 3.0)
 		Art.ellipse(self, m.pos, 6.0 * (1.2 - k * 0.6), c, false, 2.0)
 
+	# ---- 集结点 / 排队路点 / 巡逻线（只画选中的；路点只画一个代表，多选时别画成一团乱麻） ----
+	var drew_wp := false
+	for s in selected:
+		if not is_instance_valid(s):
+			continue
+		if s is Building:
+			if s.team == 0 and s.trains() and s.rally != Vector2.INF:
+				_dashed(s.position, s.rally, Color(1.0, 1.0, 1.0, 0.7))
+				_draw_flag(s.rally)
+		elif s is Unit:
+			if not s.waypoints.is_empty() and not drew_wp:
+				drew_wp = true
+				var pts: Array = s.order_points()
+				var prev: Vector2 = s.position
+				for q in pts:
+					_dashed(prev, q, Color(0.55, 1.0, 0.35, 0.75))
+					Art.ellipse(self, q, 5.0, Color(0.55, 1.0, 0.35, 0.8), false, 2.0)
+					prev = q
+			if s is Soldier and s.patrol:
+				_dashed(s._patrol_a, s._patrol_b, Color(1.0, 0.85, 0.35, 0.75))
+				Art.ellipse(self, s._patrol_a, 6.0, Color(1.0, 0.85, 0.35, 0.8), false, 2.0)
+				Art.ellipse(self, s._patrol_b, 6.0, Color(1.0, 0.85, 0.35, 0.8), false, 2.0)
+
 	# ---- 拖框 ----
 	if _dragging:
 		var rect := Rect2(_drag_start, get_global_mouse_position() - _drag_start).abs()
@@ -917,6 +1486,24 @@ func _draw() -> void:
 			var r := Rect2(p - Vector2(half, half), Vector2(half * 2.0, half * 2.0))
 			draw_rect(r, Color(0.15, 0.6, 0.55, 0.5))
 			draw_rect(r, Color(1, 1, 1, 0.6), false, 1.0)
+
+## 虚线（集结点、路点）：每段 14px，线宽不随缩放变粗
+func _dashed(a: Vector2, b: Vector2, c: Color) -> void:
+	var d := a.distance_to(b)
+	if d < 1.0:
+		return
+	var dir := (b - a) / d
+	var w := 2.0 / cam.zoom.x
+	var t := 0.0
+	while t < d:
+		draw_line(a + dir * t, a + dir * minf(t + 14.0, d), c, w)
+		t += 24.0
+
+## 集结点小旗：旗杆 + 蓝色三角旗
+func _draw_flag(p: Vector2) -> void:
+	Art.ellipse(self, p, 7.0, Color(0, 0, 0, 0.3))
+	draw_line(p, p + Vector2(0, -26), Color(0.35, 0.25, 0.15), 2.0)
+	draw_colored_polygon(PackedVector2Array([p + Vector2(1, -26), p + Vector2(16, -21), p + Vector2(1, -16)]), Color(0.25, 0.5, 0.95))
 
 ## 放置预览用：和 BuildManager.try_place 同一套规则（只判断，不提示）
 func _placement_ok(kind: String, pos: Vector2) -> bool:

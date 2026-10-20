@@ -29,19 +29,27 @@ func update(delta: float) -> void:
 		if g:
 			g._end("win", "十波全清，守住了！")
 
+## 每只 Goo 轮流从还活着的巢穴出来，沿那个巢穴自己的土路走
+var _spawn_i := 0
+
 func _spawn_goo() -> void:
 	var g := _game()
 	if g == null:
 		return
-	var hive_pos := Vector2(1110, 160)
-	for b in get_tree().get_nodes_in_group("buildings"):
-		if b.kind == "hive" and is_instance_valid(b):
-			hive_pos = b.position
-			break
+	var alive: Array = g.hives.filter(func(h): return is_instance_valid(h))
+	if alive.is_empty():
+		return
+	var h: Node2D = alive[_spawn_i % alive.size()]
+	_spawn_i += 1
 	var goo := Goo.new()
-	goo.position = hive_pos + Vector2(randf_range(-60.0, 60.0), randf_range(60.0, 100.0))
+	var rd: Array = g.road_for(h)
+	# 出生点：巢穴脚下朝路的方向偏一点（别刷在巢穴背后的林子里）
+	var out_dir := Vector2(0, 1)
+	if rd.size() >= 2:
+		out_dir = (rd[maxi(rd.size() - 6, 0)] - h.position).normalized()
+	goo.position = h.position + out_dir * randf_range(60.0, 90.0) + out_dir.orthogonal() * randf_range(-40.0, 40.0)
 	g.add_child(goo)
 	# 血量每波 +6%：后期光靠堆人数不够，得配弓手
 	goo.max_hp *= 1.0 + 0.06 * maxf(wave - 1, 0)
 	goo.hp = goo.max_hp
-	goo.start_lane(g.road())
+	goo.start_lane(rd)

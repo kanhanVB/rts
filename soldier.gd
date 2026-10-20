@@ -14,6 +14,10 @@ var _ignore_aggro := false         # 普通移动途中：不自动索敌，到�
 var _engaged := false              # 上一帧是否在交战（打完后用来恢复 A 移动）
 var _auto_target: Node2D = null    # 自动索敌选中的目标（有粘性）
 var _scan_t := 0.0                 # 距下次重新扫描索敌的倒计时
+var hold := false                  # D 原地驻守：只打够得着的，不追
+var patrol := false                # F 巡逻：在两点之间来回 A 移动
+var _patrol_a := Vector2.ZERO
+var _patrol_b := Vector2.ZERO
 
 func setup(ranged: bool) -> void:
 	is_ranged = ranged
@@ -68,6 +72,14 @@ func _step(delta: float) -> void:
 				t.take_damage(attack_damage, self)
 				attack_fx_to(t.position)
 			return
+		if hold:
+			# 驻守：够不着就不追（敌人跑出射程也不跟），人站原地
+			_engaged = false
+			move_target = position
+			if attack_target == t and not is_instance_valid(attack_target):
+				attack_target = null
+			_auto_target = null
+			return
 		move_target = t.position       # 追击
 	elif _engaged:
 		# 刚打完一仗：A 移动就接着赶路（以前会原地站死，A 移动只生效一次）
@@ -87,6 +99,48 @@ func _step(delta: float) -> void:
 		_ignore_aggro = false
 		if _amove_dest != Vector2.ZERO and position.distance_to(_amove_dest) < arrive:
 			_amove_dest = Vector2.ZERO
+			if patrol:
+				# 巡逻：到一头就掉头 A 移动去另一头
+				var nxt := _patrol_a if _patrol_b.distance_to(position) < _patrol_a.distance_to(position) else _patrol_b
+				command_attack_move(nxt)
+
+func _done_with_order() -> bool:
+	return _amove_dest == Vector2.ZERO and not _engaged and attack_target == null and position.distance_to(move_target) < 20.0
+
+## 让路：还得没在打、没在 A 移动
+func _can_yield() -> bool:
+	return super() and not _engaged and _amove_dest == Vector2.ZERO
+
+## 闲置军队（"," 键 / 闲置军队按钮）：没命令、没巡逻、没排路点、站着不动
+func is_idle() -> bool:
+	return _done_with_order() and not patrol and waypoints.is_empty() and not moving
+
+func cancel_orders() -> void:
+	super()
+	hold = false
+	patrol = false
+
+func command_stop() -> void:
+	super()
+	_auto_target = null
+	_amove_dest = Vector2.ZERO
+	_ignore_aggro = false
+	_engaged = false
+	patrol = false
+
+## D 原地驻守
+func command_hold() -> void:
+	command_stop()
+	hold = true
+
+## F 巡逻：从现在的位置到 pos 来回走，路上遇敌就打
+func command_patrol(pos: Vector2) -> void:
+	waypoints.clear()
+	hold = false
+	patrol = true
+	_patrol_a = position
+	_patrol_b = pos
+	command_attack_move(pos)
 
 func _nearest_enemy(dist: float) -> Node2D:
 	var best: Node2D = null

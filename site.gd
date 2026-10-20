@@ -11,8 +11,18 @@ var size := 60.0 * Building.SIZE_SCALE    # 和兵营同大，跟着建筑缩放
 var hp := 150.0
 var max_hp := 150.0
 
+var _fp: Array = []    # 压住的地形格（A* 绕开）
+
 func _ready() -> void:
 	add_to_group("sites")
+	if Terrain.current != null:
+		_fp = Terrain.current.footprint(position, size * 0.5)
+		Terrain.current.occupy(_fp, 1)
+
+func _exit_tree() -> void:
+	if Terrain.current != null and not _fp.is_empty():
+		Terrain.current.occupy(_fp, -1)
+		_fp = []
 
 func _process(_delta: float) -> void:
 	queue_redraw()

@@ -41,8 +41,9 @@ func _step(delta: float) -> void:
 				return
 			_move_toward(node_target.position, delta)
 			# 到达判定必须用真实距离：_move_toward 的返回值是"到当前路径点"的距离，
-			# 路径拐点/起点格心离工人常小于 24px，用它判定会半路误入采集
-			if position.distance_to(node_target.position) < 24.0:
+			# 路径拐点/起点格心离工人常小于 24px，用它判定会半路误入采集。
+			# 实心的树/矿（随机图）人进不去，贴到格子边上就算到
+			if position.distance_to(node_target.position) < _reach(node_target):
 				state = State.GATHERING
 
 		State.GATHERING:
@@ -50,7 +51,7 @@ func _step(delta: float) -> void:
 				_after_node_gone()
 				return
 			# 保险：离资源点太远却处于采集中 = 误判，重新走过去
-			if position.distance_to(node_target.position) > 48.0:
+			if position.distance_to(node_target.position) > _reach(node_target) + 24.0:
 				state = State.TO_NODE
 				_path = _find_path(node_target.position)
 				_path_idx = 0
@@ -62,9 +63,7 @@ func _step(delta: float) -> void:
 			carry_amount += maxf(take, 0.0)
 			node_target.amount -= maxf(take, 0.0)
 			if node_target.amount <= 0.001:
-				if not node_target.is_queued_for_deletion():
-					Fx.spawn(get_parent(), "dust", node_target.position, {"size": 46.0, "life": 0.6})
-					node_target.queue_free()
+				node_target.deplete()    # 扬尘 + 树桩，格子变回空地
 				node_target = null
 			if carry_amount >= CARRY_CAP:
 				_back_to_base()
@@ -113,6 +112,11 @@ func _step(delta: float) -> void:
 
 ## ---------- 指令 ----------
 func command_gather(node: ResNode) -> void:
+	# 点了树林正中间够不着的树：改派离它最近、外圈够得着的那棵
+	if not node.reachable():
+		var alt := _nearest_node(node.kind, node.position)
+		if alt != null:
+			node = alt
 	node_target = node
 	_want_kind = node.kind
 	# 帝国式：手上扛着别的东西被派去新岗位，先把旧货交回仓库再上岗。
@@ -135,6 +139,22 @@ func command_move(pos: Vector2) -> void:
 	super(pos)            # 先走过去
 	state = State.IDLE    # 手动移动会打断采集
 	node_target = null
+
+func command_stop() -> void:
+	super()
+	state = State.IDLE
+	node_target = null
+
+## 只有闲着的农民才给队友让路（采集/搬运中的不动）
+func _can_yield() -> bool:
+	return state == State.IDLE and super()
+
+func _done_with_order() -> bool:
+	return state == State.IDLE and position.distance_to(move_target) < 20.0
+
+## 农民当前算不算闲着（"." 键 / 闲置农民按钮找的就是这种）
+func is_idle() -> bool:
+	return state == State.IDLE and not moving
 
 ## 手动指派交货点：右键己方收货建筑（基地/仓库/熔炉/木工台）。
 ## 手上有货就立刻掉头去交；正在采集的话采完这一趟再按新地址走。
@@ -195,6 +215,11 @@ func _on_stuck() -> void:
 	match state:
 		State.TO_NODE:
 			if node_target != null and is_instance_valid(node_target):
+				# 已经贴到跟前还挤不进去（那棵树周围站满了人）：换旁边一棵
+				if node_target.solid and position.distance_to(node_target.position) < 90.0:
+					var alt := _nearest_node(node_target.kind, Vector2.INF, node_target)
+					if alt != null and alt.position.distance_to(node_target.position) < 160.0:
+						node_target = alt
 				_path = _find_path(node_target.position)
 				_path_idx = 0
 		State.TO_BASE:
@@ -245,17 +270,23 @@ func _nearest_kind(kind: String) -> Building:
 			best = b
 	return best
 
-func _nearest_node(kind: String) -> ResNode:
+## 离 from（默认自己）最近的同类资源点；树林里面够不着的树跳过，except 也跳过（卡住时换一棵）
+func _nearest_node(kind: String, from := Vector2.INF, except: ResNode = null) -> ResNode:
+	var o := position if from == Vector2.INF else from
 	var best: ResNode = null
 	var best_d := INF
 	for n in _group("res_nodes"):
 		# 跳过已采空、等待销毁的资源点，别白跑一趟
-		if n.kind == kind and n.amount > 0.001 and not n.is_queued_for_deletion():
-			var d := position.distance_to(n.position)
-			if d < best_d:
+		if n.kind == kind and n != except and n.amount > 0.001 and not n.is_queued_for_deletion():
+			var d := o.distance_to(n.position)
+			if d < best_d and n.reachable():
 				best_d = d
 				best = n
 	return best
+
+## 走到离资源点多近算到：实心的（占格的树/矿）人站在旁边格子里，放宽到 40
+static func _reach(n: ResNode) -> float:
+	return 40.0 if n.solid else 24.0
 
 ## ---------- 贴图版 ----------
 func _art_key() -> String:

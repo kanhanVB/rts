@@ -47,8 +47,18 @@ func setup(k: String) -> void:
 	max_hp = hp
 	display_name = label_text()
 
+var _fp: Array = []    # 压住的地形格（A* 绕开）
+
 func _ready() -> void:
 	add_to_group("buildings")
+	if Terrain.current != null:
+		_fp = Terrain.current.footprint(position, size * 0.5)
+		Terrain.current.occupy(_fp, 1)
+
+func _exit_tree() -> void:
+	if Terrain.current != null and not _fp.is_empty():
+		Terrain.current.occupy(_fp, -1)
+		_fp = []
 
 func take_damage(amount: float, _from: Node2D = null) -> void:
 	if is_queued_for_deletion():
@@ -91,11 +101,40 @@ func _tower(delta: float) -> void:
 	var from := position + Vector2((-0.34 if best.position.x < position.x else 0.34) * size, -size * 0.95)
 	Fx.spawn(get_parent(), "arrow", from, {"to": best.position + Vector2(0, -9), "life": 0.3})
 
+## ---------- 生产队列（帝国式）：点一次排一个，排队时就扣钱；排头的读条，读满出兵；最多排 5 个 ----
+const QUEUE_MAX := 5
+var queue: Array = []              # [{kind, left, total, cost}]
+var rally := Vector2.INF           # 集结点（INF = 没设：农民自动上岗、兵在门口列队）
+var rally_node: Node2D = null      # 集结点设在矿/树上：新农民出来直接去采
+var waiting_pop := false           # 排头读满了但人口已满，卡着等
+
+func trains() -> bool:
+	return team == 0 and (kind == "base" or kind == "barracks")
+
+func _produce(delta: float) -> void:
+	var g := get_tree().get_first_node_in_group("game")
+	if g == null or g.game_state != "play":
+		return
+	var q: Dictionary = queue[0]
+	q.left = maxf(0.0, float(q.left) - delta)
+	if q.left > 0.0:
+		return
+	if g.pop_blocked(q.kind):
+		if not waiting_pop:
+			g._hud_msg("人口已满：%s 训练好了，等有空位再出来" % g.train_name(q.kind))
+		waiting_pop = true
+		return
+	waiting_pop = false
+	queue.pop_front()
+	g.on_trained(self, q.kind)
+
 ## 挨打抖动 / 选中圈要持续刷新（便宜：只在需要时重画）
 var _was_selected := false
 func _process(delta: float) -> void:
 	if has_tower():
 		_tower(delta)
+	if not queue.is_empty():
+		_produce(delta)
 	if Time.get_ticks_msec() < _hurt_until + 40 or selected != _was_selected:
 		_was_selected = selected
 		queue_redraw()

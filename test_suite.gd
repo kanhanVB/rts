@@ -196,7 +196,6 @@ func run() -> void:
 	_check(m.economy.wood >= wood_before2 + 10.0, "旧货按原样入库（+%d木）" % int(m.economy.wood - wood_before2))
 	_check(w3.carry_kind == "ore" and w3.carry_amount < 10.0, "到岗后改认矿石，账目没串")
 	m.selected.clear()
-	m._update_buttons()
 	w3.queue_free()
 	wg.queue_free()
 	ws.queue_free()
@@ -544,6 +543,10 @@ func run() -> void:
 	var hive_hp0: float = m.hive.hp
 	await m.get_tree().create_timer(7.0).timeout
 	_check(is_instance_valid(m.hive) and m.hive.hp < hive_hp0, "远处右键巢穴，剑士走过去开打（%.0f -> %.0f）" % [hive_hp0, m.hive.hp])
+	if is_instance_valid(hs):
+		hs.queue_free()    # 别在后面的测试里把巢穴拆了
+
+	await _aoe_tests()
 
 	# 拆巢穴触发胜利
 	m.hive.take_damage(99999.0)
@@ -556,6 +559,159 @@ func run() -> void:
 	else:
 		print("TEST FAIL（%d 项未过）" % m._fail)
 		m.get_tree().quit(1)
+
+## ---- 帝国时代式操作：生产队列 / 选择 / 热键 / 删除 / 闲置 / 占格 / 随机图 ----
+func _aoe_tests() -> void:
+	var tree := m.get_tree()
+	m._deselect_all()
+	# 生产队列：先扣钱再排队，取消全额退；集结点
+	m.train_scale = 1.0
+	m.economy.wood += 200.0
+	m.select_base()
+	var wood0: float = m.economy.wood
+	var nw0: int = m._player_workers().size()
+	m.run_hotkey("Q")
+	m.run_hotkey("Q")
+	_check(m.base.queue.size() == 2 and absf(m.economy.wood - (wood0 - 60.0)) < 0.5,
+		"Q 排两个农民进基地队列，先扣钱（队列 %d，木 %.0f→%.0f）" % [m.base.queue.size(), wood0, m.economy.wood])
+	m.cancel_train(m.base, 1)
+	_check(m.base.queue.size() == 1 and absf(m.economy.wood - (wood0 - 30.0)) < 0.5, "取消队列里的第 2 个，全额退钱")
+	var rally: Vector2 = m.base.position + Vector2(170, -30)
+	m.set_rally(m.base, rally)
+	await tree.create_timer(1.0).timeout
+	_check(m._player_workers().size() == nw0, "读条没完不出人")
+	await tree.create_timer(float(m.TRAIN.worker.time)).timeout
+	var fresh: Worker = null
+	for w in m._player_workers():
+		if w.move_target.distance_to(m.open_point(rally)) < 30.0:
+			fresh = w
+	_check(m._player_workers().size() == nw0 + 1 and fresh != null, "读条完出 1 个农民，走向集结点")
+	m.base.rally = Vector2.INF
+	m.base.rally_node = null
+	m.train_scale = 0.0
+
+	# 选择：Shift+左键加选/减选、选同类、Esc 取消选中
+	var s1 := Soldier.new()
+	s1.setup(false)
+	s1.position = Vector2(420, 640)
+	m.add_child(s1)
+	var s2 := Soldier.new()
+	s2.setup(false)
+	s2.position = Vector2(470, 640)
+	m.add_child(s2)
+	await tree.create_timer(0.1).timeout
+	m._set_selection([s1])
+	m._toggle_select(s2.position)
+	_check(m.selected.size() == 2 and m.selected.has(s2), "Shift+左键加选")
+	m._toggle_select(s2.position)
+	_check(m.selected.size() == 1 and m.selected[0] == s1, "Shift+左键再点一次 = 移出选择")
+	m.select_type("swordsman")
+	_check(m.selected.size() >= 2 and m.selected.all(func(u): return u is Soldier and not u.is_ranged), "选同类：全部剑士（%d 个）" % m.selected.size())
+	m._placing_kind = ""
+	m._target_mode = ""
+	if m.hud.help_visible():
+		m.hud.toggle_help()
+	var esc := InputEventKey.new()
+	esc.keycode = KEY_ESCAPE
+	esc.pressed = true
+	m._on_key(esc)
+	_check(m.selected.is_empty(), "Esc 取消选中")
+
+	# 命令卡热键：A 攻击移动 / S 停止 / D 驻守 / F 巡逻；Shift+右键排路点
+	m._set_selection([s1])
+	m.run_hotkey("A")
+	_check(m._target_mode == "attack", "A = 进入攻击移动模式")
+	m._on_key(esc)
+	_check(m._target_mode == "" and m.selected.size() == 1, "Esc 取消 A 模式，选中还在")
+	s1.command_move(s1.position + Vector2(-140, 0))
+	await tree.create_timer(0.4).timeout
+	m.run_hotkey("S")
+	var p_stop := s1.position
+	await tree.create_timer(0.8).timeout
+	_check(s1.position.distance_to(p_stop) < 6.0, "S 停止：原地站住（挪了 %.1fpx）" % s1.position.distance_to(p_stop))
+	s1.position = Vector2(420, 600)
+	var p1 := Vector2(420, 540)
+	var p2 := Vector2(480, 540)
+	m._issue_command(p1)
+	m._issue_queued(p2, false)
+	_check(s1.waypoints.size() == 1, "Shift+右键排了 1 个路点")
+	await tree.create_timer(120.0 / s1.speed + 1.2).timeout
+	_check(s1.position.distance_to(p2) < 30.0 and s1.waypoints.is_empty(), "走完第一段接着走排队的路点（离终点 %.0fpx）" % s1.position.distance_to(p2))
+	m.run_hotkey("D")
+	_check(s1.hold, "D = 原地驻守")
+	var hold_p := s1.position
+	var g := Goo.new()
+	g.position = s1.position + Vector2(130, 0)
+	m.add_child(g)
+	g.speed = 0.0
+	await tree.create_timer(1.5).timeout
+	_check(s1.position.distance_to(hold_p) < 10.0, "驻守：130px 外的怪不去追（挪了 %.0fpx）" % s1.position.distance_to(hold_p))
+	if is_instance_valid(g):
+		g.take_damage(99999.0)
+	m.run_hotkey("F")
+	_check(m._target_mode == "patrol", "F = 进入巡逻模式")
+	var start := s1.position
+	m._issue_patrol(start + Vector2(0, -80))
+	m._target_mode = ""
+	_check(s1.patrol and not s1.hold, "巡逻开始（驻守自动取消）")
+	await tree.create_timer(80.0 / s1.speed + 0.6).timeout
+	_check(s1._amove_dest.distance_to(start) < 30.0, "巡逻到头自动掉头往回走")
+	m._issue_command(start + Vector2(40, 0))
+	_check(not s1.patrol, "下新指令取消巡逻")
+
+	# Del：删选中的单位，基地删不掉
+	m._set_selection([s2, m.base])
+	m._delete_selected()
+	await tree.process_frame
+	_check(not is_instance_valid(s2) and is_instance_valid(m.base), "Del 删掉选中的士兵，基地不能删")
+
+	# 闲置农民：. 键选中，W 派去伐木
+	var iw := Worker.new()
+	iw.position = m.base.position + Vector2(90, 70)
+	m.add_child(iw)
+	await tree.create_timer(0.3).timeout
+	_check(m.idle_units(true).has(iw), "没活干的农民算闲置")
+	m.select_next_idle(true)
+	_check(m.selected.size() == 1 and m.selected[0] is Worker and m.selected[0].is_idle(), ". 键选中闲置农民")
+	m._set_selection([iw])
+	m.run_hotkey("W")
+	_check(is_instance_valid(iw.node_target) and iw.node_target.kind == "wood", "W = 去伐木")
+	m._deselect_all()
+
+	# 建筑占格：基地格子挡路，寻路绕着走
+	_check(m.terrain.solid_at(m.base.position), "基地占住脚下的格子")
+	var pa: Vector2 = m.base.position + Vector2(-80, 0)
+	var pb: Vector2 = m.base.position + Vector2(80, 0)
+	var path: PackedVector2Array = m.terrain.find_path(pa, pb)
+	var ok := not path.is_empty()
+	var prev := pa
+	for q in path:
+		if not m.terrain.line_walkable(prev, q):
+			ok = false
+		prev = q
+	_check(ok, "寻路绕开基地（%d 个拐点）" % path.size())
+
+	# 随机图：主城居中、2 个巢穴、主城到巢穴和每堆矿都走得通
+	for sd in range(1, 6):
+		var lay: Dictionary = MapGen.generate(sd, 3200.0, 2048.0)
+		var t := Terrain.new()
+		t.setup(3200.0, 2048.0)
+		var gw: int = lay.gw
+		var cells: PackedByteArray = lay.cells
+		for i in cells.size():
+			var v: int = cells[i]
+			if v == MapGen.C_TREE or v == MapGen.C_WOODS or v == MapGen.C_ORE:
+				t.set_cell(Vector2i(i % gw, i / gw), Terrain.T.WOODS)
+		var good: bool = lay.base == Vector2(1600, 1024) and lay.hives.size() == 2 and lay.roads.size() == 2 and lay.ore.size() >= 6
+		var st: Vector2 = lay.base + Vector2(0, 60)
+		for hp in lay.hives:
+			if t.find_path(st, hp).is_empty():
+				good = false
+		for op in lay.ore:
+			if t.find_path(st, op).is_empty():
+				good = false
+		t.free()
+		_check(good, "随机图 seed=%d：主城居中、2 巢穴、到巢穴和 %d 堆矿都走得通" % [sd, lay.ore.size()])
 
 func _check(cond: bool, msg: String) -> void:
 	if cond:

@@ -1,6 +1,7 @@
 class_name Hud
 extends CanvasLayer
-## 王国保卫战风格 HUD：木板金边面板、羊皮纸提示、红绸波次横幅、圆框头像，全部用 art/ui 贴图九宫格拉伸。
+## HUD：帝国时代式布局（顶栏资源/人口/波次，底栏 命令卡 | 选中信息 | 闲置按钮 | 小地图），
+## 皮肤沿用王国保卫战风格：木板金边面板、羊皮纸提示、圆框头像，全部用 art/ui 贴图九宫格拉伸。
 ## 只负责"怎么显示"；显示什么（文字、按钮可见性）仍由 main.gd 决定，测试照旧读 main 上的同名控件。
 ## 素材缺失（或 --noart）时自动退回纯色 StyleBoxFlat。
 
@@ -23,29 +24,49 @@ const SLICE := {
 	"ui/banner": [72, 12, 72, 40],
 }
 
+
+const VW := 1280.0
+const VH := 720.0
+const TOP_H := 42.0              # 顶栏：资源 / 人口 / 波次 / 时钟
+const BOT_H := 164.0             # 底栏：命令卡 | 选中信息 | 闲置按钮 | 小地图（帝国时代布局）
+const MINI_W := 222.0
+
 var main: Node2D
 var root: Control
 var theme_res: Theme
 var _res_vals := {}              # kind -> Label
 var _res_boxes := {}             # kind -> 徽章节点（二级材料没货时隐藏）
+var _res_sub := {}               # kind -> "(n)" 在采这种资源的农民数
 var _worker_val: Label
+var _pop_val: Label
 var _hero_val: Label
+var _clock_val: Label
 var _wave_bar: ProgressBar
-var _wave_box: VBoxContainer
+var _wave_box: HBoxContainer
 var _help: PanelContainer
-var _card: PanelContainer
-var _portraits: Control
-var _cmd_box: HBoxContainer
-var _btn_cost := {}              # Button -> cost Dictionary
+var _top: PanelContainer
+var _bottom: PanelContainer
+var _cmd_btns: Array = []        # 15 个命令卡按钮（5×3，对应 QWERT / ASDFG / ZXCVB）
+var _cmd_at := {}                # slot -> 命令项 {id, key, title, icon, cost, tip}
+var _cmd_sig := "-"
+var _sel: SelPanel
+var _idle_w: Button
+var _idle_s: Button
 var _overlay_pic: TextureRect
 var minimap: Control
-var _side: VBoxContainer
-var _res_panel: PanelContainer
-var _btn_row: HBoxContainer
 
 func _init(m: Node2D) -> void:
 	main = m
 	layer = 5
+
+func top_h() -> float:
+	return TOP_H
+
+func bottom_h() -> float:
+	return BOT_H
+
+func help_visible() -> bool:
+	return _help != null and _help.visible
 
 ## ================================================================ 主题
 func _font() -> Font:
@@ -136,36 +157,84 @@ func build() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.theme = theme_res
 	add_child(root)
-	_build_resource_bar()
-	_build_wave_banner()
+	_build_top_bar()
+	_build_bottom_bar()
 	_build_toast()
-	_build_card()
-	_build_side()
+	_build_panel()
 	_build_help()
 	_build_overlay()
 
-## 左上：资源徽章（物品图标 + 数字）+ 农民数 + 英雄状态
-func _build_resource_bar() -> void:
-	var pc := PanelContainer.new()
-	pc.add_theme_stylebox_override("panel", _panel_box(0.3, 0.0))
-	pc.position = Vector2(8, 6)
-	root.add_child(pc)
-	_res_panel = pc
+## 顶栏（帝国式）：左边资源 + 人口，右边波次 + 时钟 + 按钮
+func _build_top_bar() -> void:
+	_top = PanelContainer.new()
+	_top.add_theme_stylebox_override("panel", _panel_box(0.26, -7.0))
+	_top.mouse_filter = Control.MOUSE_FILTER_STOP     # 点在顶栏上不穿透到地图
+	_top.position = Vector2.ZERO
+	_top.custom_minimum_size = Vector2(VW, TOP_H)
+	_top.size = Vector2(VW, TOP_H)
+	root.add_child(_top)
 	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 12)
-	pc.add_child(hb)
+	hb.add_theme_constant_override("separation", 14)
+	_top.add_child(hb)
 	for k in ["ore", "wood", "ingot", "plank"]:
-		var b := _badge(hb, k, Economy.KIND_NAME[k])
+		var b := _badge(hb, k, Economy.KIND_NAME[k] + ("（括号里 = 在采的农民数）" if k == "ore" or k == "wood" else ""), k == "ore" or k == "wood")
 		_res_vals[k] = b.get_meta("val")
 		_res_boxes[k] = b
+		if b.has_meta("sub"):
+			_res_sub[k] = b.get_meta("sub")
 	_worker_val = _badge(hb, "workers", "农民（上限 %d）" % main.WORKER_CAP).get_meta("val")
+	_pop_val = _badge(hb, "pop", "人口：己方单位 + 排队中（上限 %d）" % main.UNIT_CAP).get_meta("val")
 	_hero_val = _badge(hb, "engineer", "英雄工程师：唯一会盖房子的人，阵亡后在基地免费复活").get_meta("val")
-	_hero_val.add_theme_font_size_override("font_size", 18)
+	var sp := Control.new()
+	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hb.add_child(sp)
+	# 波次：图标 + 文字 + 细进度条
+	_wave_box = HBoxContainer.new()
+	_wave_box.add_theme_constant_override("separation", 6)
+	_wave_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hb.add_child(_wave_box)
+	var ic := TextureRect.new()
+	ic.texture = icon("wave")
+	ic.custom_minimum_size = Vector2(22, 22)
+	ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	ic.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_wave_box.add_child(ic)
+	var wv := VBoxContainer.new()
+	wv.add_theme_constant_override("separation", 0)
+	wv.alignment = BoxContainer.ALIGNMENT_CENTER
+	wv.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_wave_box.add_child(wv)
+	main.wave_label = Label.new()
+	main.wave_label.add_theme_font_size_override("font_size", 16)
+	main.wave_label.add_theme_color_override("font_color", Color(1.0, 0.93, 0.6))
+	main.wave_label.add_theme_color_override("font_outline_color", Color(0.3, 0.05, 0.03))
+	main.wave_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	wv.add_child(main.wave_label)
+	_wave_bar = ProgressBar.new()
+	_wave_bar.custom_minimum_size = Vector2(200, 5)
+	_wave_bar.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_wave_bar.show_percentage = false
+	_wave_bar.max_value = 1.0
+	_wave_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wv.add_child(_wave_bar)
+	_clock_val = Label.new()
+	_clock_val.add_theme_font_size_override("font_size", 18)
+	_clock_val.tooltip_text = "游戏时间"
+	_clock_val.mouse_filter = Control.MOUSE_FILTER_PASS
+	_clock_val.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_clock_val.custom_minimum_size.x = 56
+	hb.add_child(_clock_val)
+	var bp := _small_btn(hb, "产能", "产能面板（C 键）")
+	bp.pressed.connect(func(): main.toggle_panel())
+	var bh := _small_btn(hb, "?", "操作说明（F1）")
+	bh.pressed.connect(toggle_help)
 	main.res_label = Label.new()     # 兼容：完整资源文字仍写在这里（不显示）
 	main.res_label.visible = false
 	root.add_child(main.res_label)
 
-func _badge(parent: Control, key: String, tip: String) -> Control:
+func _badge(parent: Control, key: String, tip: String, with_sub := false) -> Control:
 	var hb := HBoxContainer.new()
 	hb.add_theme_constant_override("separation", 3)
 	hb.tooltip_text = tip
@@ -173,76 +242,215 @@ func _badge(parent: Control, key: String, tip: String) -> Control:
 	parent.add_child(hb)
 	var tr := TextureRect.new()
 	tr.texture = icon(key)
-	tr.custom_minimum_size = Vector2(34, 34)
+	tr.custom_minimum_size = Vector2(28, 28)
 	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tr.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	hb.add_child(tr)
 	var l := Label.new()
-	l.add_theme_font_size_override("font_size", 23)
+	l.add_theme_font_size_override("font_size", 19)
 	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	l.custom_minimum_size.x = 34
+	l.custom_minimum_size.x = 30
 	hb.add_child(l)
 	hb.set_meta("val", l)
+	if with_sub:
+		var s := Label.new()
+		s.add_theme_font_size_override("font_size", 14)
+		s.add_theme_color_override("font_color", Color(0.85, 0.82, 0.7))
+		s.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		hb.add_child(s)
+		hb.set_meta("sub", s)
 	return hb
-
-## 右上：红绸波次横幅 + 倒计时条 + 产能/帮助按钮
-func _build_wave_banner() -> void:
-	_wave_box = VBoxContainer.new()
-	_wave_box.add_theme_constant_override("separation", 2)
-	_wave_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_wave_box)
-	var ribbon := PanelContainer.new()
-	ribbon.add_theme_stylebox_override("panel", tbox("ui/banner", 0.62, [6.0, -2.0, 6.0, -2.0], box(Color(0.6, 0.14, 0.1), GOLD)))
-	ribbon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_wave_box.add_child(ribbon)
-	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 6)
-	hb.alignment = BoxContainer.ALIGNMENT_CENTER
-	ribbon.add_child(hb)
-	var ic := TextureRect.new()
-	ic.texture = icon("wave")
-	ic.custom_minimum_size = Vector2(30, 30)
-	ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	hb.add_child(ic)
-	main.wave_label = Label.new()
-	main.wave_label.add_theme_font_size_override("font_size", 19)
-	main.wave_label.add_theme_color_override("font_color", Color(1.0, 0.93, 0.6))
-	main.wave_label.add_theme_color_override("font_outline_color", Color(0.3, 0.05, 0.03))
-	main.wave_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	main.wave_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hb.add_child(main.wave_label)
-	_wave_bar = ProgressBar.new()
-	_wave_bar.custom_minimum_size = Vector2(220, 9)
-	_wave_bar.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	_wave_bar.show_percentage = false
-	_wave_bar.max_value = 1.0
-	_wave_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_wave_box.add_child(_wave_bar)
-	var bb := HBoxContainer.new()      # 产能/帮助按钮挂在资源栏右边，别挡住右上角的巢穴
-	bb.add_theme_constant_override("separation", 6)
-	root.add_child(bb)
-	_btn_row = bb
-	var bp := _small_btn(bb, "产能", "产能面板（C 键）")
-	bp.pressed.connect(func(): main._panel_on = not main._panel_on; main._update_panel())
-	var bh := _small_btn(bb, "?", "操作说明（F1）")
-	bh.pressed.connect(toggle_help)
 
 func _small_btn(parent: Control, text: String, tip: String) -> Button:
 	var b := Button.new()
 	b.text = text
 	b.tooltip_text = tip
 	b.focus_mode = Control.FOCUS_NONE
-	b.custom_minimum_size = Vector2(44 if text.length() < 2 else 64, 32)
+	b.custom_minimum_size = Vector2(34 if text.length() < 2 else 56, 28)
+	b.add_theme_font_size_override("font_size", 14)
+	b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	parent.add_child(b)
 	return b
 
-## 屏幕中上：提示条（羊皮纸）
+## 底栏（帝国式）：左 命令卡 5×3 | 中 选中信息 + 生产队列 | 闲置按钮 | 右 小地图
+func _build_bottom_bar() -> void:
+	_bottom = PanelContainer.new()
+	_bottom.add_theme_stylebox_override("panel", _panel_box(0.3, -6.0))
+	_bottom.mouse_filter = Control.MOUSE_FILTER_STOP
+	_bottom.position = Vector2(0, VH - BOT_H)
+	_bottom.custom_minimum_size = Vector2(VW, BOT_H)
+	_bottom.size = Vector2(VW, BOT_H)
+	root.add_child(_bottom)
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 8)
+	_bottom.add_child(hb)
+	# 命令卡
+	var grid := GridContainer.new()
+	grid.columns = 5
+	grid.add_theme_constant_override("h_separation", 4)
+	grid.add_theme_constant_override("v_separation", 4)
+	grid.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hb.add_child(grid)
+	for slot in 15:
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(56, 44)
+		b.focus_mode = Control.FOCUS_NONE
+		b.disabled = true
+		b.modulate = Color(1, 1, 1, 0.32)
+		b.pressed.connect(func():
+			if _cmd_at.has(slot):
+				main.run_command(_cmd_at[slot].id))
+		b.draw.connect(_draw_cmd.bind(slot))
+		grid.add_child(b)
+		_cmd_btns.append(b)
+	hb.add_child(VSeparator.new())
+	# 选中信息
+	_sel = SelPanel.new()
+	_sel.hud = self
+	_sel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_sel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_sel.clip_contents = true
+	hb.add_child(_sel)
+	var info := Label.new()
+	info.add_theme_font_override("font", Art.body_font())
+	info.add_theme_font_size_override("font_size", 15)
+	info.add_theme_constant_override("outline_size", 5)
+	info.add_theme_constant_override("line_spacing", 0)
+	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	info.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sel.add_child(info)
+	main.info_label = info
+	hb.add_child(VSeparator.new())
+	# 闲置农民 / 闲置军队
+	var iv := VBoxContainer.new()
+	iv.add_theme_constant_override("separation", 6)
+	iv.alignment = BoxContainer.ALIGNMENT_CENTER
+	hb.add_child(iv)
+	_idle_w = _idle_btn(iv, "workers", "闲置农民（. 键）：轮流选中没活干的农民")
+	_idle_w.pressed.connect(func(): main.select_next_idle(true))
+	_idle_s = _idle_btn(iv, "sword", "闲置军队（, 键）：轮流选中没命令的士兵")
+	_idle_s.pressed.connect(func(): main.select_next_idle(false))
+	# 小地图
+	var mp := PanelContainer.new()
+	mp.add_theme_stylebox_override("panel", _panel_box(0.2, -7.0))
+	mp.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hb.add_child(mp)
+	minimap = Minimap.new()
+	minimap.main = main
+	minimap.custom_minimum_size = Vector2(MINI_W, roundf(MINI_W * main.H / main.W))
+	mp.add_child(minimap)
+
+func _idle_btn(parent: Control, key: String, tip: String) -> Button:
+	var b := Button.new()
+	b.custom_minimum_size = Vector2(46, 46)
+	b.focus_mode = Control.FOCUS_NONE
+	b.tooltip_text = tip
+	b.set_meta("n", 0)
+	b.draw.connect(func():
+		var t := icon(key)
+		if t != null:
+			var ts := t.get_size()
+			var s := minf(30.0 / ts.x, 30.0 / ts.y)
+			var sz := ts * s
+			b.draw_texture_rect(t, Rect2(Vector2(23, 21) - sz * 0.5, sz), false, Color(1, 1, 1, 1.0 if int(b.get_meta("n")) > 0 else 0.45))
+		Art.text(b, Vector2(34, 42), str(b.get_meta("n")), 14, Hud.GOLD if int(b.get_meta("n")) > 0 else Color(0.7, 0.66, 0.6)))
+	parent.add_child(b)
+	return b
+
+## 命令卡按钮：图标（或符号）+ 底部名字 + 左上角热键字母
+func _draw_cmd(slot: int) -> void:
+	var b: Button = _cmd_btns[slot]
+	if not _cmd_at.has(slot):
+		return
+	var c: Dictionary = _cmd_at[slot]
+	var id: String = c.id
+	if id in ["attack", "stop", "hold", "patrol", "delete"]:
+		_glyph(b, id, Vector2(28, 17))
+	else:
+		var t := icon(c.icon)
+		if t != null:
+			var ts := t.get_size()
+			var s := minf(36.0 / ts.x, 27.0 / ts.y)
+			var sz := ts * s
+			b.draw_texture_rect(t, Rect2(Vector2(28, 17) - sz * 0.5, sz), false)
+	var ok: bool = c.cost.is_empty() or main.economy.can_afford(c.cost)
+	Art.text(b, Vector2(28, 40), c.title, 11, Hud.CREAM if ok else Hud.RED_TEXT)
+	Art.text(b, Vector2(5, 12), c.key if c.key.length() == 1 else "", 11, Hud.GOLD, false)
+
+## 通用指令的矢量符号（没有专门贴图）
+func _glyph(ci: CanvasItem, id: String, c: Vector2) -> void:
+	var ink := Hud.INK
+	match id:
+		"attack":    # 交叉双剑
+			for s in [-1.0, 1.0]:
+				var a := c + Vector2(-9.0 * s, -10.0)
+				var e := c + Vector2(9.0 * s, 9.0)
+				ci.draw_line(a, e, ink, 5.0)
+				ci.draw_line(a, e, Color(0.92, 0.92, 0.95), 2.5)
+				var g := a.lerp(e, 0.72)
+				var n := Vector2(s, 1.0).normalized().orthogonal() * 5.0
+				ci.draw_line(g - n, g + n, ink, 4.0)
+				ci.draw_line(g - n, g + n, Hud.GOLD, 2.0)
+		"stop":      # 红色八角
+			var pts := PackedVector2Array()
+			for i in 8:
+				pts.append(c + Vector2.from_angle(TAU * (i + 0.5) / 8.0) * 11.0)
+			ci.draw_colored_polygon(pts, Color(0.8, 0.18, 0.12))
+			pts.append(pts[0])
+			ci.draw_polyline(pts, ink, 2.0)
+			ci.draw_rect(Rect2(c - Vector2(6, 1.5), Vector2(12, 3)), Color(1, 0.95, 0.85))
+		"hold":      # 盾
+			var pts := PackedVector2Array([c + Vector2(-10, -11), c + Vector2(10, -11), c + Vector2(10, 0), c + Vector2(0, 12), c + Vector2(-10, 0)])
+			ci.draw_colored_polygon(pts, Color(0.3, 0.5, 0.9))
+			pts.append(pts[0])
+			ci.draw_polyline(pts, ink, 2.0)
+			ci.draw_line(c + Vector2(0, -9), c + Vector2(0, 9), Hud.GOLD, 2.0)
+		"patrol":    # 来回箭头
+			for s in [-1.0, 1.0]:
+				var y: float = c.y + 5.0 * s
+				var a := Vector2(c.x - 11.0 * s, y)
+				var e := Vector2(c.x + 11.0 * s, y)
+				ci.draw_line(a, e, ink, 4.5)
+				ci.draw_line(a, e, Color(1.0, 0.85, 0.35), 2.0)
+				ci.draw_colored_polygon(PackedVector2Array([e + Vector2(3.0 * s, 0), e + Vector2(-4.0 * s, -4), e + Vector2(-4.0 * s, 4)]), Color(1.0, 0.85, 0.35))
+		"delete":    # 红叉
+			for s in [-1.0, 1.0]:
+				ci.draw_line(c + Vector2(-8, -8 * s), c + Vector2(8, 8 * s), ink, 6.0)
+				ci.draw_line(c + Vector2(-8, -8 * s), c + Vector2(8, 8 * s), Color(0.95, 0.3, 0.2), 3.0)
+
+## 命令卡内容跟着选中对象换（只在变了时重建提示文字）
+func _sync_commands() -> void:
+	var cmds: Array = main.commands()
+	var sig := ""
+	for c in cmds:
+		sig += "%s@%d;" % [c.id, c.slot]
+	if sig != _cmd_sig:
+		_cmd_sig = sig
+		_cmd_at.clear()
+		for c in cmds:
+			_cmd_at[int(c.slot)] = c
+		for slot in 15:
+			var b: Button = _cmd_btns[slot]
+			if _cmd_at.has(slot):
+				var c: Dictionary = _cmd_at[slot]
+				var cost_txt: String = "" if c.cost.is_empty() else "\n花费：" + main.economy.cost_text(c.cost)
+				b.disabled = false
+				b.modulate = Color.WHITE
+				b.tooltip_text = "%s（%s）%s\n%s" % [c.title, c.key, cost_txt, c.tip]
+			else:
+				b.disabled = true
+				b.modulate = Color(1, 1, 1, 0.32)
+				b.tooltip_text = ""
+	for b in _cmd_btns:
+		b.queue_redraw()
+
+## 底栏上方中间：提示条（羊皮纸）
 func _build_toast() -> void:
 	var l := Label.new()
 	l.add_theme_stylebox_override("normal", _parch_box(0.26, [14.0, -4.0, 14.0, -4.0]))
-	l.add_theme_font_size_override("font_size", 19)
+	l.add_theme_font_size_override("font_size", 18)
 	l.add_theme_color_override("font_color", INK)
 	l.add_theme_constant_override("outline_size", 0)
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -251,104 +459,41 @@ func _build_toast() -> void:
 	root.add_child(l)
 	main._hud_msg_label = l
 
-## 底部中央：指令卡 = 头像 | 数值 | 指令按钮
-func _build_card() -> void:
-	_card = PanelContainer.new()
-	_card.add_theme_stylebox_override("panel", _panel_box(0.36, 0.0))
-	root.add_child(_card)
-	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 10)
-	_card.add_child(hb)
-	_portraits = Portraits.new()
-	_portraits.hud = self
-	hb.add_child(_portraits)
-	var info := Label.new()
-	info.add_theme_font_override("font", Art.body_font())
-	info.add_theme_font_size_override("font_size", 16)
-	info.add_theme_constant_override("outline_size", 5)
-	info.custom_minimum_size = Vector2(250, 0)
-	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	info.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	info.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	hb.add_child(info)
-	main.info_label = info
-	_cmd_box = HBoxContainer.new()
-	_cmd_box.add_theme_constant_override("separation", 5)
-	hb.add_child(_cmd_box)
-	main.btn_worker = _cmd(_cmd_box, "worker", "农民", Economy.COST_WORKER, main._on_worker_pressed, "采矿、伐木、搬运。右键矿/树派去采集")
-	main.btn_warehouse = _cmd(_cmd_box, "warehouse", "仓库", Economy.COST_WAREHOUSE, main._on_warehouse_pressed, "就近交货点，缩短农民跑路")
-	main.btn_smelter = _cmd(_cmd_box, "smelter", "熔炉", Economy.COST_SMELTER, main._on_smelter_pressed, "矿石 → 铁锭（剑士要用）。农民右键熔炉送矿")
-	main.btn_workshop = _cmd(_cmd_box, "workshop", "木工台", Economy.COST_WORKSHOP, main._on_workshop_pressed, "木材 → 木板（弓手要用）。农民右键木工台送木")
-	main.btn_barracks = _cmd(_cmd_box, "barracks", "兵营", Economy.COST_BARRACKS, main._on_barracks_pressed, "训练剑士和弓手")
-	main.btn_sword = _cmd(_cmd_box, "sword", "剑士", Economy.COST_SWORD, main._on_sword_pressed, "近战前排，护甲高")
-	main.btn_archer = _cmd(_cmd_box, "archer", "弓手", Economy.COST_ARCHER, main._on_archer_pressed, "远程输出，躲在剑士后面")
-	for b in [main.btn_worker, main.btn_warehouse, main.btn_smelter, main.btn_workshop,
-			main.btn_barracks, main.btn_sword, main.btn_archer]:
-		b.visible = false
-
-func _cmd(parent: Control, key: String, title: String, cost: Dictionary, cb: Callable, tip: String) -> Button:
-	var b := Button.new()
-	b.text = "%s\n%s" % [title, main.economy.cost_text(cost)]
-	b.icon = icon(key)
-	b.expand_icon = true
-	b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	b.vertical_icon_alignment = VERTICAL_ALIGNMENT_TOP
-	b.custom_minimum_size = Vector2(80, 104)
-	b.focus_mode = Control.FOCUS_NONE
-	b.tooltip_text = "%s（%s）\n%s" % [title, main.economy.cost_text(cost), tip]
-	b.add_theme_font_size_override("font_size", 14)
-	b.add_theme_constant_override("line_spacing", -3)
-	b.add_theme_constant_override("outline_size", 5)
-	b.pressed.connect(cb)
-	parent.add_child(b)
-	_btn_cost[b] = cost
-	return b
-
-## 右下：产能面板 + 小地图
-func _build_side() -> void:
-	_side = VBoxContainer.new()
-	_side.add_theme_constant_override("separation", 6)
-	root.add_child(_side)
+## 右侧、底栏上方：产能面板（C 键开关）
+func _build_panel() -> void:
 	var p := PanelContainer.new()
-	var psb := _panel_box(0.3, 2.0)
-	p.add_theme_stylebox_override("panel", psb)
+	p.add_theme_stylebox_override("panel", _panel_box(0.3, 2.0))
 	p.self_modulate = Color(1, 1, 1, 0.93)
 	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_side.add_child(p)
+	root.add_child(p)
 	main.panel = p
 	var l := Label.new()
 	l.add_theme_font_override("font", Art.body_font())
-	l.add_theme_font_size_override("font_size", 15)
+	l.add_theme_font_size_override("font_size", 14)
 	l.add_theme_constant_override("line_spacing", 1)
 	l.add_theme_constant_override("outline_size", 5)
 	p.add_child(l)
 	main.panel_label = l
-	var mp := PanelContainer.new()
-	mp.add_theme_stylebox_override("panel", _panel_box(0.22, -6.0))
-	_side.add_child(mp)
-	minimap = Minimap.new()
-	minimap.main = main
-	minimap.custom_minimum_size = Vector2(228, 128)
-	mp.add_child(minimap)
 
 func _build_help() -> void:
 	_help = PanelContainer.new()
-	_help.add_theme_stylebox_override("panel", _parch_box(0.55, [14.0, -6.0, 14.0, -8.0]))
+	_help.add_theme_stylebox_override("panel", _parch_box(0.55, [22.0, 22.0, 22.0, 24.0]))
 	_help.visible = false
+	_help.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(_help)
 	var l := Label.new()
 	l.add_theme_color_override("font_color", INK)
 	l.add_theme_constant_override("outline_size", 0)
 	l.add_theme_font_override("font", Art.body_font())
-	l.add_theme_font_size_override("font_size", 17)
-	l.text = """操作说明
-左键：点选单位/建筑 · 拖动：框选己方单位
-右键：空地 = 移动 · 矿/树 = 农民去采 · 敌人 = 攻击
-右键己方仓库/熔炉/木工台 = 农民改送那里
-A + 左/右键：攻击移动（路上遇敌就打）· Esc 取消
-Ctrl+数字：编队 · 数字：召回编队
-滚轮：缩放 · 鼠标贴边 / 方向键：移动镜头 · 小地图：点击跳转
-点基地 = 造农民 · 点兵营 = 出兵 · 点工程师 = 盖设施
+	l.add_theme_font_size_override("font_size", 16)
+	l.text = """操作说明（帝国时代式）
+左键：点选 · 拖动：框选 · Shift+左键/拖框：加选减选 · 双击 / Ctrl+左键：选屏幕内同类
+右键：移动 / 采集 / 攻击 / 交货（看点的什么）· Shift+右键：排路点 · 选中基地/兵营右键 = 集结点
+命令卡热键按位置：Q W E R T / A S D F G / Z X C V B（A 攻击移动 · S 停止 · D 驻守 · F 巡逻）
+H：选基地 · .：闲置农民 · ,：闲置军队 · 空格：镜头回到选中 · Del：删除 · Esc：取消
+Ctrl+数字：编队 · 数字：选队（连按两下跳过去）· Shift+数字：加进当前选择
+滚轮：缩放 · 鼠标贴边 / 方向键 / 中键拖动：移动镜头 · 小地图：左键跳转、右键下指令
+底栏生产队列：点图标取消（全额退钱）· 人口满了排头会等空位
 C：产能面板 · F1：本说明"""
 	_help.add_child(l)
 
@@ -406,7 +551,26 @@ func refresh() -> void:
 		_res_vals[k].text = str(int(e.amount(k)))
 	_res_boxes["ingot"].visible = e.ingot > 0.0 or main._has_processor("smelter")
 	_res_boxes["plank"].visible = e.plank > 0.0 or main._has_processor("workshop")
-	_worker_val.text = "%d/%d" % [main._player_workers().size(), main.WORKER_CAP]
+	# 每种资源有几个农民在干（帝国式顶栏括号数）
+	var on := {"ore": 0, "wood": 0}
+	var workers: Array = main._player_workers()
+	for w in workers:
+		var k := ""
+		if w.state == Worker.State.TO_BASE:
+			k = w.carry_kind
+		elif w.state != Worker.State.IDLE and is_instance_valid(w.node_target):
+			k = w.node_target.kind
+		if on.has(k):
+			on[k] += 1
+	for k in _res_sub:
+		_res_sub[k].text = "(%d)" % on[k]
+	_worker_val.text = "%d/%d" % [workers.size(), main.WORKER_CAP]
+	var pop: int = main.get_tree().get_nodes_in_group("player_units").size() + main.queued_count()
+	_pop_val.text = "%d/%d" % [pop, main.UNIT_CAP]
+	if pop >= main.UNIT_CAP:
+		_pop_val.add_theme_color_override("font_color", RED_TEXT)
+	else:
+		_pop_val.remove_theme_color_override("font_color")
 	if not main.respawn_timers.is_empty():
 		_hero_val.text = "复活 %ds" % int(maxf(main.respawn_timers[0], 0.0))
 		_hero_val.add_theme_color_override("font_color", RED_TEXT)
@@ -416,40 +580,30 @@ func refresh() -> void:
 	else:
 		_hero_val.text = "上阵"
 		_hero_val.remove_theme_color_override("font_color")
+	var secs := int(main.game_time)
+	_clock_val.text = "%02d:%02d" % [secs / 60, secs % 60]
 	# 波次条：离下一波越近越满
 	var wm: WaveManager = main._wave_mgr
 	_wave_box.visible = main.game_state == "play"
 	var span: float = WaveManager.FIRST_WAVE_AT if wm.wave == 0 else WaveManager.WAVE_INTERVAL
 	_wave_bar.visible = wm.wave < WaveManager.MAX_WAVES
 	_wave_bar.value = 1.0 - clampf(wm.wave_timer / span, 0.0, 1.0)
-	_fit(_wave_box, Vector2(1280 - _wave_box.size.x - 8, 6))
-	_fit(_res_panel, Vector2.ZERO)
-	_fit(_btn_row, _res_panel.position + Vector2(_res_panel.size.x + 6.0, (_res_panel.size.y - 32.0) * 0.5))
-	# 提示条居中
+	# 底栏
+	_sync_commands()
+	_sel.layout()
+	_sel.queue_redraw()
+	_idle_w.set_meta("n", main.idle_units(true).size())
+	_idle_s.set_meta("n", main.idle_units(false).size())
+	_idle_w.queue_redraw()
+	_idle_s.queue_redraw()
+	# 提示条：底栏上方居中
 	var t: Label = main._hud_msg_label
 	if t.visible:
-		_fit(t, Vector2((1280 - t.size.x) * 0.5, 80))
-	# 指令卡：有选中才出现
-	var list: Array = main._display_list()
-	_card.visible = not list.is_empty() and main.game_state == "play"
-	if _card.visible:
-		var any_btn := false
-		for b in _btn_cost:
-			if b.visible:
-				any_btn = true
-				var ok: bool = e.can_afford(_btn_cost[b])
-				b.add_theme_color_override("font_color", CREAM if ok else RED_TEXT)
-				b.add_theme_color_override("font_hover_color", Color(1, 1, 0.9) if ok else Color(1.0, 0.65, 0.55))
-				b.self_modulate = Color.WHITE if ok else Color(0.8, 0.75, 0.72)
-		_cmd_box.visible = any_btn
-		main.info_label.custom_minimum_size.x = 240 if any_btn else 400
-		_portraits.queue_redraw()
-		_portraits.update_size(list.size())
-		_fit(_card, Vector2.ZERO)
-		_card.position = Vector2((1280 - _card.size.x) * 0.5 - 70.0, 720 - _card.size.y - 6)
-	# 右下栏
-	_fit(_side, Vector2(1280 - _side.size.x - 8, 720 - _side.size.y - 6))
-	_fit(_help, Vector2((1280 - _help.size.x) * 0.5, 120))
+		_fit(t, Vector2((VW - t.size.x) * 0.5, VH - BOT_H - t.size.y - 10.0))
+	# 产能面板：右侧、底栏上方
+	if main.panel.visible:
+		_fit(main.panel, Vector2(VW - main.panel.size.x - 8.0, VH - BOT_H - main.panel.size.y - 6.0))
+	_fit(_help, Vector2((VW - _help.size.x) * 0.5, TOP_H + 40.0))
 	if main.overlay.visible and _overlay_pic.texture == null:
 		_overlay_pic.texture = icon("ui/icon_victory" if main.game_state == "win" else "ui/icon_defeat")
 		_overlay_pic.visible = _overlay_pic.texture != null
@@ -465,7 +619,7 @@ func _fit(c: Control, pos: Vector2) -> void:
 const ICON_KEY := {
 	"ore": "items/ore", "wood": "items/wood", "ingot": "items/ingot", "plank": "items/plank",
 	"worker": "units/worker_idle", "engineer": "ui/icon_hero", "workers": "ui/icon_worker",
-	"sword": "units/swordsman_idle", "archer": "units/archer_idle",
+	"sword": "units/swordsman_idle", "archer": "units/archer_idle", "pop": "units/swordsman_idle",
 	"warehouse": "buildings/warehouse", "smelter": "buildings/smelter", "workshop": "buildings/workshop",
 	"barracks": "buildings/barracks", "base": "buildings/base", "hive": "buildings/hive", "wave": "ui/icon_wave",
 }
@@ -475,35 +629,134 @@ func icon(key: String) -> Texture2D:
 	return Art.tex(k) if Art.has(k) else null
 
 ## ================================================================ 子控件
-## 选中头像：金圈圆框 + 头像；单选一个大的，多选排成两行小的，都带血条
-class Portraits extends Control:
+## 底栏中间的选中信息（帝国式）：
+## 单选 = 大头像 + 数值；己方基地/兵营下面再加一排生产队列（点图标取消）
+## 多选 = 一行统计 + 小头像网格（点 = 只选它，Shift+点 = 移出，Ctrl+点 = 只留同类）
+class SelPanel extends Control:
 	var hud: Hud
-	var _n := 0
+	const ICON := 38.0
+	const STEP := Vector2(43, 46)
+	const Q_Y := 82.0
 
-	func update_size(n: int) -> void:
-		if n == _n:
-			return
-		_n = n
-		if n <= 1:
-			custom_minimum_size = Vector2(104, 108)
+	func _main() -> Node2D:
+		return hud.main
+
+	func _list() -> Array:
+		return _main()._display_list()
+
+	func _queue_b() -> Building:
+		var l := _list()
+		if l.size() == 1 and l[0] is Building and l[0].team == 0 and l[0].trains():
+			return l[0]
+		return null
+
+	## 信息文字的位置：单选在头像右边，多选在顶上一行
+	func layout() -> void:
+		var info: Label = _main().info_label
+		var l := _list()
+		if l.size() <= 1:
+			info.position = Vector2(112, 4)
+			var h := (Q_Y - 6.0) if _queue_b() != null else size.y - 8.0
+			info.size = Vector2(maxf(size.x - 116.0, 40.0), h)
+			info.vertical_alignment = VERTICAL_ALIGNMENT_TOP if _queue_b() != null else VERTICAL_ALIGNMENT_CENTER
+			info.clip_text = false
 		else:
-			custom_minimum_size = Vector2(48.0 * mini(n, 8) + 4.0, 56.0 if n <= 8 else 110.0)
+			info.position = Vector2(6, 0)
+			info.size = Vector2(maxf(size.x - 12.0, 40.0), 26)    # 行高约 22px：框太矮 clip 会一行都不画
+			info.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			info.clip_text = true
+
+	func _cols() -> int:
+		return maxi(1, int((size.x - 8.0) / STEP.x))
+
+	func _rows() -> int:
+		return maxi(1, int((size.y - 28.0 + 4.0) / STEP.y))
+
+	func _multi_rect(i: int) -> Rect2:
+		var c := _cols()
+		return Rect2(6.0 + (i % c) * STEP.x, 28.0 + (i / c) * STEP.y, ICON, ICON)
+
+	func _queue_rect(i: int) -> Rect2:
+		if i == 0:
+			return Rect2(112, Q_Y, 46, 46)
+		return Rect2(164.0 + (i - 1) * 40.0, Q_Y + 10.0, 36, 36)
 
 	func _draw() -> void:
-		var list: Array = hud.main._display_list()
-		if list.is_empty():
+		var l := _list()
+		if l.is_empty():
+			if _main().game_state == "play":
+				Art.text(self, Vector2(size.x * 0.5, size.y * 0.5 + 6.0), "左键点选 · 拖动框选 · 双击选同类 · F1 看全部操作", 15, Color(0.9, 0.85, 0.72))
 			return
-		if list.size() == 1:
-			_one(list[0], Rect2(4, 0, 96, 96), 7.0)
+		if l.size() == 1:
+			one(l[0], Rect2(8, 6, 92, 92), 7.0)
+			var b := _queue_b()
+			if b != null:
+				_draw_queue(b)
 			return
-		var shown := mini(list.size(), 16)
+		var cap := _cols() * _rows()
+		var shown := mini(l.size(), cap)
 		for i in shown:
-			var col := i % 8
-			var row := i / 8
-			if i == 15 and list.size() > 16:
-				Art.text(self, Vector2(col * 48.0 + 24.0, row * 54.0 + 30.0), "+%d" % (list.size() - 15), 20, Hud.CREAM)
+			var r := _multi_rect(i)
+			if i == cap - 1 and l.size() > cap:
+				Art.text(self, r.get_center() + Vector2(0, 7), "+%d" % (l.size() - cap + 1), 17, Hud.CREAM)
 				break
-			_one(list[i], Rect2(col * 48.0 + 3.0, row * 54.0 + 1.0, 44, 44), 5.0)
+			one(l[i], r, 4.0)
+
+	## 生产队列：排头大格带读条和剩余秒数，后面小格；空位描边
+	func _draw_queue(b: Building) -> void:
+		for i in Building.QUEUE_MAX:
+			var r := _queue_rect(i)
+			draw_rect(r, Color(0, 0, 0, 0.28))
+			draw_rect(r, Color(Hud.GOLD, 0.55), false, 1.5)
+			if i >= b.queue.size():
+				continue
+			var q: Dictionary = b.queue[i]
+			var t: Texture2D = hud.icon(q.kind)
+			if t != null:
+				var ts := t.get_size()
+				var s := minf((r.size.x - 6.0) / ts.x, (r.size.y - 6.0) / ts.y)
+				var sz := ts * s
+				draw_texture_rect(t, Rect2(r.get_center() - sz * 0.5, sz), false)
+			if i == 0:
+				var k := 1.0 - clampf(float(q.left) / maxf(float(q.total), 0.001), 0.0, 1.0)
+				var pb := Rect2(r.position.x, r.end.y - 5.0, r.size.x, 5.0)
+				draw_rect(pb, Color(0.1, 0.06, 0.03))
+				draw_rect(Rect2(pb.position, Vector2(pb.size.x * k, pb.size.y)), Color(0.98, 0.72, 0.2))
+				Art.text(self, Vector2(r.end.x + 4.0, r.position.y + 12.0), "%ds" % ceili(float(q.left)), 13, Hud.RED_TEXT if b.waiting_pop else Hud.CREAM, false)
+		var hint_x := _queue_rect(Building.QUEUE_MAX - 1).end.x + 12.0
+		if hint_x < size.x - 60.0 and not b.queue.is_empty():
+			Art.text(self, Vector2(hint_x, Q_Y + 32.0), "点图标取消（全额退）", 12, Color(0.85, 0.8, 0.68), false)
+
+	func _gui_input(event: InputEvent) -> void:
+		if not (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT):
+			return
+		var m := _main()
+		var l := _list()
+		var b := _queue_b()
+		if b != null:
+			for i in b.queue.size():
+				if _queue_rect(i).has_point(event.position):
+					m.cancel_train(b, i)
+					accept_event()
+					return
+			return
+		if l.size() < 2 or m.inspected != null:
+			return
+		var cap := mini(l.size(), _cols() * _rows())
+		for i in cap:
+			if not _multi_rect(i).has_point(event.position):
+				continue
+			var u = l[i]
+			if event.shift_pressed:
+				u.selected = false
+				m.selected.erase(u)
+			elif event.ctrl_pressed:
+				var key: String = m.type_key(u)
+				m._set_selection(l.filter(func(x): return is_instance_valid(x) and m.type_key(x) == key))
+			else:
+				m._set_selection([u])
+			accept_event()
+			return
 
 	## 头像内容：农民/英雄/敌人用专门的圆头像图标，兵种裁立绘上半身，建筑整张缩进去
 	func _face(u) -> Array:
@@ -516,7 +769,8 @@ class Portraits extends Control:
 			"goo": return ["units/goo_idle", false]
 			_: return ["units/%s_idle" % k, true]
 
-	func _one(u, r: Rect2, bar_h: float) -> void:
+	## 金圈圆框头像 + 下方血条
+	func one(u, r: Rect2, bar_h: float) -> void:
 		var enemy: bool = u.team != 0
 		var c := r.get_center()
 		var rad := r.size.x * 0.5
@@ -542,10 +796,10 @@ class Portraits extends Control:
 			draw_texture_rect(Art.tex("ui/portrait_frame"), r, false, Color(1, 0.75, 0.7) if enemy else Color.WHITE)
 		else:
 			draw_arc(c, rad - 2.0, 0, TAU, 40, Hud.GOLD, 3.0)
-		var hb := Rect2(r.position.x + 4.0, r.end.y + 3.0, r.size.x - 8.0, bar_h)
+		var hb := Rect2(r.position.x + 3.0, r.end.y + 2.0, r.size.x - 6.0, bar_h)
 		var ratio := clampf(u.hp / u.max_hp, 0.0, 1.0)
 		draw_rect(hb, Art.HP_BG)
-		draw_rect(Rect2(hb.position + Vector2(1, 1), Vector2((hb.size.x - 2.0) * ratio, hb.size.y - 2.0)), Art.hp_color(ratio, not enemy))
+		draw_rect(Rect2(hb.position + Vector2(1, 1), Vector2((hb.size.x - 2.0) * ratio, maxf(hb.size.y - 2.0, 1.0))), Art.hp_color(ratio, not enemy))
 
 ## 小地图：整张地图缩略图 + 建筑/单位/资源点 + 当前视野框，点击/拖动跳转镜头
 class Minimap extends Control:
@@ -557,7 +811,9 @@ class Minimap extends Control:
 
 	func _draw() -> void:
 		var k := _k()
-		if Art.has("map/map"):
+		if main.minimap_tex != null:
+			draw_texture_rect(main.minimap_tex, Rect2(Vector2.ZERO, size), false)
+		elif Art.has("map/map"):
 			draw_texture_rect(Art.tex("map/map"), Rect2(Vector2.ZERO, size), false)
 		else:
 			draw_rect(Rect2(Vector2.ZERO, size), Color(0.42, 0.66, 0.3))
@@ -566,8 +822,9 @@ class Minimap extends Control:
 				pts.append(p * k)
 			draw_polyline(pts, Color(0.78, 0.63, 0.42), 46.0 * k)
 		var tree := main.get_tree()
-		for n in tree.get_nodes_in_group("res_nodes"):
-			draw_circle(n.position * k, 2.2, Color(0.75, 0.75, 0.85) if n.kind == "ore" else Color(0.1, 0.3, 0.1))
+		if main.minimap_tex == null:    # 随机图的树/矿已经画在底图上了
+			for n in tree.get_nodes_in_group("res_nodes"):
+				draw_circle(n.position * k, 2.2, Color(0.75, 0.75, 0.85) if n.kind == "ore" else Color(0.1, 0.3, 0.1))
 		for b in tree.get_nodes_in_group("buildings"):
 			var s: float = maxf(b.size * k * 1.1, 5.0)
 			var c := Color(0.3, 0.55, 1.0) if b.team == 0 else Color(0.85, 0.25, 0.2)
@@ -580,7 +837,7 @@ class Minimap extends Control:
 		# 视野框
 		var cam: Camera2D = main.cam
 		if cam != null:
-			var half: Vector2 = Vector2(1280, 720) / cam.zoom * 0.5
+			var half: Vector2 = get_viewport_rect().size / cam.zoom * 0.5
 			var r := Rect2((cam.get_screen_center_position() - half) * k, half * 2.0 * k)
 			r = r.intersection(Rect2(Vector2.ZERO, size))
 			draw_rect(r, Color(1, 1, 1, 0.9), false, 1.5)
@@ -600,4 +857,4 @@ class Minimap extends Control:
 			accept_event()
 
 	func _jump(p: Vector2) -> void:
-		main.cam.position = p / _k()
+		main.center_on(p / _k())
