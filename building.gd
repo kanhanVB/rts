@@ -18,6 +18,10 @@ const COLORS := {
 	"hive": Color(0.42, 0.38, 0.36),     # 岩石
 }
 
+## 建筑整体缩放（碰撞 + 贴图一起）：按起源比例小人缩小后，建筑原尺寸显得太大，
+## 起源的塔约是小兵的 3 倍宽；全缩到 0.7 又太小，取 0.85
+const SIZE_SCALE := 0.85
+
 func setup(k: String) -> void:
 	kind = k
 	match k:
@@ -39,6 +43,7 @@ func setup(k: String) -> void:
 		"hive":
 			hp = 900.0
 			size = 84.0
+	size *= SIZE_SCALE
 	max_hp = hp
 	display_name = label_text()
 
@@ -83,7 +88,7 @@ func _tower(delta: float) -> void:
 		return
 	_tower_cd = TOWER_CD
 	best.take_damage(TOWER_DMG, self)
-	var from := position + Vector2(-26.0 if best.position.x < position.x else 26.0, -size * 0.95)
+	var from := position + Vector2((-0.34 if best.position.x < position.x else 0.34) * size, -size * 0.95)
 	Fx.spawn(get_parent(), "arrow", from, {"to": best.position + Vector2(0, -9), "life": 0.3})
 
 ## 挨打抖动 / 选中圈要持续刷新（便宜：只在需要时重画）

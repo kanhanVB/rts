@@ -7,7 +7,7 @@ var kind := "barracks"
 var progress := 0.0
 var build_time := 8.0
 var assigned: Node2D = null    # 认领工地的工程师
-var size := 60.0
+var size := 60.0 * Building.SIZE_SCALE    # 和兵营同大，跟着建筑缩放
 var hp := 150.0
 var max_hp := 150.0
 
