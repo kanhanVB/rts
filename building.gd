@@ -84,7 +84,7 @@ func _tower(delta: float) -> void:
 	_tower_cd = TOWER_CD
 	best.take_damage(TOWER_DMG, self)
 	var from := position + Vector2(-26.0 if best.position.x < position.x else 26.0, -size * 0.95)
-	Fx.spawn(get_parent(), "arrow", from, {"to": best.position + Vector2(0, -12), "life": 0.3})
+	Fx.spawn(get_parent(), "arrow", from, {"to": best.position + Vector2(0, -9), "life": 0.3})
 
 ## 挨打抖动 / 选中圈要持续刷新（便宜：只在需要时重画）
 var _was_selected := false

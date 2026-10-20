@@ -24,7 +24,7 @@ func setup(ranged: bool) -> void:
 		attack_damage = 8.0
 		attack_cooldown = 1.2
 		speed = 85.0
-		radius = 10.0
+		radius = 7.5
 		body_color = Color(0.55, 0.75, 0.95)
 		display_name = "弓手"
 		armor = 0.0
@@ -38,7 +38,7 @@ func setup(ranged: bool) -> void:
 		attack_damage = 12.0
 		attack_cooldown = 0.8
 		speed = 95.0
-		radius = 12.0
+		radius = 9.0
 		body_color = Color(0.3, 0.5, 0.95)
 		display_name = "剑士"
 		armor = 2.0

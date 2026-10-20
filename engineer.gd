@@ -22,7 +22,7 @@ func _ready() -> void:
 	hp = 70.0
 	max_hp = 70.0
 	speed = 95.0
-	radius = 11.0
+	radius = 9.0
 	body_color = Color(0.95, 0.55, 0.2)    # 橙色，和黄色工人区分开
 	display_name = "英雄·工程师"
 	armor = 1.0

@@ -21,7 +21,7 @@ func _ready() -> void:
 	hp = 30.0
 	max_hp = 30.0
 	speed = 85.0
-	radius = 10.0
+	radius = 7.5
 	body_color = Color(0.95, 0.78, 0.2)
 	display_name = "农民"
 
@@ -87,7 +87,7 @@ func _step(delta: float) -> void:
 					game.economy.add(out_k, carry_amount)
 					# 入账漂字（纯视觉；零头不弹"+0"）
 					if carry_amount >= 0.5:
-						Fx.spawn(get_parent(), "floater", position + Vector2(0, -44), {"life": 1.1,
+						Fx.spawn(get_parent(), "floater", position + Vector2(0, -34), {"life": 1.1,
 							"text": "+%d %s" % [int(round(carry_amount)), Economy.KIND_SHORT.get(out_k, out_k)],
 							"color": Color(1.0, 0.86, 0.3) if out_k in ["ore", "ingot"] else Color(0.65, 1.0, 0.45)})
 				carry_amount = 0.0
@@ -277,7 +277,7 @@ func _art_extra(feet: Vector2, h: float) -> void:
 	if carry_amount > 0.5:
 		var item := "items/ore" if carry_kind == "ore" else "items/wood"
 		var top := feet - Vector2(-_face * 1.0, h - 2.0)
-		Art.draw(self, item, top, 13.0)
+		Art.draw(self, item, top, 10.0)
 
 ## ---------- 绘制：KR 小人（草帽 + 镐），采集时挥镐，扛货顶头上 ----------
 func _body_draw() -> void:

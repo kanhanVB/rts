@@ -61,7 +61,7 @@ func _ready() -> void:
 	hp = 45.0
 	max_hp = 45.0
 	speed = 62.0
-	radius = 11.0
+	radius = 10.0    # 贴图宽（约 38px），半径别太小，不然一群 Goo 叠成一坨
 	body_color = Color(0.55, 0.6, 0.34)
 	display_name = "Goo"
 	armor = 0.0

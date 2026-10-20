@@ -256,7 +256,9 @@ static func pose_scale(key: String, pkey: String) -> float:
 	var hp: float = Art.info(pkey).get("h", 0.0)
 	return hp / hi if hi > 0.0 and hp > 0.0 else 1.0
 
-const ART_H := {"worker": 30.0, "engineer": 35.0, "swordsman": 33.0, "archer": 32.0, "goo": 24.0}
+## 按王国保卫战：起源实测比例定（小兵约屏高 3%、英雄约 4.5%、怪物不比小兵小），
+## 地图上画的树和起源同尺度，所以小人按树来比：小兵约树高的 1/3
+const ART_H := {"worker": 22.0, "engineer": 29.0, "swordsman": 24.0, "archer": 23.0, "goo": 19.0}
 var _face := 1.0              # 朝向：1 右 / -1 左（停下也保持，不会突然转回去）
 var _hurt_until := 0          # 挨打闪红到这个时间（毫秒）
 
@@ -347,10 +349,10 @@ func _art_draw(key: String) -> void:
 			var nx := from.lerp(to, minf(p + 0.08, 1.0)) - Vector2(0, sin(minf(p + 0.08, 1.0) * PI) * 14.0)
 			Art.draw(self, "fx/arrow", pt, 5.0, false, Color.WHITE, (nx - pt).angle())
 		elif p > 0.3 and Art.has("fx/hit"):
-			Art.draw(self, "fx/hit", to - Vector2(0, 10), 10.0 + 12.0 * p, false, Color(1, 1, 1, 1.2 - p))
+			Art.draw(self, "fx/hit", to - Vector2(0, 8), 8.0 + 10.0 * p, false, Color(1, 1, 1, 1.2 - p))
 	# 血条：掉血或选中时显示
 	if hp < max_hp or selected:
-		Art.hp_bar(self, feet - Vector2(0, h + 6.0), 20.0, hp / max_hp, team == 0)
+		Art.hp_bar(self, feet - Vector2(0, h + 5.0), 16.0, hp / max_hp, team == 0)
 
 ## 子类覆写：贴图之外的附加物（农民头顶的货、交货点蓝点）
 func _art_extra(_feet: Vector2, _h: float) -> void:
