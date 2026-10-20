@@ -286,7 +286,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				_hud_msg("已取消放置" + _place_name(_placing_kind))
 				_placing_kind = ""
 				queue_redraw()
-			elif not selected.is_empty():
+			elif selected.any(func(u): return u is Unit and is_instance_valid(u)):
 				var pos := _pick_at(_to_world(event.position), true)
 				var t := _thing_at(pos)
 				var attack: bool = _a_move_next or ((t is Unit or t is Building) and t.team == 1)
@@ -418,6 +418,8 @@ func _issue_command(pos: Vector2) -> void:
 	var depot := _friendly_depot_at(pos)     # 选农民右键己方收货建筑 = 指派交货点
 	var move_idx := 0    # 纯移动的单位排队领环形散点，别全挤向同一个坐标
 	for u in selected:
+		if not (u is Unit) or not is_instance_valid(u):
+			continue    # 选中的是建筑（基地/兵营）：建筑不会走路，跳过
 		if target is ResNode and u is Worker:
 			u.command_gather(target)
 		elif depot != null and u is Worker:

@@ -13,6 +13,9 @@ var attack_cooldown: float = 0.9
 var aggro_range: float = 70.0
 var _cd: float = 0.0
 var move_order := false   # 玩家右键点过地板：走路优先，走完再自动找活
+var _amove := false       # 这趟是 A 移动：路上贴脸遇敌先打，打完接着走
+var _amove_dest := Vector2.ZERO
+var _amove_fight := false
 
 func _ready() -> void:
 	super()
@@ -60,38 +63,55 @@ func _step(delta: float) -> void:
 		_:
 			# 玩家点名要他走：走路优先，到站之前不接活
 			if move_order:
+				# A 移动：路上贴脸遇敌先抡锤（以前这里直接 return，A 移动 = 普通移动）
+				var foe: Node2D = _acquire_target() if _amove else null
+				if foe != null:
+					if not _amove_fight:
+						_amove_fight = true
+						_path = PackedVector2Array()    # 放下行军路径直接扑过去，否则会沿旧路径走
+					_fight(foe, delta)
+					return
+				if _amove_fight:
+					_amove_fight = false
+					move_target = _amove_dest
+					_path = _find_path(_amove_dest)
+					_path_idx = 0
 				if position.distance_to(move_target) > 6.0:
 					_move_toward(move_target, delta)
 					return
 				move_order = false
+				_amove = false
 				move_target = position
-			# 闲逛：自动认领无主工地
-			var sites := _group("sites")
-			for s in sites:
-				if not is_instance_valid(s):
-					continue
-				if s.assigned == null:
-					command_build(s)
-					break
+			# 闲逛：自动认领无主工地（玩家点名要打的目标还活着就先打完，别扔下去盖房）
+			if attack_target == null or not is_instance_valid(attack_target):
+				var sites := _group("sites")
+				for s in sites:
+					if not is_instance_valid(s):
+						continue
+					if s.assigned == null:
+						command_build(s)
+						break
 			if state != State.IDLE:
 				return
 			# 贴脸自卫
 			var t := _acquire_target()
 			if t == null:
 				return
-			# 贴脸才抡锤，够不着就追（以前缩进错位：70px 外隔空就能锤中，
-			# 而且只有冷却中才会挪步）
-			var d := position.distance_to(t.position)
-			if d <= attack_range:
-				move_target = position
-				if _cd <= 0.0:
-					_cd = attack_cooldown
-					attack_anim = 1.0    # 抡锤自卫
-					t.take_damage(attack_damage, self)
-					attack_fx_to(t.position)
-			else:
-				move_target = t.position
-				_move_toward(move_target, delta)
+			_fight(t, delta)
+
+## 贴脸才抡锤，够不着就追
+func _fight(t: Node2D, delta: float) -> void:
+	var d := position.distance_to(t.position)
+	if d <= attack_range:
+		move_target = position
+		if _cd <= 0.0:
+			_cd = attack_cooldown
+			attack_anim = 1.0    # 抡锤自卫
+			t.take_damage(attack_damage, self)
+			attack_fx_to(t.position)
+	else:
+		move_target = t.position
+		_move_toward(move_target, delta)
 
 ## 索敌逻辑同剑士：玩家指定优先，否则找索敌圈内的 Goo
 func _acquire_target() -> Node2D:
@@ -141,6 +161,8 @@ func command_attack(t: Node2D) -> void:
 func command_move(pos: Vector2) -> void:
 	super(pos)
 	move_order = true     # 到点之前别自动接活
+	_amove = false
+	_amove_fight = false
 	attack_target = null  # 别惦记旧目标
 	_drop_site()
 	state = State.IDLE
@@ -149,6 +171,9 @@ func command_move(pos: Vector2) -> void:
 func command_attack_move(pos: Vector2) -> void:
 	super(pos)
 	move_order = true
+	_amove = true
+	_amove_dest = pos
+	_amove_fight = false
 	attack_target = null
 	_drop_site()
 	state = State.IDLE

@@ -46,6 +46,8 @@ func _ready() -> void:
 	add_to_group("buildings")
 
 func take_damage(amount: float, _from: Node2D = null) -> void:
+	if is_queued_for_deletion():
+		return
 	hp -= amount
 	_hurt_until = Time.get_ticks_msec() + 160
 	queue_redraw()

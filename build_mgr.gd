@@ -61,8 +61,10 @@ func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
 		return 1
 	var cost: Dictionary = COST_TABLE.get(kind, {})
 	var g := _game()
-	if g == null or not g.economy.can_afford(cost):
-		_hud(_game().economy.short_msg(cost))
+	if g == null:
+		return 2
+	if not g.economy.can_afford(cost):
+		_hud(g.economy.short_msg(cost))
 		return 2
 	g.economy.spend(cost)
 	var site := ConstructionSite.new()
@@ -78,7 +80,7 @@ func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
 
 ## 工地完工回调：工程师敲满进度后调这里
 func complete_site(site: ConstructionSite) -> void:
-	if not is_instance_valid(site):
+	if not is_instance_valid(site) or site.is_queued_for_deletion():
 		return
 	var b := add_building(site.kind, site.position, 0)
 	_hud(_place_label(site.kind))
@@ -87,7 +89,7 @@ func complete_site(site: ConstructionSite) -> void:
 
 ## 工地被 Goo 拆了：投入的资源打水漂
 func site_destroyed(site: ConstructionSite) -> void:
-	if not is_instance_valid(site):
+	if not is_instance_valid(site) or site.is_queued_for_deletion():
 		return
 	var cost: Dictionary = COST_TABLE.get(site.kind, {})
 	_hud("工地被 Goo 拆了！%s 打了水漂，护着点再放" % _game().economy.cost_text(cost))
@@ -100,7 +102,7 @@ func _place_label(kind: String) -> String:
 		"warehouse":
 			return "仓库完工！附近的农民会改到仓库交货"
 		"smelter":
-			return "熔炉完工！采矿的农民会把矿石送去炼成铁锭"
+			return "熔炉完工！框选农民右键熔炉，送来的矿石就炼成铁锭"
 		"workshop":
-			return "木工台完工！伐木的农民会把木材送去锯成木板"
+			return "木工台完工！框选农民右键木工台，送来的木材就锯成木板"
 	return "设施完工！"

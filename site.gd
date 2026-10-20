@@ -18,6 +18,8 @@ func _process(_delta: float) -> void:
 	queue_redraw()
 
 func take_damage(amount: float, _from: Node2D = null) -> void:
+	if is_queued_for_deletion():
+		return
 	hp -= amount
 	if hp <= 0.0:
 		var mgr := get_tree().get_first_node_in_group("build_mgr")

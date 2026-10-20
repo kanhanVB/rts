@@ -33,6 +33,10 @@ func _step(delta: float) -> void:
 				if node_target == null:
 					state = State.IDLE
 					move_target = position
+				else:
+					# 换了矿点必须重新寻路：旧路径通往被采空的那个点，不重算会先白跑过去
+					_path = _find_path(node_target.position)
+					_path_idx = 0
 				return
 			_move_toward(node_target.position, delta)
 			# 到达判定必须用真实距离：_move_toward 的返回值是"到当前路径点"的距离，
@@ -42,7 +46,7 @@ func _step(delta: float) -> void:
 
 		State.GATHERING:
 			if node_target == null or not is_instance_valid(node_target):
-				_back_to_base()
+				_after_node_gone()
 				return
 			# 保险：离资源点太远却处于采集中 = 误判，重新走过去
 			if position.distance_to(node_target.position) > 48.0:
@@ -61,26 +65,31 @@ func _step(delta: float) -> void:
 					Fx.spawn(get_parent(), "dust", node_target.position, {"size": 46.0, "life": 0.6})
 					node_target.queue_free()
 				node_target = null
-			if carry_amount >= CARRY_CAP or node_target == null:
+			if carry_amount >= CARRY_CAP:
 				_back_to_base()
+			elif node_target == null:
+				_after_node_gone()
 
 		State.TO_BASE:
 			var depot := _depot()
 			if depot == null:
 				state = State.IDLE
 				return
+			if depot != _path_depot:
+				_repath(depot)    # 收货点变了（原来的被拆/新盖了更近的仓库）：按新地址重新寻路
 			_move_toward(depot.position, delta)
 			# 同 TO_NODE：用真实距离判定到收货点，路径拐点会让 _move_toward 返回值提前小于 50
 			if position.distance_to(depot.position) < 50.0:
 				# 加工厂把原料加工成二级材料入账，仓库/基地则原样入库（保住原料）
 				var game := get_tree().get_first_node_in_group("game")
-				if game:
+				if game and carry_amount > 0.0:
 					var out_k := _output_kind(depot)
 					game.economy.add(out_k, carry_amount)
-					# 入账漂字（纯视觉）
-					Fx.spawn(get_parent(), "floater", position + Vector2(0, -44), {"life": 1.1,
-						"text": "+%d %s" % [int(round(carry_amount)), Economy.KIND_SHORT.get(out_k, out_k)],
-						"color": Color(1.0, 0.86, 0.3) if out_k in ["ore", "ingot"] else Color(0.65, 1.0, 0.45)})
+					# 入账漂字（纯视觉；零头不弹"+0"）
+					if carry_amount >= 0.5:
+						Fx.spawn(get_parent(), "floater", position + Vector2(0, -44), {"life": 1.1,
+							"text": "+%d %s" % [int(round(carry_amount)), Economy.KIND_SHORT.get(out_k, out_k)],
+							"color": Color(1.0, 0.86, 0.3) if out_k in ["ore", "ingot"] else Color(0.65, 1.0, 0.45)})
 				carry_amount = 0.0
 				# 换工种的农民交完货要按新岗位认货种，否则"扛着木材去挖矿"会把木材记成矿石。
 				# node_target 空了就保持原货种，好让它接着找同类的下一处（树砍完换棵树）
@@ -111,7 +120,8 @@ func command_gather(node: ResNode) -> void:
 	if carry_amount >= CARRY_CAP:
 		state = State.TO_BASE
 		var d := _depot()
-		_path = _find_path(d.position) if d != null else PackedVector2Array()
+		_path = PackedVector2Array()
+		_repath(d)
 	else:
 		state = State.TO_NODE
 		_path = _find_path(node.position)
@@ -141,10 +151,32 @@ func auto_assign(kind: String) -> void:
 	if n:
 		command_gather(n)
 
+var _path_depot: Building = null    # 当前 _path 通往的收货点
+
 func _repath(b: Building) -> void:
+	_path_depot = b
 	if b == null:
 		return
 	_path = _find_path(b.position)
+	_path_idx = 0
+
+## 手上的资源点没了（被采空/被别人采空）：手里有货就回去交，
+## 空手（刚到就被别人采完）直接去下一处同类资源，别白跑回家弹个"+0"
+func _after_node_gone() -> void:
+	node_target = null
+	if carry_amount >= 0.5:
+		_back_to_base()
+		return
+	node_target = _nearest_node(carry_kind)
+	if node_target == null:
+		if carry_amount > 0.0:
+			_back_to_base()
+		else:
+			state = State.IDLE
+			move_target = position
+		return
+	state = State.TO_NODE
+	_path = _find_path(node_target.position)
 	_path_idx = 0
 
 ## ---------- 工具 ----------
@@ -164,8 +196,7 @@ func _on_stuck() -> void:
 		State.TO_BASE:
 			var b := _depot()
 			if b != null:
-				_path = _find_path(b.position)
-				_path_idx = 0
+				_repath(b)
 		_:
 			pass
 

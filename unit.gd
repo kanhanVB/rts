@@ -231,10 +231,15 @@ func _find_path(pos: Vector2) -> PackedVector2Array:
 func command_attack_move(pos: Vector2) -> void:
 	command_move(pos)
 
+var dead := false    # 已经死了（等 queue_free 生效）：同一帧再挨打不能再死一次
+
 func take_damage(amount: float, from: Node2D = null) -> void:
+	if dead:
+		return
 	hp -= maxf(amount - armor, 1.0)    # 护甲减免，保底 1 点伤害
 	_hurt_until = Time.get_ticks_msec() + 140
 	if hp <= 0.0:
+		dead = true
 		_death_fx()
 		died.emit(self)
 		queue_free()

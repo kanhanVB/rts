@@ -592,7 +592,8 @@ class Minimap extends Control:
 				_jump(event.position)
 			accept_event()
 		elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-			main._issue_command(event.position / _k())    # 小地图右键 = 对那里下指令
+			if main.game_state == "play":
+				main._issue_command(event.position / _k())    # 小地图右键 = 对那里下指令
 			accept_event()
 		elif event is InputEventMouseMotion and _held:
 			_jump(event.position)
