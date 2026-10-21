@@ -64,7 +64,7 @@ static func generate(seed_: int, w: float, h: float, n_hives := 2) -> Dictionary
 	for rd in roads:
 		for p in rd:
 			_mark_disc(reserved, gw, gh, p, 100.0, 1)
-	_mark_disc(reserved, gw, gh, base, 300.0, 1)
+	_mark_disc(reserved, gw, gh, base, 170.0, 1)    # 主城跟前留出盖房的空地，再往外就可以长树
 	for hp in hives:
 		_mark_disc(reserved, gw, gh, hp, 210.0, 1)
 
@@ -76,16 +76,36 @@ static func generate(seed_: int, w: float, h: float, n_hives := 2) -> Dictionary
 			if depth < th:
 				cells[gy * gw + gx] = C_WOODS
 
-	# ---- 能砍的树林：主城旁两片小林子（开局就有木头砍），再撒十来片大小不一的 ----
+	# ---- 能砍的树林：主城旁两片林子（帝国式主林，开局第一屏就看得见），再撒十来片大小不一的 ----
 	var clumps: Array = []    # [中心, 半径x, 半径y]
 	var road_dirs: Array = []
 	for hp in hives:
 		road_dirs.append((hp - base).angle())
-	for k in 2:
-		var a := _free_angle(rng, road_dirs, 1.0)
-		var c := base + Vector2.from_angle(a) * rng.randf_range(380.0, 440.0)
-		clumps.append([c, rng.randf_range(2.6, 3.4), rng.randf_range(2.0, 2.8)])
-		road_dirs.append(a)
+	# 主林：林子中心要落在开局镜头里（主城左右 560px、上下 190px 内），离土路远一点
+	var a_main := INF
+	var d_main := 320.0
+	for i in 160:
+		var a := rng.randf() * TAU
+		var d := rng.randf_range(260.0, 340.0)
+		var c := base + Vector2.from_angle(a) * d
+		if absf(c.x - base.x) > 560.0 or absf(c.y - base.y) > 190.0 or _near_road(roads, c, 130.0):
+			continue
+		var ok := true
+		for t in road_dirs:
+			if absf(angle_difference(a, t)) < 0.7:
+				ok = false
+				break
+		if ok:
+			a_main = a
+			d_main = d
+			break
+	if a_main == INF:
+		a_main = _free_angle(rng, road_dirs, 0.9)
+	clumps.append([base + Vector2.from_angle(a_main) * d_main, rng.randf_range(3.4, 4.2), rng.randf_range(2.4, 3.0)])
+	road_dirs.append(a_main)
+	var a2 := _free_angle(rng, road_dirs, 1.0)
+	clumps.append([base + Vector2.from_angle(a2) * rng.randf_range(340.0, 400.0), rng.randf_range(2.8, 3.6), rng.randf_range(2.2, 2.8)])
+	road_dirs.append(a2)
 	var tries := 0
 	while clumps.size() < 14 and tries < 600:
 		tries += 1
@@ -164,6 +184,26 @@ static func generate(seed_: int, w: float, h: float, n_hives := 2) -> Dictionary
 				break
 		if ok and _place_ore(cells, gw, gh, c, rng, ore, false, seen):
 			far += 1
+
+	# ---- 主城周围零散的几棵树（帝国式"散树"）：不压路、不贴矿、不挨着别的树 ----
+	var strays := 0
+	tries = 0
+	while strays < 6 and tries < 300:
+		tries += 1
+		var c := base + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(160.0, 250.0)
+		if _near_road(roads, c, 80.0):
+			continue
+		var cc := Vector2i(int(c.x / CELL), int(c.y / CELL))
+		var ok := true
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				var q := cc + Vector2i(dx, dy)
+				if q.x < 2 or q.y < 2 or q.x >= gw - 2 or q.y >= gh - 2 or cells[q.y * gw + q.x] != C_EMPTY:
+					ok = false
+		if not ok:
+			continue
+		cells[cc.y * gw + cc.x] = C_TREE
+		strays += 1
 
 	# ---- 能砍的树：每格一棵，位置在格心附近抖一点 ----
 	var trees: Array = []
