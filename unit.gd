@@ -378,8 +378,12 @@ func _art_draw(key: String) -> void:
 	var h: float = ART_H.get(key, 44.0)
 	var feet := Vector2(0, radius * 0.55)
 	var is_goo := key == "goo"
-	# 投影 + 选中圈
-	Art.ellipse(self, feet, radius * 1.25, Color(0.05, 0.1, 0.02, 0.32))
+	# 程序化走路的步态（有逐帧走路图 / Goo 不用）
+	var stepping := moving and not is_goo and _art_pose() != "act" and _walk_frames(key) == 0
+	var g := gait(walk_ph) if stepping else PackedFloat32Array()
+	var hop: float = g[0] if stepping else 0.0
+	# 投影 + 选中圈（人蹦起来投影缩小变淡，投影本身留在地上）
+	Art.ellipse(self, feet, radius * 1.25 * (1.0 - hop * 1.4), Color(0.05, 0.1, 0.02, 0.32 * (1.0 - hop * 1.6)))
 	if selected:
 		var ring := Color(0.55, 1.0, 0.35) if team == 0 else Color(1.0, 0.35, 0.25)
 		Art.ellipse(self, feet, radius * 1.6, ring, false, 2.4)
@@ -398,7 +402,7 @@ func _art_draw(key: String) -> void:
 			var ph := absf(sin(anim_t * 0.5))
 			bob = ph * 5.0
 			sq = Vector2(1.0 - ph * 0.08 + (1.0 - ph) * 0.08, 1.0 + ph * 0.1 - (1.0 - ph) * 0.08)
-		# 人形单位的颠步 / 前倾 / 挤压都在 _draw_stride 里按步态算（脚踩地不跟着颠）
+		# 人形单位的蹦步 / 前倾 / 挤压都在 _draw_stride 里按步态关键帧算
 	else:
 		var br := sin(now * 2.6 + float(get_instance_id() % 97)) * 0.025
 		sq = Vector2(1.0 - br * 0.5, 1.0 + br)
@@ -414,8 +418,8 @@ func _art_draw(key: String) -> void:
 	if frames > 0:
 		var fk := "units/%s_walk%d" % [key, int(walk_ph / TAU * frames) % frames + 1]
 		Art.draw(self, fk, at, h * pose_scale(key, fk), _face < 0.0, mod, rot * _face, sq)
-	elif walking and not is_goo:
-		_draw_stride(pkey, at, hh, mod)
+	elif stepping:
+		_draw_stride(pkey, at, hh, mod, g)
 	else:
 		Art.draw(self, pkey, at, hh, _face < 0.0, mod, rot * _face, sq)
 	_art_extra(feet, h)
@@ -434,17 +438,24 @@ func _art_draw(key: String) -> void:
 	if hp < max_hp or selected:
 		Art.hp_bar(self, feet - Vector2(0, h + 5.0), 16.0, hp / max_hp, team == 0)
 
-## ---------- 走路动画（照王国保卫战的走法：快步小碎步 + 一步一颠 + 落地压扁、腾起拉长 + 身子前倾微晃） ----------
-## 只有一张站姿图，所以做成"剪纸骨骼"：上身整体做仿射（颠、挤压、前倾），
-## 两条腿切成竖条网格，胯部跟着上身走，脚底按步态前后迈、迈的那只脚抬起来，踩地的那只钉在地上不跟着颠。
-const WALK_RATE := 0.16        # 每走 1px 步态相位前进多少弧度（约 39px 一个完整步态 = 左右各一步，剑士每秒 4 步多）
-const STRIDE := 20.0           # 脚前后迈多远（贴图像素，原图 160px 高；显示时约 ±3px）
-const LIFT := 17.0             # 往前迈的那只脚抬多高（贴图像素）
-const BOB := 13.0              # 上身一步一颠的幅度（贴图像素）
-const SQUASH := 0.05           # 落地压扁 / 腾空拉长的比例
-const LEAN := 0.07             # 走路时上身前倾（弧度量级的切变）
-const ROCK := 0.03             # 每步前后晃一下
-const FAR_LEG := Color(0.82, 0.8, 0.78)   # 远侧那条腿压暗一点，两腿交叉时看得清
+## ---------- 走路动画（照王国保卫战原版小兵的逐帧图量出来的节奏） ----------
+## KR 的人形小兵走路其实是"一步一蹦"：每步约 0.35 秒，蹬地 → 整个人离地（脚离地约身高的 14%）、两腿前后劈开
+## → 落地那一下拉长约 7% → 接着压扁 7~10%、两腿收拢到身子底下 → 换另一条腿再蹦。投影留在地上，人蹦高了投影变小。
+## 我们每个角色只有一张站姿图，所以做成"剪纸骨骼"：整个人按关键帧蹦、挤压，上身前倾；
+## 两条腿切成竖条网格，胯跟着上身，脚按关键帧前后劈开 / 收拢 / 腾空收脚。
+const WALK_RATE := 0.12        # 每走 1px 步态相位前进多少弧度（约 52px 一个完整步态 = 左右各蹦一步，剑士每秒 3 步多）
+# 一个完整步态 12 个关键姿势（左右腿各 6 个：着地、蹬起、最高、下落、落地拉长、压扁），数值是照 KR 帧图量的
+const G_KEYS := [
+	[0.0, 0.07, 0.14, 0.11, 0.0, 0.0],     # 脚离地高度 / 身高
+	[1.0, 1.05, 1.0, 1.04, 1.08, 0.9],     # 竖向拉伸（<1 = 压扁，横向反过来胖一点）
+	[0.6, 1.0, 1.0, 0.8, 0.35, 0.0],       # 两脚前后劈开程度（换腿时变号）
+	[0.0, 0.6, 1.0, 0.6, 0.0, 0.0],        # 腾空时两脚往上收
+	[0.04, 0.1, 0.08, 0.05, 0.0, 0.03],    # 上身前倾（切变量）
+]
+const G_STEPPED := true       # 姿势按关键帧一格一格跳（像 KR 的逐帧图）；false = 关键帧之间平滑插值
+const STRIDE_K := 0.13         # 两脚劈开最大幅度 / 贴图高
+const TUCK_K := 0.07           # 腾空收脚高度 / 贴图高
+const FAR_LEG := Color(0.8, 0.78, 0.76)   # 远侧那条腿压暗一点，两腿交叉时看得清
 var _head_off := Vector2.ZERO  # 本帧头顶相对站姿的偏移（头顶扛的货跟着颠）
 static var _legs := {}         # 贴图 key → 腿部切分 {gx, top, cut, l, r}，空字典 = 这张图找不到两条腿
 static var _walk_n := {}       # 角色 key → 逐帧走路图张数
@@ -506,25 +517,44 @@ static func _row_solid(img: Image, y: int, x0: int, x1: int) -> bool:
 			return true
 	return false
 
-## 程序化迈步：先画两条腿（远侧压暗），再画上身盖住腿根，腿两侧的东西（盾、镐把）跟着上身。
-## 找不到腿的图（腿被挡住）就整张图跟着上身颠。
-func _draw_stride(pkey: String, pos: Vector2, height: float, mod: Color) -> void:
+## 步态采样：返回 [离地, 竖拉伸, 劈腿(带正负), 收脚, 前倾]；G_STEPPED 关掉时关键帧之间用 Catmull-Rom 平滑插值
+static func gait(ph: float) -> PackedFloat32Array:
+	var u := fposmod(ph / TAU, 1.0) * 12.0
+	var i := int(u) % 12
+	# KR 是逐帧动画、一张姿势停两帧（约 15~20 张/秒），姿势"一格一格"跳才有那股弹劲；位置照样平滑移动
+	var f := 0.0 if G_STEPPED else u - floorf(u)
+	var out := PackedFloat32Array()
+	for c in G_KEYS.size():
+		var row: Array = G_KEYS[c]
+		var p := PackedFloat32Array()
+		for j in range(-1, 3):
+			var q := (i + j + 12) % 12
+			var v: float = row[q % 6]
+			if c == 2 and q >= 6:
+				v = -v
+			p.append(v)
+		out.append(0.5 * (2.0 * p[1] + (p[2] - p[0]) * f + (2.0 * p[0] - 5.0 * p[1] + 4.0 * p[2] - p[3]) * f * f + (3.0 * p[1] - p[0] - 3.0 * p[2] + p[3]) * f * f * f))
+	out[0] = maxf(out[0], 0.0)
+	out[3] = maxf(out[3], 0.0)
+	return out
+
+## 程序化走路：先画两条腿（远侧压暗），再画上身盖住腿根，腿两侧的东西（盾、镐把）跟着上身。
+## 找不到腿的图（腿被挡住）就整张图跟着蹦。
+func _draw_stride(pkey: String, pos: Vector2, height: float, mod: Color, g: PackedFloat32Array) -> void:
 	var t := Art.tex(pkey)
 	var d := Art.info(pkey)
 	var L := leg_split(pkey)
 	var k := height / float(d.h)
 	var ox: float = -d.ax
 	var oy: float = -d.ay
-	var ph := walk_ph
-	# 一步一颠：两脚并拢经过时最高，迈开落地后最低（略滞后于落地，像王国保卫战小兵的弹性）
-	var up := 0.5 + 0.5 * cos(2.0 * (ph - 0.35))
-	var sq := SQUASH * (2.0 * up - 1.0)
-	var sy := 1.0 + sq
-	var sx := 1.0 - sq * 0.6
-	var th := LEAN + ROCK * sin(2.0 * ph)
-	var crotch: float = oy + (float(L.cut) if not L.is_empty() else float(d.h) * 0.8)
-	# 上身仿射（贴图坐标，原点 = 脚底锚点）：绕脚底缩放 → 绕胯切变前倾 → 整体上颠
-	var body := Transform2D(Vector2(sx, 0.0), Vector2(-th * sy, sy), Vector2(th * crotch * sy, -BOB * up))
+	var th: float = float(d.h)
+	var sy: float = g[1]
+	var sx := 1.0 - (sy - 1.0) * 0.6
+	var lean: float = g[4]
+	var crotch: float = oy + (float(L.cut) if not L.is_empty() else th * 0.8)
+	# 整个人（贴图坐标，原点 = 脚底锚点）：绕脚底挤压 → 整体离地；上身再绕胯切变前倾
+	var whole := Transform2D(Vector2(sx, 0.0), Vector2(0.0, sy), Vector2(0.0, -g[0] * th))
+	var body := whole * Transform2D(Vector2(1.0, 0.0), Vector2(-lean, 1.0), Vector2(lean * crotch, 0.0))
 	var base := Transform2D(0.0, Vector2(k * _face, k), 0.0, pos)
 	var head := Vector2(0.0, oy)
 	_head_off = (body * head - head) * Vector2(k * _face, k)
@@ -536,18 +566,19 @@ func _draw_stride(pkey: String, pos: Vector2, height: float, mod: Color) -> void
 	var w: float = L.w
 	var hh: float = L.h
 	var gx: float = L.gx
-	var top: float = L.top - 6.0       # 腿条从裆上一点开始，被上身盖住，迈步时不露缝
+	var top: float = L.top - 6.0       # 腿条从裆上一点开始，被上身盖住，劈腿时不露缝
 	var cut: float = L.cut             # 上身画到这里，往下是会动的小腿和脚
 	var l: float = L.l
 	var r: float = L.r
+	var stride: float = STRIDE_K * th * g[2]
+	var tuck: float = TUCK_K * th * g[3]
 	draw_set_transform_matrix(base)
-	# 两腿反相：远侧（贴图左半）先画、压暗；近侧后画压在上面
+	# 两腿一前一后：远侧（贴图左半）先画、压暗；近侧后画压在上面
 	var rows := [top, cut, cut + (hh - cut) * 0.45, cut + (hh - cut) * 0.78, hh]
-	for leg in [[l, gx, ph, mod * FAR_LEG], [gx, r, ph + PI, mod]]:
+	for leg in [[l, gx, 1.0, mod * FAR_LEG], [gx, r, -1.0, mod]]:
 		var x0: float = leg[0]
 		var x1: float = leg[1]
-		var lp: float = leg[2]
-		var foot := Vector2(STRIDE * sin(lp), -LIFT * pow(maxf(0.0, cos(lp)), 1.4))
+		var foot := Vector2(stride * float(leg[2]), -tuck)
 		var c: Color = leg[3]
 		var cols := PackedColorArray([c, c, c, c])
 		var prev_a := Vector2.ZERO
@@ -557,8 +588,8 @@ func _draw_stride(pkey: String, pos: Vector2, height: float, mod: Color) -> void
 			var wt := clampf((v - cut) / maxf(hh - cut, 1.0), 0.0, 1.0)
 			var pa := Vector2(ox + x0, oy + v)
 			var pb := Vector2(ox + x1, oy + v)
-			var na := (body * pa).lerp(pa + foot, wt)
-			var nb := (body * pb).lerp(pb + foot, wt)
+			var na := (body * pa).lerp(whole * (pa + foot), wt)
+			var nb := (body * pb).lerp(whole * (pb + foot), wt)
 			if j > 0:
 				var v0: float = rows[j - 1]
 				draw_primitive(PackedVector2Array([prev_a, prev_b, nb, na]), cols,
