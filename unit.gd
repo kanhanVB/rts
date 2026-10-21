@@ -398,10 +398,7 @@ func _art_draw(key: String) -> void:
 			var ph := absf(sin(anim_t * 0.5))
 			bob = ph * 5.0
 			sq = Vector2(1.0 - ph * 0.08 + (1.0 - ph) * 0.08, 1.0 + ph * 0.1 - (1.0 - ph) * 0.08)
-		else:
-			# 迈步：两腿分开最大时身体最低，并拢经过时最高（一步一颠，一个周期颠两次）；身子微微前倾
-			bob = (1.0 - absf(sin(walk_ph))) * 1.3
-			rot = 0.05 + sin(walk_ph * 2.0) * 0.02
+		# 人形单位的颠步 / 前倾 / 挤压都在 _draw_stride 里按步态算（脚踩地不跟着颠）
 	else:
 		var br := sin(now * 2.6 + float(get_instance_id() % 97)) * 0.025
 		sq = Vector2(1.0 - br * 0.5, 1.0 + br)
@@ -411,13 +408,14 @@ func _art_draw(key: String) -> void:
 		mod = Color(1.0, 0.5, 0.45)
 	var hh := h * pose_scale(key, pkey)
 	var at := feet + Vector2(lunge, -bob)
+	_head_off = Vector2.ZERO
 	# 有逐帧走路图（units/<key>_walk1..N）就播帧；没有就把站姿图切成 上身 + 左右腿 程序化迈步
 	var frames := _walk_frames(key) if walking else 0
 	if frames > 0:
 		var fk := "units/%s_walk%d" % [key, int(walk_ph / TAU * frames) % frames + 1]
 		Art.draw(self, fk, at, h * pose_scale(key, fk), _face < 0.0, mod, rot * _face, sq)
-	elif walking and not is_goo and _draw_stride(pkey, at, hh, mod, rot * _face):
-		pass
+	elif walking and not is_goo:
+		_draw_stride(pkey, at, hh, mod)
 	else:
 		Art.draw(self, pkey, at, hh, _face < 0.0, mod, rot * _face, sq)
 	_art_extra(feet, h)
@@ -436,10 +434,18 @@ func _art_draw(key: String) -> void:
 	if hp < max_hp or selected:
 		Art.hp_bar(self, feet - Vector2(0, h + 5.0), 16.0, hp / max_hp, team == 0)
 
-## ---------- 走路动画 ----------
-const WALK_RATE := 0.21        # 每走 1px 步态相位前进多少弧度（约 30px 一个完整步态 = 左右各迈一步）
-const SWING := 0.42            # 腿绕胯前后摆的角度（弧度）：脚尖前后约 ±10 贴图像素（160px 高的原图上），显示时约 ±1.5px
-const LIFT := 7.0              # 往前迈的脚抬多高（贴图像素）
+## ---------- 走路动画（照王国保卫战的走法：快步小碎步 + 一步一颠 + 落地压扁、腾起拉长 + 身子前倾微晃） ----------
+## 只有一张站姿图，所以做成"剪纸骨骼"：上身整体做仿射（颠、挤压、前倾），
+## 两条腿切成竖条网格，胯部跟着上身走，脚底按步态前后迈、迈的那只脚抬起来，踩地的那只钉在地上不跟着颠。
+const WALK_RATE := 0.16        # 每走 1px 步态相位前进多少弧度（约 39px 一个完整步态 = 左右各一步，剑士每秒 4 步多）
+const STRIDE := 20.0           # 脚前后迈多远（贴图像素，原图 160px 高；显示时约 ±3px）
+const LIFT := 17.0             # 往前迈的那只脚抬多高（贴图像素）
+const BOB := 13.0              # 上身一步一颠的幅度（贴图像素）
+const SQUASH := 0.05           # 落地压扁 / 腾空拉长的比例
+const LEAN := 0.07             # 走路时上身前倾（弧度量级的切变）
+const ROCK := 0.03             # 每步前后晃一下
+const FAR_LEG := Color(0.82, 0.8, 0.78)   # 远侧那条腿压暗一点，两腿交叉时看得清
+var _head_off := Vector2.ZERO  # 本帧头顶相对站姿的偏移（头顶扛的货跟着颠）
 static var _legs := {}         # 贴图 key → 腿部切分 {gx, top, cut, l, r}，空字典 = 这张图找不到两条腿
 static var _walk_n := {}       # 角色 key → 逐帧走路图张数
 
@@ -500,45 +506,73 @@ static func _row_solid(img: Image, y: int, x0: int, x1: int) -> bool:
 			return true
 	return false
 
-## 程序化迈步：先画两条腿（反相前后摆 + 前伸那条抬起），再画上身盖住腿根，腿两侧的东西（盾、镐把）跟着身子不动。
-## 画不了（没找到腿）返回 false，调用方退回整张画。
-func _draw_stride(pkey: String, pos: Vector2, height: float, mod: Color, rot: float) -> bool:
-	var L := leg_split(pkey)
-	if L.is_empty():
-		return false
+## 程序化迈步：先画两条腿（远侧压暗），再画上身盖住腿根，腿两侧的东西（盾、镐把）跟着上身。
+## 找不到腿的图（腿被挡住）就整张图跟着上身颠。
+func _draw_stride(pkey: String, pos: Vector2, height: float, mod: Color) -> void:
 	var t := Art.tex(pkey)
 	var d := Art.info(pkey)
+	var L := leg_split(pkey)
 	var k := height / float(d.h)
 	var ox: float = -d.ax
 	var oy: float = -d.ay
+	var ph := walk_ph
+	# 一步一颠：两脚并拢经过时最高，迈开落地后最低（略滞后于落地，像王国保卫战小兵的弹性）
+	var up := 0.5 + 0.5 * cos(2.0 * (ph - 0.35))
+	var sq := SQUASH * (2.0 * up - 1.0)
+	var sy := 1.0 + sq
+	var sx := 1.0 - sq * 0.6
+	var th := LEAN + ROCK * sin(2.0 * ph)
+	var crotch: float = oy + (float(L.cut) if not L.is_empty() else float(d.h) * 0.8)
+	# 上身仿射（贴图坐标，原点 = 脚底锚点）：绕脚底缩放 → 绕胯切变前倾 → 整体上颠
+	var body := Transform2D(Vector2(sx, 0.0), Vector2(-th * sy, sy), Vector2(th * crotch * sy, -BOB * up))
+	var base := Transform2D(0.0, Vector2(k * _face, k), 0.0, pos)
+	var head := Vector2(0.0, oy)
+	_head_off = (body * head - head) * Vector2(k * _face, k)
+	if L.is_empty():
+		draw_set_transform_matrix(base * body)
+		draw_texture(t, Vector2(ox, oy), mod)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+		return
 	var w: float = L.w
-	var th: float = L.h
+	var hh: float = L.h
 	var gx: float = L.gx
-	var top: float = L.top - 6.0       # 腿块从裆上一点开始，被上身盖住，摆动时不露缝
-	var cut: float = L.cut             # 上身画到这里，往下是露出来会动的小腿和脚
+	var top: float = L.top - 6.0       # 腿条从裆上一点开始，被上身盖住，迈步时不露缝
+	var cut: float = L.cut             # 上身画到这里，往下是会动的小腿和脚
 	var l: float = L.l
 	var r: float = L.r
-	var s := sin(walk_ph)
-	var c := cos(walk_ph)
-	var base := Transform2D(rot, Vector2(k * _face, k), 0.0, pos)
-	# 两腿反相：绕胯部转（脚往前踢 / 往后蹬），往前迈的那条同时抬脚。
-	# 贴图右半那条腿离镜头近，后画压在上面（翻转后也一样）
-	for leg in [[l, gx, s, c], [gx, r, -s, -c]]:
+	draw_set_transform_matrix(base)
+	# 两腿反相：远侧（贴图左半）先画、压暗；近侧后画压在上面
+	var rows := [top, cut, cut + (hh - cut) * 0.45, cut + (hh - cut) * 0.78, hh]
+	for leg in [[l, gx, ph, mod * FAR_LEG], [gx, r, ph + PI, mod]]:
 		var x0: float = leg[0]
 		var x1: float = leg[1]
-		var hip := Vector2(ox + (x0 + x1) * 0.5, oy + top)
-		var xf := base.translated_local(hip + Vector2(0, -maxf(0.0, float(leg[3])) * LIFT)).rotated_local(-float(leg[2]) * SWING).translated_local(-hip)
-		draw_set_transform_matrix(xf)
-		draw_texture_rect_region(t, Rect2(ox + x0, oy + top, x1 - x0, th - top), Rect2(x0, top, x1 - x0, th - top), mod)
-	draw_set_transform_matrix(base)
+		var lp: float = leg[2]
+		var foot := Vector2(STRIDE * sin(lp), -LIFT * pow(maxf(0.0, cos(lp)), 1.4))
+		var c: Color = leg[3]
+		var cols := PackedColorArray([c, c, c, c])
+		var prev_a := Vector2.ZERO
+		var prev_b := Vector2.ZERO
+		for j in rows.size():
+			var v: float = rows[j]
+			var wt := clampf((v - cut) / maxf(hh - cut, 1.0), 0.0, 1.0)
+			var pa := Vector2(ox + x0, oy + v)
+			var pb := Vector2(ox + x1, oy + v)
+			var na := (body * pa).lerp(pa + foot, wt)
+			var nb := (body * pb).lerp(pb + foot, wt)
+			if j > 0:
+				var v0: float = rows[j - 1]
+				draw_primitive(PackedVector2Array([prev_a, prev_b, nb, na]), cols,
+					PackedVector2Array([Vector2(x0 / w, v0 / hh), Vector2(x1 / w, v0 / hh), Vector2(x1 / w, v / hh), Vector2(x0 / w, v / hh)]), t)
+			prev_a = na
+			prev_b = nb
 	# 上身 + 腿两侧不随腿动的部分
+	draw_set_transform_matrix(base * body)
 	draw_texture_rect_region(t, Rect2(ox, oy, w, cut), Rect2(0, 0, w, cut), mod)
 	if l > 0.0:
-		draw_texture_rect_region(t, Rect2(ox, oy + cut, l, th - cut), Rect2(0, cut, l, th - cut), mod)
+		draw_texture_rect_region(t, Rect2(ox, oy + cut, l, hh - cut), Rect2(0, cut, l, hh - cut), mod)
 	if r < w:
-		draw_texture_rect_region(t, Rect2(ox + r, oy + cut, w - r, th - cut), Rect2(r, cut, w - r, th - cut), mod)
+		draw_texture_rect_region(t, Rect2(ox + r, oy + cut, w - r, hh - cut), Rect2(r, cut, w - r, hh - cut), mod)
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-	return true
 
 ## 子类覆写：贴图之外的附加物（农民头顶的货、交货点蓝点）
 func _art_extra(_feet: Vector2, _h: float) -> void:

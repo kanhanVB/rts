@@ -311,7 +311,7 @@ func _art_extra(feet: Vector2, h: float) -> void:
 		Art.ellipse(self, feet + Vector2(0, 1), 3.0, Color(0.35, 0.82, 1.0))
 	if carry_amount > 0.5:
 		var item := "items/ore" if carry_kind == "ore" else "items/wood"
-		var top := feet - Vector2(-_face * 1.0, h - 2.0)
+		var top := feet - Vector2(-_face * 1.0, h - 2.0) + _head_off    # 跟着走路一颠一颠
 		Art.draw(self, item, top, 10.0)
 
 ## ---------- 绘制：KR 小人（草帽 + 镐），采集时挥镐，扛货顶头上 ----------
