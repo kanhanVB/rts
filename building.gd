@@ -3,7 +3,7 @@ class_name Building
 ## 建筑：基地（交资源/造农民）、兵营（出兵）、巢穴（敌人老窝，拆了就赢）。
 ## KR 式建模：石基 + 半木墙 + 大出檐屋顶 + 旗帜；巢穴是黏液山包 + 尖刺 + 红光洞口。
 
-var kind: String = "base"    # base / barracks / hive
+var kind: String = "base"    # base / barracks / warehouse / smelter / workshop / hive
 var team: int = 0
 var hp: float = 600.0
 var max_hp: float = 600.0
@@ -135,6 +135,10 @@ func _process(delta: float) -> void:
 		_tower(delta)
 	if not queue.is_empty():
 		_produce(delta)
+	if is_processor():
+		_run_line(delta)
+		queue_redraw()    # 读条 / 炉火 / 烟每帧在动
+		return
 	if Time.get_ticks_msec() < _hurt_until + 40 or selected != _was_selected:
 		_was_selected = selected
 		queue_redraw()
@@ -167,6 +171,8 @@ func _art_draw() -> bool:
 	var h := Art.draw_w(self, key, foot + Vector2(shake, 0), w, mod)
 	if hp < max_hp or selected:
 		Art.hp_bar(self, foot - Vector2(0, h + 6.0), size * 0.7, hp / max_hp, team == 0, 4.0)
+	if is_processor():
+		_proc_draw(foot, h)
 	return true
 
 func _draw() -> void:
@@ -196,6 +202,8 @@ func _draw() -> void:
 	if hp < max_hp:
 		draw_rect(Rect2(-size * 0.5, -size * 0.74, size, 6.0), Color(0, 0, 0, 0.5))
 		draw_rect(Rect2(-size * 0.5, -size * 0.74, size * hp / max_hp, 6.0), Color(0.3, 0.9, 0.3))
+	if is_processor():
+		_proc_draw(Vector2(0, size * 0.42), size * 1.1)
 
 ## ---------- 通用小件 ----------
 ## 填充多边形 + 一体厚描边
@@ -419,6 +427,265 @@ func _draw_hive() -> void:
 	for dx in [-s * 0.4, s * 0.42]:
 		draw_circle(Vector2(dx, s * 0.28), 3.5 + 1.4, OUTLINE)
 		draw_circle(Vector2(dx, s * 0.28), 3.5, Color(0.55, 0.6, 0.34))
+
+## ================= 加工线（熔炉 / 木工台）=================
+## 流水线：原料堆进料场 → 工人守着炉子/工作台读条（一炉 5 个，要时间）→ 成品堆在门口 →
+## 工人扛回仓库才入账。原料两条来路：采集的农民被右键指派直接送来（送货工），
+## 或者工人自己去仓库扛（"自取"，仓库留底 30，别把造农民的木头吃光）。
+## 没工人 = 停工；一个人既要守炉又要搬货，干一阵停一阵；两个人轮班才连续出货。
+const RECIPES := {
+	"smelter": {"in": "ore", "out": "ingot", "n": 5, "time": 5.0, "verb": "炼铁", "done": "炼好"},
+	"workshop": {"in": "wood", "out": "plank", "n": 5, "time": 4.0, "verb": "锯木板", "done": "锯好"},
+}
+const OP_MAX := 2            # 每条线最多几个工人
+const IN_CAP := 40.0         # 料场上限
+const OUT_CAP := 30.0        # 成品堆上限（堆满停工，等人搬）
+const LOAD := 10.0           # 工人一趟扛多少
+const FETCH_RESERVE := 30.0  # 自取原料时仓库至少留这么多
+
+var stock_in := 0.0          # 料场里的原料
+var stock_out := 0.0         # 门口堆着、还没搬回仓库的成品
+var batch := 0.0             # 当前这一炉的进度 0..1
+var batch_on := false        # 料已投进炉（读条中）
+var operators: Array = []    # 在这条线上干活的工人（Worker）
+var self_fetch := true       # 工人自己去仓库扛料
+var line_status := ""        # work / away / no_op / no_in / full
+var fetched_total := 0.0     # 工人从仓库扛来的原料累计
+var made_total := 0.0        # 累计产出
+var _heat := 0.0             # 炉火 / 干活的视觉强度 0..1：开工渐亮、停工渐暗
+
+func is_processor() -> bool:
+	return team == 0 and RECIPES.has(kind)
+
+func recipe() -> Dictionary:
+	return RECIPES.get(kind, {})
+
+## 送料进料场，返回实际收下多少（料场满了多的不收）
+func put_input(n: float) -> float:
+	var take := clampf(IN_CAP - stock_in, 0.0, n)
+	stock_in += take
+	return take
+
+func take_output(n: float) -> float:
+	var take := minf(stock_out, n)
+	stock_out -= take
+	return take
+
+func op_count() -> int:
+	_clean_ops()
+	return operators.size()
+
+func has_room() -> bool:
+	return op_count() < OP_MAX
+
+func add_operator(w) -> bool:
+	_clean_ops()
+	if operators.has(w):
+		return true
+	if operators.size() >= OP_MAX:
+		return false
+	operators.append(w)
+	return true
+
+func remove_operator(w) -> void:
+	operators.erase(w)
+
+func _clean_ops() -> void:
+	operators = operators.filter(func(w): return is_instance_valid(w) and not w.dead and w.work_at == self)
+
+## 工位：门口左右各一个（站在建筑前面，面朝炉口/工作台）
+func work_spot(w) -> Vector2:
+	var side := 1.0 if operators.find(w) == 1 else -1.0
+	return position + Vector2(side * size * 0.3, size * 0.5 + 10.0)
+
+## 守在线上的人数（读条速度按人头算：两个人一起干快一倍）
+func _present() -> int:
+	var n := 0
+	for w in operators:
+		if is_instance_valid(w) and w.op_phase == "work":
+			n += 1
+	return n
+
+## 正在路上、会带料回来的量（except 自己不算）
+func _incoming(except = null) -> float:
+	var s := 0.0
+	var inn: String = recipe().get("in", "")
+	for w in operators:
+		if w == except or not is_instance_valid(w):
+			continue
+		if w.op_phase == "trip" and can_fetch():
+			s += LOAD
+		elif w.op_phase == "go" and w.carry_kind == inn:
+			s += w.carry_amount
+	return s
+
+func _econ():
+	var g := get_tree().get_first_node_in_group("game") if is_inside_tree() else null
+	return g.economy if g != null else null
+
+## 能不能去仓库扛料：开着自取，而且仓库扛走以后还留得住底
+func can_fetch() -> bool:
+	if not self_fetch or not is_processor():
+		return false
+	var e = _econ()
+	return e != null and e.amount(recipe().in) - FETCH_RESERVE >= 1.0
+
+## 这一趟从仓库扛多少（料场装得下、仓库留得住底）
+func fetch_amount(w = null) -> float:
+	var e = _econ()
+	if e == null or not can_fetch():
+		return 0.0
+	var room := IN_CAP - stock_in - _incoming(w)
+	return floorf(minf(LOAD, minf(e.amount(recipe().in) - FETCH_RESERVE, room)))
+
+## 工人每隔一会儿问一次：接着守线（work）还是出门跑一趟（trip：扛成品去仓库、顺路取料）
+func task_for(w) -> String:
+	var r := recipe()
+	var others := 0
+	var away := 0
+	for o in operators:
+		if o == w or not is_instance_valid(o):
+			continue
+		if o.op_phase == "work":
+			others += 1
+		else:
+			away += 1
+	var lone := others == 0
+	if batch_on and lone:
+		return "work"    # 一个人守线：先把这一炉干完再走
+	if away >= maxi(1, operators.size() - 1):
+		return "work"    # 线上至少留一个人
+	if stock_out >= LOAD or stock_out + r.n > OUT_CAP:
+		return "trip"    # 成品够一车 / 快堆满了
+	var have := stock_in + _incoming(w)
+	if can_fetch() and have < r.n * (1 if lone else 2) and fetch_amount(w) >= 1.0:
+		return "trip"    # 料快见底：去仓库扛（一个人时等料用完再去）
+	if stock_out >= 1.0 and not batch_on and stock_in < r.n and _incoming(w) <= 0.0:
+		return "trip"    # 没料了：剩下的零头也先搬回去
+	return "work"
+
+func _run_line(delta: float) -> void:
+	_clean_ops()
+	var r := recipe()
+	var present := _present()
+	if not batch_on and present > 0 and stock_in >= r.n and stock_out + r.n <= OUT_CAP:
+		# 有人要马上出门（一个人守线、成品够一车）就先别投料，不然一炉干完人才走、成品越堆越多
+		var stay := false
+		for o in operators:
+			if o.op_phase == "work" and task_for(o) == "work":
+				stay = true
+		if stay:
+			stock_in -= r.n
+			batch_on = true
+			batch = 0.0
+	var working := batch_on and present > 0
+	if working:
+		batch += delta * present / float(r.time)
+		if batch >= 1.0:
+			batch_on = false
+			batch = 0.0
+			stock_out += r.n
+			made_total += r.n
+			Fx.spawn(get_parent(), "floater", position + Vector2(size * 0.5, -size * 0.2), {"life": 1.0,
+				"text": "%s %d %s" % [r.done, r.n, Economy.KIND_SHORT[r.out]], "color": Color(0.85, 0.9, 1.0)})
+	_heat = move_toward(_heat, 1.0 if working else 0.0, delta * 1.6)
+	if operators.is_empty():
+		line_status = "no_op"
+	elif working:
+		line_status = "work"
+	elif batch_on:
+		line_status = "away"
+	elif stock_out + r.n > OUT_CAP:
+		line_status = "full"
+	elif stock_in < r.n:
+		line_status = "away" if _incoming() > 0.0 else "no_in"
+	elif present == 0:
+		line_status = "away"
+	else:
+		line_status = "work"
+
+## 状态一句话（信息栏 / 头顶泡泡 / 瓶颈提示共用）
+func status_text() -> String:
+	match line_status:
+		"no_op":
+			return "没人干活"
+		"no_in":
+			return "缺%s" % Economy.KIND_NAME[recipe().in]
+		"full":
+			return "成品堆满了"
+		"away":
+			return "工人搬货去了"
+		"work":
+			return "%s中" % recipe().verb
+	return ""
+
+## ---------- 加工线的现场表现：料堆 / 成品堆 / 炉火烟囱 / 锯末 / 头顶读条和状态 ----------
+func _proc_draw(foot: Vector2, h: float) -> void:
+	var r := recipe()
+	var k := size * ART_W / 320.0    # 贴图像素 → 本地坐标
+	var now := Time.get_ticks_msec() / 1000.0
+	var tp := func(tx: float, ty: float) -> Vector2: return foot + Vector2((tx - 160.0) * k, (ty - 260.0) * k)
+	if kind == "smelter":
+		# 炉口：停工压暗（火灭了），开工火光一跳一跳 + 门前地上一片暖光
+		var arch := PackedVector2Array()
+		for i in 9:
+			var a := PI + PI * i / 8.0
+			arch.append(tp.call(153.0 + cos(a) * 42.0, 196.0 + sin(a) * 30.0))
+		arch.append(tp.call(196.0, 226.0))
+		arch.append(tp.call(110.0, 226.0))
+		if _heat < 0.99:
+			draw_colored_polygon(arch, Color(0.1, 0.07, 0.06, 0.82 * (1.0 - _heat)))
+		if _heat > 0.01:
+			var fl := 0.8 + 0.2 * sin(now * 13.0) * sin(now * 7.3)
+			Art.ellipse(self, tp.call(153.0, 236.0), 26.0 * k * 2.0, Color(1.0, 0.55, 0.15, 0.22 * _heat * fl))
+			draw_circle(tp.call(153.0, 205.0), 22.0 * k * fl, Color(1.0, 0.8, 0.3, 0.35 * _heat))
+			# 烟囱冒烟：一串烟团往上飘、变大、变淡
+			var top: Vector2 = tp.call(66.0, 14.0)
+			for i in 5:
+				var t := fmod(now * 0.45 + i / 5.0, 1.0)
+				var p := top + Vector2(t * 10.0 + sin(now * 1.7 + i) * 2.5, -t * 34.0)
+				var rad := 3.5 + t * 8.0
+				var fade := minf(1.0, (1.0 - t) * 1.6) * _heat
+				draw_circle(p, rad + 1.2, Color(0.25, 0.22, 0.2, 0.5 * fade))
+				draw_circle(p, rad, Color(0.8, 0.78, 0.76, 0.92 * fade))
+	elif _heat > 0.01:
+		# 木工台：锯末一阵一阵往外蹦
+		var c: Vector2 = tp.call(150.0, 190.0)
+		for i in 6:
+			var t := fmod(now * 1.6 + i / 6.0, 1.0)
+			var ang := -PI * 0.5 + (float(i) - 2.5) * 0.45
+			var p := c + Vector2(cos(ang) * 14.0 * t, sin(ang) * 10.0 * t + t * t * 14.0)
+			draw_rect(Rect2(p - Vector2(1.5, 1.0), Vector2(3.0, 2.0)), Color(0.93, 0.78, 0.5, (1.0 - t) * _heat))
+	# 料场 / 成品堆：门口左右两堆，堆多高看得见
+	_pile(foot + Vector2(-size * 0.98, 2.0), r.in, stock_in, IN_CAP)
+	_pile(foot + Vector2(size * 0.98, 2.0), r.out, stock_out, OUT_CAP)
+	# 头顶：读条（干活中/暂停）或状态泡泡（出问题了）
+	var y := foot.y - h - (16.0 if (hp < max_hp or selected) else 6.0)
+	var bx := size * 0.3 if kind == "smelter" else 0.0    # 熔炉的读条挪到屋顶上方，别挡烟囱冒烟
+	if batch_on:
+		var bw := size * 0.62
+		var rc := Rect2(bx - bw * 0.5, y - 3.0, bw, 6.0)
+		draw_rect(rc.grow(1.5), Color(0.12, 0.08, 0.05, 0.9))
+		draw_rect(Rect2(rc.position, Vector2(rc.size.x * batch, rc.size.y)),
+			Color(1.0, 0.72, 0.2) if line_status == "work" else Color(0.6, 0.55, 0.45))
+		Art.draw(self, "items/" + r.out, Vector2(bx - bw * 0.5 - 8.0, y + 5.0), 11.0)
+	elif line_status in ["no_op", "no_in", "full"]:
+		var bob := sin(now * 3.0) * 1.5
+		Art.text(self, Vector2(bx, y + bob), "! " + status_text(), 13, Color(1.0, 0.62, 0.4))
+
+## 一堆货：每 5 个一件，摞成小金字塔（最多 7 件），选中时标数字
+func _pile(at: Vector2, item: String, n: float, cap: float) -> void:
+	var key := "items/" + item
+	if not Art.has(key):
+		return
+	var pieces := mini(int(ceil(n / 5.0 - 0.01)), 7)
+	var slots := [Vector2(-7, 0), Vector2(7, 0), Vector2(0, 1), Vector2(-4, -6), Vector2(4, -6), Vector2(0, -11), Vector2(-9, -5)]
+	if pieces == 0 and selected:
+		Art.ellipse(self, at, 9.0, Color(0, 0, 0, 0.18))
+	for i in pieces:
+		Art.draw(self, key, at + slots[i], 9.0, i % 2 == 1)
+	if selected:
+		Art.text(self, at + Vector2(0, 13.0), "%d/%d" % [int(n), int(cap)], 11, Color(1.0, 0.95, 0.8))
 
 func label_text() -> String:
 	match kind:

@@ -8,7 +8,7 @@ var H := 720.0
 const MAP_W := 3200.0
 const MAP_H := 2048.0
 
-const WORKER_CAP := 12
+const WORKER_CAP := 16
 const ENGINEER_RESPAWN := 15.0    # 英雄工程师阵亡后的复活倒计时
 const UNIT_CAP := 40
 
@@ -728,6 +728,18 @@ func commands() -> Array:
 			"barracks":
 				out.append(_cmd_entry("sword", 0, "剑士", "sword", Economy.COST_SWORD, "近战前排，护甲高（训练 %d 秒）" % int(TRAIN.sword.time)))
 				out.append(_cmd_entry("archer", 1, "弓手", "archer", Economy.COST_ARCHER, "远程输出，躲在剑士后面（训练 %d 秒）" % int(TRAIN.archer.time)))
+		if b.is_processor():
+			var r: Dictionary = b.recipe()
+			var raw: String = Economy.KIND_NAME[r.in]
+			out.append(_cmd_entry("hire", 0, "招工", "workers", {},
+				"叫最近的闲农民来%s（最多 %d 人）。一个人要守线又要搬货，干一阵停一阵；两个人轮班才连续出货" % [r.verb, Building.OP_MAX]))
+			out.append(_cmd_entry("fire", 1, "放人", "worker", {}, "让最后来的工人离岗，回去采%s" % raw))
+			if b.self_fetch:
+				out.append(_cmd_entry("fetch_off", 2, "自取:开", r.in, {},
+					"现在：料场见底时工人自己去仓库扛%s（仓库至少留 %d）。点一下关掉，只用送货农民送来的料" % [raw, int(Building.FETCH_RESERVE)]))
+			else:
+				out.append(_cmd_entry("fetch_on", 2, "自取:关", r.in, {},
+					"现在：只用送货农民送来的料，仓库的%s一点不动。点一下打开（仓库留底 %d）" % [raw, int(Building.FETCH_RESERVE)]))
 		if b.kind != "base":
 			out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "拆掉这座建筑（不退资源）", "Del"))
 		return out
@@ -737,8 +749,8 @@ func commands() -> Array:
 	var all_workers := us.all(func(u): return u is Worker)
 	if us.size() == 1 and us[0] is Engineer:
 		out.append(_cmd_entry("warehouse", 0, "仓库", "warehouse", Economy.COST_WAREHOUSE, "就近交货点，缩短农民跑路"))
-		out.append(_cmd_entry("smelter", 1, "熔炉", "smelter", Economy.COST_SMELTER, "矿石 → 铁锭（剑士要用）。农民右键熔炉送矿"))
-		out.append(_cmd_entry("workshop", 2, "木工台", "workshop", Economy.COST_WORKSHOP, "木材 → 木板（弓手要用）。农民右键木工台送木"))
+		out.append(_cmd_entry("smelter", 1, "熔炉", "smelter", Economy.COST_SMELTER, "矿石 → 铁锭（剑士要用）。要农民进厂守炉：一炉 5 矿烧 5 秒"))
+		out.append(_cmd_entry("workshop", 2, "木工台", "workshop", Economy.COST_WORKSHOP, "木材 → 木板（弓手要用）。要农民进厂锯板：一批 5 木锯 4 秒"))
 		out.append(_cmd_entry("barracks", 3, "兵营", "barracks", Economy.COST_BARRACKS, "训练剑士和弓手"))
 		out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌就打"))
 		out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
@@ -812,6 +824,18 @@ func run_command(id: String) -> void:
 			for w in _selected_workers():
 				w.set_deliver_to(null)
 			_hud_msg("交货改回自动：送最近的基地/仓库")
+		"hire", "fire", "fetch_on", "fetch_off":
+			var b := _selected_building()
+			if b == null or not b.is_processor():
+				return
+			if id == "hire":
+				hire_operator(b)
+			elif id == "fire":
+				fire_operator(b)
+			else:
+				b.self_fetch = id == "fetch_on"
+				var raw: String = Economy.KIND_NAME[b.recipe().in]
+				_hud_msg("%s自取已%s" % [b.display_name, ("打开：料不够时工人去仓库扛%s（留底 %d）" % [raw, int(Building.FETCH_RESERVE)]) if b.self_fetch else "关掉：只用送货农民送来的料"])
 		"delete":
 			_delete_selected()
 
@@ -915,6 +939,11 @@ func _issue_command(pos: Vector2) -> void:
 	if target == null:
 		pos = open_point(pos)    # 点进树林里 = 走到林子边上
 	var depot := _friendly_depot_at(pos)     # 选农民右键己方收货建筑 = 指派交货点
+	# 右键加工厂：正在采对口原料的 = 改送料（送货工）；其余的（闲着/采别的/别处的工人）= 进厂干活
+	var proc: Building = depot if depot != null and depot.is_processor() else null
+	var n_op := 0
+	var n_feed := 0
+	var n_full := 0
 	var move_idx := 0    # 纯移动的单位排队领环形散点，别全挤向同一个坐标
 	for u in selected:
 		if not (u is Unit) or not is_instance_valid(u):
@@ -922,8 +951,16 @@ func _issue_command(pos: Vector2) -> void:
 		u.cancel_orders()    # 新指令覆盖排队路点 / 巡逻 / 原地坚守
 		if target is ResNode and u is Worker:
 			u.command_gather(target)
+		elif proc != null and u is Worker and not u.feeds(proc.recipe().in):
+			if u.command_operate(proc):
+				n_op += 1
+			else:
+				n_full += 1    # 人满了：走到门口等着，别傻站原地
+				u.command_move(_spread_pos(move_idx, proc.position + Vector2(0, proc.size * 1.1)))
+				move_idx += 1
 		elif depot != null and u is Worker:
 			u.set_deliver_to(depot)
+			n_feed += 1
 		elif target is ResNode:
 			# 士兵/工程师点资源点 = 走过去，不是攻击指令
 			u.command_move(_spread_pos(move_idx, pos))
@@ -948,7 +985,17 @@ func _issue_command(pos: Vector2) -> void:
 	if _a_move_next:
 		_a_move_next = false
 	# 指派必须看得见反馈：说清楚这批货进去以后变成什么
-	if depot != null:
+	if proc != null:
+		var parts: Array = []
+		if n_op > 0:
+			parts.append("%d 个农民进%s干活（工人 %d/%d）" % [n_op, proc.display_name, proc.op_count(), Building.OP_MAX])
+		if n_full > 0:
+			parts.append("%s人满了（%d/%d），%d 个没排上" % [proc.display_name, Building.OP_MAX, Building.OP_MAX, n_full])
+		if n_feed > 0:
+			parts.append("%d 个农民改送%s到%s料场" % [n_feed, Economy.KIND_NAME[proc.recipe().in], proc.display_name])
+		if not parts.is_empty():
+			_hud_msg("；".join(parts))
+	elif depot != null:
 		var nw := _selected_workers().size()
 		if nw > 0:
 			_hud_msg("%d 个农民改送%s：%s" % [nw, depot.display_name, _depot_result(depot)])
@@ -957,12 +1004,47 @@ func _issue_command(pos: Vector2) -> void:
 func _depot_result(b: Building) -> String:
 	match b.kind:
 		"smelter":
-			return "矿石炼成铁锭（木材照样存原料）"
+			return "矿石卸进料场，等工人炼成铁锭（木材照样存原料）"
 		"workshop":
-			return "木材做成木板（矿石照样存原料）"
+			return "木材卸进料场，等工人锯成木板（矿石照样存原料）"
 		"warehouse":
 			return "原样入库，攒着造农民"
 	return "原样入库"
+
+## ---------- 加工线：招工 / 放人 ----------
+## 招工：先挑最近的闲农民，没有闲的就从采集的里调最近的（加工线上的工人不动）
+func hire_operator(b: Building) -> Worker:
+	if not b.has_room():
+		_hud_msg("%s人满了（%d/%d）" % [b.display_name, Building.OP_MAX, Building.OP_MAX])
+		return null
+	var best: Worker = null
+	var best_d := INF
+	for w in _player_workers():
+		if w.state == Worker.State.OPERATE:
+			continue
+		var d: float = w.position.distance_to(b.position) + (0.0 if w.state == Worker.State.IDLE else 5000.0)
+		if d < best_d:
+			best_d = d
+			best = w
+	if best == null:
+		_hud_msg("没有能调的农民了：先在基地多造几个")
+		return null
+	best.cancel_orders()
+	best.command_operate(b)
+	_hud_msg("%s招到 1 个工人（%d/%d）" % [b.display_name, b.op_count(), Building.OP_MAX])
+	return best
+
+## 放人：最后来的工人离岗，回去采这条线要的原料（正好给自己送料）
+func fire_operator(b: Building) -> Worker:
+	if b.op_count() == 0:
+		_hud_msg("%s没有工人" % b.display_name)
+		return null
+	var w: Worker = b.operators.back()
+	w.cancel_orders()
+	w.command_stop()
+	w.auto_assign(b.recipe().in)
+	_hud_msg("%s放走 1 个工人，回去采%s（剩 %d/%d）" % [b.display_name, Economy.KIND_NAME[b.recipe().in], b.op_count(), Building.OP_MAX])
+	return w
 
 ## ---------- 编队：Ctrl+数字 存，数字 召回 ----------
 func _save_control_group(idx: int) -> void:
@@ -1275,6 +1357,10 @@ func _selected_info_text() -> String:
 				txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
 				if t.waiting_pop:
 					txt += " · 人口满了，等空位"
+			if t.is_processor():
+				var r: Dictionary = t.recipe()
+				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %.0f 秒\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,
+					r.n, Economy.KIND_NAME[r.in], r.n, Economy.KIND_NAME[r.out], r.time, t.status_text(), "开" if t.self_fetch else "关"]
 			return txt
 		var u: Unit = t
 		var atk_txt := "—" if u.atk <= 0.0 else "%.0f（%.1f秒/下）" % [u.atk, u.atk_cd]
@@ -1288,7 +1374,8 @@ func _selected_info_text() -> String:
 			var dest := "就近仓库/基地"
 			if is_instance_valid(w.deliver_to):
 				dest = w.deliver_to.display_name
-			line += " · 交货→%s" % dest
+			var job := w.job_text()
+			line += (" · " + job) if job != "" else " · 交货→%s" % dest
 			if w.carry_amount > 0.5:
 				line += " · 扛着 %d %s" % [int(w.carry_amount),
 					Economy.KIND_NAME.get(w.carry_kind, w.carry_kind)]
@@ -1354,11 +1441,20 @@ func _bottleneck() -> String:
 		return "木材不足，造不了农民（要%d木）" % int(Economy.COST_WORKER["wood"])
 	var has_smelter := _has_processor("smelter")
 	var has_workshop := _has_processor("workshop")
-	# 加工厂不再自动抢货：没人点名就一直闲着，所以提示要教玩家怎么点名
-	if has_smelter and economy.rate("ingot") < 0.02:
-		return "熔炉闲着：选农民右键熔炉才送矿去炼"
-	if has_workshop and economy.rate("plank") < 0.02:
-		return "木工台闲着：选农民右键木工台才送木材加工"
+	# 加工线卡在哪一环：没工人 / 缺料 / 成品堆满
+	for b in processors_list:
+		if not is_instance_valid(b):
+			continue
+		var raw: String = Economy.KIND_NAME[b.recipe().in]
+		match b.line_status:
+			"no_op":
+				return "%s没人干活：选中它按 Q 招工（或选农民右键它）" % b.display_name
+			"no_in":
+				if b.self_fetch and economy.amount(b.recipe().in) < Building.FETCH_RESERVE + 1.0:
+					return "%s缺料：仓库%s不到 %d（留底），多派人采" % [b.display_name, raw, int(Building.FETCH_RESERVE)]
+				return "%s缺料：派采%s的农民右键它送料，或打开自取" % [b.display_name, raw]
+			"full":
+				return "%s成品堆满了：再招 1 个工人专门搬货" % b.display_name
 	if w < 4 and ore_r + wood_r < 1.2:
 		return "农民 %d/%d，人少产得慢" % [w, WORKER_CAP]
 	if not has_smelter:

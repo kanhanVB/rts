@@ -488,7 +488,7 @@ func _build_help() -> void:
 	l.add_theme_font_size_override("font_size", 16)
 	l.text = """操作说明（帝国时代式）
 左键：点选 · 拖动：框选 · Shift+左键/拖框：加选减选 · 双击 / Ctrl+左键：选屏幕内同类
-右键：移动 / 采集 / 攻击 / 交货（看点的什么）· Shift+右键：排路点 · 选中基地/兵营右键 = 集结点
+右键：移动 / 采集 / 攻击 / 交货（看点的什么）· 闲农民右键熔炉/木工台 = 进厂干活 · Shift+右键：排路点 · 选中基地/兵营右键 = 集结点
 命令卡热键按位置：Q W E R T / A S D F G / Z X C V B（A 攻击移动 · S 停止 · D 驻守 · F 巡逻）
 H：选基地 · .：闲置农民 · ,：闲置军队 · 空格：镜头回到选中 · Del：删除 · Esc：取消
 Ctrl+数字：编队 · 数字：选队（连按两下跳过去）· Shift+数字：加进当前选择
@@ -650,15 +650,23 @@ class SelPanel extends Control:
 			return l[0]
 		return null
 
+	## 单选己方熔炉/木工台：下面一排画加工线（料场 → 读条 → 成品 · 工人位）
+	func _proc_b() -> Building:
+		var l := _list()
+		if l.size() == 1 and l[0] is Building and l[0].is_processor():
+			return l[0]
+		return null
+
 	## 信息文字的位置：单选在头像右边，多选在顶上一行
 	func layout() -> void:
 		var info: Label = _main().info_label
 		var l := _list()
 		if l.size() <= 1:
 			info.position = Vector2(112, 4)
-			var h := (Q_Y - 6.0) if _queue_b() != null else size.y - 8.0
+			var row := _queue_b() != null or _proc_b() != null
+			var h := (Q_Y - 6.0) if row else size.y - 8.0
 			info.size = Vector2(maxf(size.x - 116.0, 40.0), h)
-			info.vertical_alignment = VERTICAL_ALIGNMENT_TOP if _queue_b() != null else VERTICAL_ALIGNMENT_CENTER
+			info.vertical_alignment = VERTICAL_ALIGNMENT_TOP if row else VERTICAL_ALIGNMENT_CENTER
 			info.clip_text = false
 		else:
 			info.position = Vector2(6, 0)
@@ -692,6 +700,9 @@ class SelPanel extends Control:
 			var b := _queue_b()
 			if b != null:
 				_draw_queue(b)
+			var pb := _proc_b()
+			if pb != null:
+				_draw_proc(pb)
 			return
 		var cap := _cols() * _rows()
 		var shown := mini(l.size(), cap)
@@ -727,11 +738,77 @@ class SelPanel extends Control:
 		if hint_x < size.x - 60.0 and not b.queue.is_empty():
 			Art.text(self, Vector2(hint_x, Q_Y + 32.0), "点图标取消（全额退）", 12, Color(0.85, 0.8, 0.68), false)
 
+	## 加工线一排的格子：0 料场 / 1 成品 / 2.. 工人位
+	func _proc_rect(i: int) -> Rect2:
+		if i == 0:
+			return Rect2(112, Q_Y, 46, 46)
+		if i == 1:
+			return Rect2(262, Q_Y, 46, 46)
+		return Rect2(326.0 + (i - 2) * 44.0, Q_Y + 4.0, 40, 40)
+
+	func _item(key: String, r: Rect2, mod := Color.WHITE) -> void:
+		var t: Texture2D = hud.icon(key)
+		if t == null:
+			return
+		var ts := t.get_size()
+		var s := minf((r.size.x - 10.0) / ts.x, (r.size.y - 10.0) / ts.y)
+		var sz := ts * s
+		draw_texture_rect(t, Rect2(r.get_center() - sz * 0.5 - Vector2(0, 4), sz), false, mod)
+
+	func _draw_proc(b: Building) -> void:
+		var r: Dictionary = b.recipe()
+		var slots := [[r.in, b.stock_in, Building.IN_CAP], [r.out, b.stock_out, Building.OUT_CAP]]
+		for i in 2:
+			var rc := _proc_rect(i)
+			draw_rect(rc, Color(0, 0, 0, 0.28))
+			draw_rect(rc, Color(Hud.GOLD, 0.55), false, 1.5)
+			var n: float = slots[i][1]
+			_item(slots[i][0], rc, Color.WHITE if n >= 1.0 else Color(1, 1, 1, 0.35))
+			Art.text(self, Vector2(rc.get_center().x, rc.end.y - 3.0), "%d/%d" % [int(n), int(slots[i][2])], 12,
+				Hud.RED_TEXT if (i == 0 and n < r.n) or (i == 1 and n + r.n > slots[i][2]) else Hud.CREAM)
+		# 中间：一炉的读条（箭头底 + 进度）
+		var a := _proc_rect(0).end.x + 8.0
+		var e := _proc_rect(1).position.x - 8.0
+		var y := Q_Y + 23.0
+		var bar := Rect2(a, y - 5.0, e - a - 10.0, 10.0)
+		draw_rect(bar, Color(0.1, 0.06, 0.03))
+		draw_rect(Rect2(bar.position, Vector2(bar.size.x * b.batch, bar.size.y)),
+			Color(0.98, 0.72, 0.2) if b.line_status == "work" else Color(0.62, 0.56, 0.46))
+		draw_colored_polygon(PackedVector2Array([Vector2(e - 10.0, y - 9.0), Vector2(e, y), Vector2(e - 10.0, y + 9.0)]), Color(0.1, 0.06, 0.03))
+		Art.text(self, Vector2((a + e) * 0.5, y - 9.0), "%d → %d · %.0f秒" % [r.n, r.n, r.time], 12, Hud.CREAM)
+		Art.text(self, Vector2((a + e) * 0.5, y + 21.0), b.status_text(), 12,
+			Hud.RED_TEXT if b.line_status in ["no_op", "no_in", "full"] else Color(0.85, 0.8, 0.68))
+		# 工人位：有人画头像，空位画虚框 +
+		for i in Building.OP_MAX:
+			var rc := _proc_rect(2 + i)
+			draw_rect(rc, Color(0, 0, 0, 0.28))
+			draw_rect(rc, Color(Hud.GOLD, 0.55), false, 1.5)
+			if i < b.operators.size() and is_instance_valid(b.operators[i]):
+				var w = b.operators[i]
+				_item("workers", rc.grow(4.0), Color.WHITE if w.op_phase == "work" else Color(1, 1, 1, 0.5))
+				Art.text(self, Vector2(rc.get_center().x, rc.end.y - 2.0), "干活" if w.op_phase == "work" else "搬运", 11, Hud.CREAM)
+			else:
+				Art.text(self, rc.get_center() + Vector2(0, 7.0), "+", 22, Color(0.85, 0.8, 0.68, 0.7))
+		var hx := _proc_rect(2 + Building.OP_MAX).position.x + 4.0
+		if hx < size.x - 60.0:
+			Art.text(self, Vector2(hx, Q_Y + 28.0), "点 + 招工 · 点工人选中他", 12, Color(0.85, 0.8, 0.68), false)
+
 	func _gui_input(event: InputEvent) -> void:
 		if not (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT):
 			return
 		var m := _main()
 		var l := _list()
+		var pb := _proc_b()
+		if pb != null:
+			for i in Building.OP_MAX:
+				if _proc_rect(2 + i).has_point(event.position):
+					if i < pb.operators.size() and is_instance_valid(pb.operators[i]):
+						m._set_selection([pb.operators[i]])
+					else:
+						m.hire_operator(pb)
+					accept_event()
+					return
+			return
 		var b := _queue_b()
 		if b != null:
 			for i in b.queue.size():

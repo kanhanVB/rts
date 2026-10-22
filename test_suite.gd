@@ -119,7 +119,7 @@ func run() -> void:
 	_check(w2._depot() == m.base, "离仓库远的农民仍认基地")
 	w2.position = w2_old
 
-	# ---- 加工链：熔炉（矿石 -> 铁锭）----
+	# ---- 加工链：熔炉（矿石 -> 铁锭）= 流水线：料场 → 工人守炉读条 → 成品扛回仓库才入账 ----
 	m.economy.ore = 500.0
 	m.economy.wood = 500.0
 	var eng_sm: Engineer = m._player_engineers()[0]
@@ -130,11 +130,13 @@ func run() -> void:
 	await m.get_tree().create_timer(16.0).timeout
 	_check(m.processors_list.size() == 1 and is_instance_valid(m.processors_list[0]), "工程师建好熔炉")
 	var sm: Building = m.processors_list[0]
+	_check(sm.is_processor() and sm.recipe().in == "ore" and sm.recipe().out == "ingot", "熔炉是加工线：矿石 → 铁锭")
+	sm.self_fetch = false    # 先只测送货：工人不许自己去仓库扛
 	var w3 := Worker.new()
 	w3.position = sm.position + Vector2(50, 0)
 	m.add_child(w3)
 	w3.carry_kind = "ore"
-	# 关键：熔炉不再自动抢货。没人点名，原料原样入库，否则木材全变木板就造不出农民了
+	# 关键：熔炉不自动抢货。没人点名，原料原样入库，否则木材全变木板就造不出农民了
 	_check(w3._depot().kind != "smelter", "不点名的情况下加工厂不抢货")
 	w3.set_deliver_to(sm)
 	_check(w3._depot() == sm, "右键指定后农民才把矿送去熔炉")
@@ -142,16 +144,69 @@ func run() -> void:
 	# 熔炉只吃矿石：就算点名了熔炉，木材也不会被吞掉
 	_check(w3._output_kind(sm) == "wood", "熔炉不吃木材，伐木的照样存原料")
 	w3.carry_kind = "ore"
-	# 送矿进熔炉：账本上长的是铁锭，不是矿石
+	_check(w3._output_kind(sm) == "", "对口的矿石卸进熔炉料场")
 	m.economy.ingot = 0.0
-	var ore_before: float = m.economy.ore
 	w3.carry_amount = 10.0
 	w3.state = Worker.State.TO_BASE
 	w3._path = w3._find_path(sm.position)
 	w3._path_idx = 0
 	await m.get_tree().create_timer(4.0).timeout
-	_check(m.economy.ingot >= 10.0, "矿石送进熔炉产出铁锭（%.0f）" % m.economy.ingot)
-	_check(m.economy.ore == ore_before, "熔炉不直接收矿石，矿石没进账本")
+	_check(sm.stock_in >= 10.0, "送来的矿石堆进熔炉料场（%.0f）" % sm.stock_in)
+	_check(m.economy.ingot == 0.0 and not sm.batch_on and sm.stock_out == 0.0, "没工人守炉：一块铁锭都不出")
+	_check(sm.line_status == "no_op", "熔炉状态 = 没人干活（%s）" % sm.line_status)
+	# 招工：闲农民右键熔炉 = 进厂干活；最多 2 个；采矿送料的不会被拉进厂
+	var op1 := Worker.new()
+	op1.position = sm.position + Vector2(-70, 70)
+	m.add_child(op1)
+	var op2 := Worker.new()
+	op2.position = sm.position + Vector2(70, 70)
+	m.add_child(op2)
+	var op3 := Worker.new()
+	op3.position = sm.position + Vector2(0, 100)
+	m.add_child(op3)
+	await m.get_tree().create_timer(0.1).timeout
+	m.selected = [op1, op2, op3]
+	m._issue_command(sm.position)
+	_check(op1.work_at == sm and op2.work_at == sm and sm.op_count() == 2, "闲农民右键熔炉 = 进厂当工人（%d/2）" % sm.op_count())
+	_check(op3.work_at == null and op3.state != Worker.State.OPERATE, "熔炉最多 2 个工人，第 3 个不收")
+	_check(w3.work_at == null and w3.deliver_to == sm, "采矿送料的农民照旧送料，不进厂")
+	m.selected.clear()
+	sm.stock_in = 30.0
+	await m.get_tree().create_timer(4.0).timeout
+	_check(sm.batch_on or sm.stock_out > 0.0, "工人到岗后开炉读条（进度 %.0f%%，成品 %.0f）" % [sm.batch * 100.0, sm.stock_out])
+	var standing: Array = sm.operators.filter(func(o): return o.op_phase == "work")
+	_check(not standing.is_empty() and standing[0]._can_yield(), "守线的工人给路过的队友让路（工位在门口，不让会顶死）")
+	await m.get_tree().create_timer(14.0).timeout
+	_check(sm.made_total >= 10.0, "熔炉一炉一炉出铁锭（累计 %.0f）" % sm.made_total)
+	_check(m.economy.ingot >= 10.0, "工人把铁锭扛回仓库才入账（%.0f）" % m.economy.ingot)
+	# 自取：料场空了，工人自己去仓库扛矿；仓库留底 30；能关
+	w3.set_deliver_to(null)
+	w3.auto_assign("ore")    # 不再送料，改回自动交货
+	sm.stock_in = 0.0
+	sm.self_fetch = true
+	m.economy.ore = 200.0
+	var f0: float = sm.fetched_total
+	await m.get_tree().create_timer(10.0).timeout
+	_check(sm.fetched_total > f0, "料场空了工人自己去仓库扛矿（扛了 %.0f）" % (sm.fetched_total - f0))
+	m.economy.ore = 20.0
+	_check(not sm.can_fetch() and sm.fetch_amount() == 0.0, "仓库矿石不到留底 30 时不自取")
+	m.economy.ore = 200.0
+	# 选中熔炉：命令卡 招工 / 放人 / 自取
+	m._set_selection([sm])
+	await m.get_tree().create_timer(0.1).timeout
+	var ids: Array = m.commands().map(func(c): return c.id)
+	_check(ids.has("hire") and ids.has("fire") and ids.has("fetch_off"), "熔炉命令卡：招工 / 放人 / 自取（%s）" % ",".join(ids))
+	_check(m.info_label.text.contains("炼铁") and m.info_label.text.contains("自取"), "点熔炉显示加工线信息")
+	m.run_command("fetch_off")
+	_check(not sm.self_fetch and not sm.can_fetch(), "自取按钮能关：关了就不动仓库的矿")
+	m.run_command("fetch_on")
+	var last_op: Worker = sm.operators.back()
+	m.run_command("fire")
+	_check(sm.op_count() == 1 and last_op.work_at == null and last_op.state != Worker.State.OPERATE, "放人：最后来的工人离岗（剩 %d）" % sm.op_count())
+	_check(is_instance_valid(last_op.node_target) and last_op.node_target.kind == "ore", "放走的工人回去采矿")
+	m.run_command("hire")
+	_check(sm.op_count() == 2 and op3.work_at == sm, "招工：先叫最近的闲农民（%d/2）" % sm.op_count())
+	m._deselect_all()
 
 	# ---- 帝国式操作：右键指定交货点、右键资源点派活、换工种先交货 ----
 	var plank_before: float = m.economy.plank
@@ -167,10 +222,11 @@ func run() -> void:
 	await m.get_tree().create_timer(4.0).timeout
 	_check(m.economy.wood >= wood_before + 10.0 and m.economy.plank == plank_before,
 		"自动交货的木材原样入库，没被加工掉（+%d木）" % int(m.economy.wood - wood_before))
-	# 选中农民右键熔炉 = 指派交货点（走真实的右键指令入口）
+	# 采矿的农民右键熔炉 = 改送矿到熔炉料场（走真实的右键指令入口）
+	w3.auto_assign("ore")
 	m.selected = [w3]
 	m._issue_command(sm.position)
-	_check(w3.deliver_to == sm, "选中农民右键熔炉 = 指派交货点")
+	_check(w3.deliver_to == sm and w3.work_at == null, "采矿的农民右键熔炉 = 指派交货点（送料）")
 	# 改回去也只要右键仓库，不需要按钮
 	m._issue_command(wh.position)
 	_check(w3.deliver_to == wh, "右键仓库就改送仓库（原料入库）")
@@ -196,9 +252,17 @@ func run() -> void:
 	_check(m.economy.wood >= wood_before2 + 10.0, "旧货按原样入库（+%d木）" % int(m.economy.wood - wood_before2))
 	_check(w3.carry_kind == "ore" and w3.carry_amount < 10.0, "到岗后改认矿石，账目没串")
 	m.selected.clear()
+	# 熔炉被打爆：工人自动离岗，不会对着废墟发呆
+	var op_a: Worker = sm.operators[0]
+	sm.take_damage(sm.hp + 1.0)
+	await m.get_tree().create_timer(0.3).timeout
+	_check(op_a.work_at == null and op_a.state != Worker.State.OPERATE, "熔炉被拆，工人自动离岗")
 	w3.queue_free()
 	wg.queue_free()
 	ws.queue_free()
+	for o in [op1, op2, op3]:
+		if is_instance_valid(o):
+			o.queue_free()
 
 	# 工程师的自卫攻击
 	var eng: Engineer = m._player_engineers()[0]
