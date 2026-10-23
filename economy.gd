@@ -13,6 +13,8 @@ const COST_WORKSHOP := {"ore": 20, "wood": 60}
 const COST_BARRACKS := {"ore": 80, "wood": 60}
 const COST_SWORD := {"ore": 20, "ingot": 15}
 const COST_ARCHER := {"ore": 20, "plank": 15}
+const COST_TOWER := {"ore": 40, "wood": 50}
+const COST_TOWER_UP := {"plank": 20, "ingot": 15}    # 升二级吃加工线的成品：塔防和经济绑在一起
 
 var ore: float = 100.0
 var wood: float = 100.0

@@ -10,6 +10,7 @@ const COST_TABLE := {
 	"warehouse": Economy.COST_WAREHOUSE,
 	"smelter": Economy.COST_SMELTER,
 	"workshop": Economy.COST_WORKSHOP,
+	"tower": Economy.COST_TOWER,
 }
 
 signal building_built(building: Building)
@@ -35,7 +36,7 @@ func add_building(kind: String, pos: Vector2, team_: int) -> Building:
 
 ## 放设施：0=成功落工地  1=可重试的失败（位置不合适）  2=买不起，该取消放置
 ## 放置校验（放置预览和真正落地共用）：返回 "" = 能放，否则是给玩家看的原因
-func placement_error(pos: Vector2) -> String:
+func placement_error(pos: Vector2, kind := "") -> String:
 	var g := _game()
 	var w: float = g.W if g != null else 1280.0
 	var h: float = g.H if g != null else 720.0
@@ -52,10 +53,18 @@ func placement_error(pos: Vector2) -> String:
 			return "放不下：压到矿/树了，挪开一点"
 	if g != null and g.area_blocked(pos, 26.0):
 		return "放不下：那里是树林"
+	# 不许堵路：Goo 沿土路行军，房子压在路上会把整队怪卡住（箭塔要盖在路边）
+	if g != null and kind != "":
+		var half: float = Building.size_of(kind) * 0.5
+		var pad := 34.0 if kind == "tower" else 24.0    # 箭塔紧挨着路：留够怪的车道偏移 + 体宽，路过的怪别蹭塔脚
+		for rd in g.roads:
+			for i in rd.size() - 1:
+				if Geometry2D.get_closest_point_to_segment(pos, rd[i], rd[i + 1]).distance_to(pos) < half + pad:
+					return "放不下：别堵土路，盖在路边" + ("（箭塔射程够得着）" if kind == "tower" else "")
 	return ""
 
 func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
-	var why := placement_error(pos)
+	var why := placement_error(pos, kind)
 	if why != "":
 		_hud(why)
 		return 1
@@ -70,6 +79,9 @@ func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
 	var site := ConstructionSite.new()
 	site.kind = kind
 	site.position = pos
+	site.size = Building.size_of(kind)    # 工地和盖好后一样大（箭塔小一圈）
+	if kind == "tower":
+		site.build_time = 7.0
 	add_child(site)
 	if eng != null and is_instance_valid(eng):
 		eng.command_build(site)    # 谁下的令谁去盖
@@ -105,4 +117,6 @@ func _place_label(kind: String) -> String:
 			return "熔炉完工！框选农民右键熔炉，送来的矿石就炼成铁锭"
 		"workshop":
 			return "木工台完工！框选农民右键木工台，送来的木材就锯成木板"
+		"tower":
+			return "箭塔完工！塔上的弓手会自动射路过的敌人（选中它可用木板+铁锭升级）"
 	return "设施完工！"

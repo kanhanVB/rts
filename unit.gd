@@ -291,6 +291,7 @@ func _find_path(pos: Vector2) -> PackedVector2Array:
 func command_attack_move(pos: Vector2) -> void:
 	command_move(pos)
 
+var hop_rate := 1.0    # 黏液怪一跳一跳的快慢（窜窜快、岩壳慢）
 var dead := false    # 已经死了（等 queue_free 生效）：同一帧再挨打不能再死一次
 
 func take_damage(amount: float, from: Node2D = null) -> void:
@@ -328,7 +329,9 @@ static func pose_scale(key: String, pkey: String) -> float:
 
 ## 按王国保卫战：起源实测比例定（小兵约屏高 3%、英雄约 4.5%、怪物不比小兵小），
 ## 地图上画的树和起源同尺度，所以小人按树来比：小兵约树高的 1/3
-const ART_H := {"worker": 22.0, "engineer": 29.0, "swordsman": 24.0, "archer": 23.0, "goo": 19.0}
+const ART_H := {"worker": 22.0, "engineer": 29.0, "swordsman": 24.0, "archer": 23.0, "goo": 19.0, "runner": 15.0, "brute": 29.0}
+## 黏液一族（没腿，一跳一跳走；死了是一滩黏液）
+const BLOBS := ["goo", "runner", "brute"]
 var _face := 1.0              # 朝向：1 右 / -1 左（停下也保持，不会突然转回去）
 var _hurt_until := 0          # 挨打闪红到这个时间（毫秒）
 
@@ -377,7 +380,7 @@ func _art_draw(key: String) -> void:
 		_face = signf(move_target.x - position.x)
 	var h: float = ART_H.get(key, 44.0)
 	var feet := Vector2(0, radius * 0.55)
-	var is_goo := key == "goo"
+	var is_goo: bool = key in BLOBS
 	# 程序化走路的步态（有逐帧走路图 / Goo 不用）
 	var stepping := moving and not is_goo and _art_pose() != "act" and _walk_frames(key) == 0
 	var g := gait(walk_ph) if stepping else PackedFloat32Array()
@@ -399,8 +402,8 @@ func _art_draw(key: String) -> void:
 	var walking := moving and pose != "act"
 	if moving:
 		if is_goo:
-			var ph := absf(sin(anim_t * 0.5))
-			bob = ph * 5.0
+			var ph := absf(sin(anim_t * 0.5 * hop_rate))
+			bob = ph * 5.0 * h / 19.0    # 跳的高度跟着个头走（岩壳蹦得沉、窜窜蹦得碎）
 			sq = Vector2(1.0 - ph * 0.08 + (1.0 - ph) * 0.08, 1.0 + ph * 0.1 - (1.0 - ph) * 0.08)
 		# 人形单位的蹦步 / 前倾 / 挤压都在 _draw_stride 里按步态关键帧算
 	else:
@@ -615,8 +618,9 @@ func _death_fx() -> void:
 	if key == "" or not Art.enabled or is_queued_for_deletion():
 		return
 	var par := get_parent()
-	if key == "goo":
-		Fx.spawn(par, "splat", position + Vector2(0, radius * 0.55), {"size": 34.0, "life": 1.2})
+	if key in BLOBS:
+		var tint: Color = {"runner": Color(0.75, 0.6, 1.15), "brute": Color(0.85, 0.72, 0.6)}.get(key, Color.WHITE)
+		Fx.spawn(par, "splat", position + Vector2(0, radius * 0.55), {"size": 34.0 * ART_H[key] / 19.0, "life": 1.2, "color": tint})
 	if Art.has("units/%s_dead" % key):
 		Fx.spawn(par, "corpse", position + Vector2(0, radius * 0.55), {"key": "units/%s_dead" % key, "size": ART_H.get(key, 44.0) * pose_scale(key, "units/%s_dead" % key), "flip": _face < 0.0, "life": 1.8})
 

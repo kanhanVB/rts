@@ -43,6 +43,7 @@ var _hero_val: Label
 var _clock_val: Label
 var _wave_bar: ProgressBar
 var _wave_box: HBoxContainer
+var _call_btn: Button    # 提前叫波（N）
 var _help: PanelContainer
 var _top: PanelContainer
 var _bottom: PanelContainer
@@ -219,6 +220,8 @@ func _build_top_bar() -> void:
 	_wave_bar.max_value = 1.0
 	_wave_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	wv.add_child(_wave_bar)
+	_call_btn = _small_btn(_wave_box, "叫波", "")
+	_call_btn.pressed.connect(func(): main.call_wave_early())
 	_clock_val = Label.new()
 	_clock_val.add_theme_font_size_override("font_size", 18)
 	_clock_val.tooltip_text = "游戏时间"
@@ -494,6 +497,8 @@ H：选基地 · .：闲置农民 · ,：闲置军队 · 空格：镜头回到�
 Ctrl+数字：编队 · 数字：选队（连按两下跳过去）· Shift+数字：加进当前选择
 滚轮：缩放 · 鼠标贴边 / 方向键 / 中键拖动：移动镜头 · 小地图：左键跳转、右键下指令
 底栏生产队列：点图标取消（全额退钱）· 人口满了排头会等空位
+塔防：工程师 T 盖箭塔（盖在土路边，选中看射程圈）· 选中箭塔 Q 升级（木板 + 铁锭）· N / 顶栏"叫波"：提前叫下一波，剩几秒奖励多少矿木
+敌人：Goo 啃路边房子 · 窜窜跑得快、直冲基地 · 岩壳又厚又带甲、专拆箭塔（派剑士顶）
 C：产能面板 · F1：本说明"""
 	_help.add_child(l)
 
@@ -588,6 +593,10 @@ func refresh() -> void:
 	var span: float = WaveManager.FIRST_WAVE_AT if wm.wave == 0 else WaveManager.WAVE_INTERVAL
 	_wave_bar.visible = wm.wave < WaveManager.MAX_WAVES
 	_wave_bar.value = 1.0 - clampf(wm.wave_timer / span, 0.0, 1.0)
+	_call_btn.visible = wm.can_call_early()
+	if _call_btn.visible:
+		_call_btn.tooltip_text = "提前叫第 %d 波（N）：%s\n现在叫奖励 %d 矿 + %d 木（越早叫奖励越多）" % [
+			wm.wave + 1, WaveManager.wave_text(wm.wave + 1), wm.early_bonus(), wm.early_bonus()]
 	# 底栏
 	_sync_commands()
 	_sel.layout()
@@ -622,6 +631,7 @@ const ICON_KEY := {
 	"sword": "units/swordsman_idle", "archer": "units/archer_idle", "pop": "units/swordsman_idle",
 	"warehouse": "buildings/warehouse", "smelter": "buildings/smelter", "workshop": "buildings/workshop",
 	"barracks": "buildings/barracks", "base": "buildings/base", "hive": "buildings/hive", "wave": "ui/icon_wave",
+	"tower": "buildings/tower", "tower2": "buildings/tower2",
 }
 
 func icon(key: String) -> Texture2D:
@@ -838,12 +848,12 @@ class SelPanel extends Control:
 	## 头像内容：农民/英雄/敌人用专门的圆头像图标，兵种裁立绘上半身，建筑整张缩进去
 	func _face(u) -> Array:
 		if u is Building:
-			return ["buildings/" + u.kind, false]
+			return ["buildings/" + (u.kind + ("2" if u.level >= 2 else "") if u.kind == "tower" else u.kind), false]
 		var k: String = u._art_key()
 		match k:
 			"worker": return ["ui/icon_worker", false]
 			"engineer": return ["ui/icon_hero", false]
-			"goo": return ["units/goo_idle", false]
+			"goo", "runner", "brute": return ["units/%s_idle" % k, false]
 			_: return ["units/%s_idle" % k, true]
 
 	## 金圈圆框头像 + 下方血条

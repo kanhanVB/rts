@@ -52,7 +52,7 @@ func _art_draw() -> bool:
 	if Art.has(bkey) and progress > 0.01:
 		var t := Art.tex(bkey)
 		var d := Art.info(bkey)
-		var w := size * 1.85
+		var w := Building.art_w(kind, size)
 		var h := w * float(d.h) / float(d.w)
 		var frac := clampf(progress, 0.0, 1.0)
 		var src := Rect2(0, d.h * (1.0 - frac), d.w, d.h * frac)

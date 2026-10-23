@@ -45,7 +45,7 @@ func _draw() -> void:
 			Art.draw(self, key, base, size, flip, Color(1, 1, 1, a))
 		"splat":
 			var a := clampf((1.0 - p) * 2.0, 0.0, 1.0)
-			Art.draw(self, "fx/goo_splat", base, size * (0.7 + p * 0.5), flip, Color(1, 1, 1, a))
+			Art.draw(self, "fx/goo_splat", base, size * (0.7 + p * 0.5), flip, Color(color, a))
 		"dust":
 			for i in 5:
 				var ang := TAU * i / 5.0
@@ -58,7 +58,7 @@ func _draw() -> void:
 			var at := d * p + Vector2(0, -sin(p * PI) * arc)
 			var vel := d + Vector2(0, -cos(p * PI) * PI * arc)
 			if Art.has("fx/arrow"):
-				Art.draw(self, "fx/arrow", at, 7.0, false, Color.WHITE, vel.angle())
+				Art.draw(self, "fx/arrow", at, 4.0, false, Color.WHITE, vel.angle())
 			else:
 				draw_line(at - vel.normalized() * 10.0, at, Color(0.3, 0.2, 0.1), 2.0)
 		"floater":

@@ -1,4 +1,5 @@
 ## 由 tools/prepare_art.py 自动生成，别手改：每张图的尺寸和锚点（像素）
+## （箭塔 tower* 由 tools/make_tower.py、窜窜/岩壳 runner_*/brute_* 由 tools/make_goo.py 拼出来，条目手工追加在 SPRITES 末尾）
 class_name ArtData
 extends RefCounted
 
@@ -350,6 +351,72 @@ const SPRITES := {
   "h": 941,
   "ax": 0,
   "ay": 0
+ },
+ "buildings/tower": {
+  "w": 150,
+  "h": 196,
+  "ax": 75.0,
+  "ay": 196
+ },
+ "buildings/tower2": {
+  "w": 150,
+  "h": 196,
+  "ax": 75.0,
+  "ay": 196
+ },
+ "buildings/tower_body": {
+  "w": 150,
+  "h": 196,
+  "ax": 75.0,
+  "ay": 196
+ },
+ "buildings/tower_body2": {
+  "w": 150,
+  "h": 196,
+  "ax": 75.0,
+  "ay": 196
+ },
+ "buildings/tower_top": {
+  "w": 150,
+  "h": 196,
+  "ax": 75.0,
+  "ay": 196
+ },
+ "units/runner_idle": {
+  "w": 270,
+  "h": 106,
+  "ax": 137.7,
+  "ay": 106
+ },
+ "units/runner_act": {
+  "w": 292,
+  "h": 99,
+  "ax": 130.7,
+  "ay": 99
+ },
+ "units/runner_dead": {
+  "w": 396,
+  "h": 71,
+  "ax": 198.0,
+  "ay": 71
+ },
+ "units/brute_idle": {
+  "w": 241,
+  "h": 120,
+  "ax": 122.9,
+  "ay": 120
+ },
+ "units/brute_act": {
+  "w": 261,
+  "h": 113,
+  "ax": 116.8,
+  "ay": 113
+ },
+ "units/brute_dead": {
+  "w": 354,
+  "h": 81,
+  "ax": 177.0,
+  "ay": 81
  }
 }
 

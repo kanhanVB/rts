@@ -1,6 +1,29 @@
 extends Unit
 class_name Goo
 ## Goofy Goo 的小怪：朝玩家建筑推进，单位贴脸才咬，被打了必还手。
+## 三个品种（etype）：普通 Goo / 窜窜（快、脆、一路冲基地）/ 岩壳（慢、厚、带甲、专拆箭塔）。
+## 箭塔是塔防的主角：普通 Goo 和窜窜够不着塔上的弓手，从塔下走过只能挨射；岩壳会停下来拆塔，得派剑士去护。
+
+const TYPES := {
+	"goo": {"name": "Goo", "hp": 45.0, "speed": 62.0, "radius": 10.0, "dmg": 7.0, "cd": 1.0, "armor": 0.0,
+		"siege": 1.0, "hunt": 70.0, "hop": 1.0, "color": Color(0.55, 0.6, 0.34),
+		"tip": "沿路推进，啃路边的房子、咬挡路的人；够不着箭塔"},
+	"runner": {"name": "窜窜", "hp": 24.0, "speed": 118.0, "radius": 8.0, "dmg": 5.0, "cd": 0.7, "armor": 0.0,
+		"siege": 1.0, "hunt": 0.0, "hop": 1.9, "color": Color(0.5, 0.4, 0.75),
+		"tip": "跑得飞快、血薄：路边什么都不理，一路冲基地；只有贴身挨打才还手"},
+	"brute": {"name": "岩壳", "hp": 240.0, "speed": 36.0, "radius": 15.0, "dmg": 14.0, "cd": 1.5, "armor": 4.0,
+		"siege": 2.5, "hunt": 45.0, "hop": 0.6, "color": Color(0.5, 0.44, 0.38),
+		"tip": "又慢又厚，护甲 4（每下少吃 4 点）：专找箭塔拆，拆房伤害 ×2.5——派剑士去顶"},
+}
+var etype := "goo"
+var siege := 1.0      # 打建筑 / 工地的伤害倍率
+var hunt_r := 70.0    # 多近的玩家单位会被主动咬（窜窜 0 = 不理人）
+
+## 按品种生成（add_child 之前调，_ready 里按 etype 套数值）
+static func make(t: String) -> Goo:
+	var g := Goo.new()
+	g.etype = t if TYPES.has(t) else "goo"
+	return g
 
 var attack_range: float = 28.0    # 必须 > 单位分离距离(约23)，否则永远咬不到人
 var attack_damage: float = 7.0
@@ -11,7 +34,7 @@ var _cached_target: Node2D = null       # 上次扫描到的目标
 var _repath_cd := 0.0                   # 重算路径的冷却
 var _path_goal := Vector2(-9999, -9999)  # 上次寻路时的目标位置
 
-const HUNT_RADIUS := 70.0    # 贴脸（70px 内）才咬单位；建筑才是行军目标，不计距离
+const HUNT_RADIUS := 70.0    # 普通 Goo：贴脸（70px 内）才咬单位；建筑才是行军目标，不计距离（各品种见 TYPES.hunt）
 ## 波次刷出来的 Goo 沿土路行军（王国保卫战式）：只有路边 LANE_AGGRO 内的建筑/工地会被盯上，
 ## 走到路尽头（基地门口）才退回"找最近建筑"。手动放出来的（测试里）照旧直奔最近建筑。
 const LANE_AGGRO := 150.0
@@ -58,13 +81,20 @@ func _nearest_lane_idx() -> int:
 func _ready() -> void:
 	team = 1        # 必须在 super() 之前设，进组用
 	super()
-	hp = 45.0
-	max_hp = 45.0
-	speed = 62.0
-	radius = 10.0    # 贴图宽（约 38px），半径别太小，不然一群 Goo 叠成一坨
-	body_color = Color(0.55, 0.6, 0.34)
-	display_name = "Goo"
-	armor = 0.0
+	var T: Dictionary = TYPES[etype]
+	hp = T.hp
+	max_hp = T.hp
+	speed = T.speed
+	radius = T.radius    # 贴图宽（Goo 约 38px），半径别太小，不然一群 Goo 叠成一坨
+	body_color = T.color
+	display_name = T.name
+	armor = T.armor
+	attack_damage = T.dmg
+	attack_cooldown = T.cd
+	attack_range = radius + 18.0    # 必须 > 分离距离（两者半径和 + 2），否则永远咬不到
+	siege = T.siege
+	hunt_r = T.hunt
+	hop_rate = T.hop
 	atk = attack_damage
 	atk_range = attack_range
 	atk_cd = attack_cooldown
@@ -72,8 +102,14 @@ func _ready() -> void:
 ## 拉仇恨：被谁打了就还手谁，防止被远程单位白白放风筝
 func take_damage(amount: float, from: Node2D = null) -> void:
 	if from != null and from is Unit and from.team == 0:
-		attack_target = from
+		# 窜窜只还手贴身的（远处弓手放冷箭，它照样往基地冲）
+		if etype != "runner" or position.distance_to(from.position) < 60.0:
+			attack_target = from
 	super(amount, from)
+
+## 品种说明（信息栏用）
+func type_tip() -> String:
+	return TYPES[etype].tip
 
 func _step(delta: float) -> void:
 	_cd = max(0.0, _cd - delta)
@@ -93,7 +129,7 @@ func _step(delta: float) -> void:
 			move_target = position
 			if _cd <= 0.0:
 				_cd = attack_cooldown
-				t.take_damage(attack_damage)
+				t.take_damage(attack_damage * (siege if (t is Building or t is ConstructionSite) else 1.0))
 				attack_fx_to(t.position)
 			return
 		# 目标挪动明显（>24px）且冷却到了才重算路径（绕开悬崖/深水）。
@@ -150,7 +186,7 @@ func _acquire_target() -> Node2D:
 
 func _scan_target() -> Node2D:
 	var best: Node2D = null
-	var best_d := HUNT_RADIUS
+	var best_d := hunt_r
 	for u in _group("player_units"):
 		if not is_instance_valid(u):
 			continue
@@ -160,6 +196,9 @@ func _scan_target() -> Node2D:
 			best = u
 	if best:
 		return best
+	# 窜窜在路上什么建筑都不理，跑到路尽头才啃（基地）
+	if etype == "runner" and lane:
+		return null
 	best = null
 	best_d = INF
 	for b in _group("buildings"):
@@ -167,12 +206,19 @@ func _scan_target() -> Node2D:
 			continue
 		if b.team != 0:
 			continue
+		var tower: bool = b.kind == "tower"
+		if tower and etype != "brute":
+			continue    # 普通 Goo / 窜窜够不着塔上的弓手：从塔下走过只能挨射
 		var d := position.distance_to(b.position)
-		if lane and d > LANE_AGGRO + b.size * 0.5:
+		var aggro: float = LANE_AGGRO + b.size * 0.5 + (90.0 if tower else 0.0)    # 岩壳隔老远就盯上箭塔
+		if lane and d > aggro:
 			continue
-		if d < best_d:
-			best_d = d
+		var score: float = d - (400.0 if tower else 0.0)    # 岩壳：先拆塔，再拆别的
+		if score < best_d:
+			best_d = score
 			best = b
+	if etype == "runner":
+		return best
 	for s in _group("sites"):
 		if not is_instance_valid(s):
 			continue
@@ -186,7 +232,7 @@ func _scan_target() -> Node2D:
 
 ## ---------- 贴图版 ----------
 func _art_key() -> String:
-	return "goo"
+	return etype
 
 ## ---------- 绘制：KR 黏液怪：无脸纯剪影——堆叠圆山包 + 厚描边 + 暗面色带 + 高光 ----------
 func _body_draw() -> void:

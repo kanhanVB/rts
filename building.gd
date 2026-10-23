@@ -22,6 +22,16 @@ const COLORS := {
 ## 起源的塔约是小兵的 3 倍宽；全缩到 0.7 又太小，取 0.85
 const SIZE_SCALE := 0.85
 
+## 各建筑的占地（缩放前）：放置预览 / 工地 / 真建筑共用
+const BASE_SIZE := {"base": 76.0, "barracks": 60.0, "warehouse": 64.0, "smelter": 56.0, "workshop": 56.0, "hive": 84.0, "tower": 40.0}
+
+static func size_of(k: String) -> float:
+	return float(BASE_SIZE.get(k, 60.0)) * SIZE_SCALE
+
+## 贴图显示宽度：箭塔的画布比别的建筑窄高（还要给二级的旗留边）
+static func art_w(k: String, sz: float) -> float:
+	return sz * (TOWER_ART_W if k == "tower" else ART_W)
+
 func setup(k: String) -> void:
 	kind = k
 	match k:
@@ -43,6 +53,9 @@ func setup(k: String) -> void:
 		"hive":
 			hp = 900.0
 			size = 84.0
+		"tower":
+			hp = 260.0
+			size = 40.0
 	size *= SIZE_SCALE
 	max_hp = hp
 	display_name = label_text()
@@ -75,31 +88,117 @@ func take_damage(amount: float, _from: Node2D = null) -> void:
 const TOWER_RANGE := 170.0
 const TOWER_DMG := 8.0
 const TOWER_CD := 1.2
-var _tower_cd := 0.0
+
+## 箭塔（工程师盖在路边）：塔上的弓手自动射路过的敌人，专挑跑在最前面（离基地最近）的打。
+## 普通 Goo / 窜窜够不着塔上的人，只有岩壳会拆塔。用加工线的木板 + 铁锭升二级：两名弓手、射得更远更狠
+const TOWER_LV := {
+	1: {"range": 190.0, "dmg": 9.0, "cd": 1.0, "archers": 1},
+	2: {"range": 225.0, "dmg": 14.0, "cd": 1.0, "archers": 2},
+}
+const TOWER_UP_HP := 140.0      # 升级加的血
+const TOWER_ART_W := 1.8        # 箭塔贴图（150px 画布）显示宽度 = size × 这个
+## 箭塔画布上的位置（像素，tools/make_tower.py 拼图时定的）：弓手脚底 y、两名弓手的 x 偏移
+const TOWER_CANVAS := Vector2(150, 196)
+const TOWER_FEET_Y := 92.0
+const TOWER_ARCHER_H := 46.0
+var level := 1
+var kills := 0
+var _arch_cd: Array = [0.0, 0.5]           # 每名弓手各自的冷却（二级两人错开放箭）
+var _arch_face: Array = [1.0, -1.0]        # 弓手朝向
+var _arch_shot: Array = [-9.0, -9.0]       # 上次放箭的时间（秒）：拉弓姿势留一会儿
+var _game_ref: Node = null
 
 func has_tower() -> bool:
-	return kind == "base" and team == 0
+	return team == 0 and (kind == "base" or kind == "tower")
 
-func _tower(delta: float) -> void:
-	_tower_cd -= delta
-	if _tower_cd > 0.0:
+func tower_stats() -> Dictionary:
+	if kind == "tower":
+		return TOWER_LV[level]
+	return {"range": TOWER_RANGE, "dmg": TOWER_DMG, "cd": TOWER_CD, "archers": 1}
+
+func can_upgrade() -> bool:
+	return kind == "tower" and team == 0 and level < 2
+
+## 升二级（钱由 main 扣）：两名弓手 + 加血 + 插旗挂盾徽
+func upgrade() -> void:
+	if not can_upgrade():
 		return
+	level = 2
+	max_hp += TOWER_UP_HP
+	hp += TOWER_UP_HP
+	display_name = label_text()
+	_arch_cd = [0.3, 0.8]
+	Fx.spawn(get_parent(), "dust", position + Vector2(0, size * 0.2), {"size": size * 1.4, "life": 0.7})
+	queue_redraw()
+
+## 弓手人数 = 当前等级的 archers；二级的两人站垛口左右
+func _archer_x(i: int) -> float:
+	if tower_stats().archers <= 1:
+		return 0.0
+	return -26.0 if i == 0 else 26.0
+
+## 弓手脚底 / 放箭点（本地坐标）
+func _archer_feet(i: int) -> Vector2:
+	var k := art_w(kind, size) / TOWER_CANVAS.x
+	return Vector2(0, size * 0.42) + Vector2(_archer_x(i) * k, -(TOWER_CANVAS.y - TOWER_FEET_Y) * k)
+
+## 挑最前面的敌人：射程内离基地最近的（王国保卫战的"先打头"）
+func _tower_target(rng: float) -> Node2D:
+	if _game_ref == null or not is_instance_valid(_game_ref):
+		_game_ref = get_tree().get_first_node_in_group("game")
+	var home: Vector2 = position
+	if _game_ref != null and is_instance_valid(_game_ref.get("base")):
+		home = _game_ref.base.position
 	var best: Node2D = null
-	var best_d := TOWER_RANGE
+	var best_d := INF
 	for e in get_tree().get_nodes_in_group("enemies"):
-		if not is_instance_valid(e):
+		if not is_instance_valid(e) or e.get("dead") == true:
 			continue
-		var d := position.distance_to(e.position)
+		if position.distance_to(e.position) > rng:
+			continue
+		var d := home.distance_to(e.position)
 		if d < best_d:
 			best_d = d
 			best = e
-	if best == null:
-		_tower_cd = 0.2    # 没目标时别每帧扫
-		return
-	_tower_cd = TOWER_CD
-	best.take_damage(TOWER_DMG, self)
-	var from := position + Vector2((-0.34 if best.position.x < position.x else 0.34) * size, -size * 0.95)
-	Fx.spawn(get_parent(), "arrow", from, {"to": best.position + Vector2(0, -9), "life": 0.3})
+	return best
+
+func _tower(delta: float) -> void:
+	var st := tower_stats()
+	for i in int(st.archers):
+		_arch_cd[i] -= delta
+		if _arch_cd[i] > 0.0:
+			continue
+		var t := _tower_target(st.range)
+		if t == null:
+			_arch_cd[i] = 0.2    # 没目标时别每帧扫
+			continue
+		_arch_cd[i] = st.cd
+		var from: Vector2
+		if kind == "tower":
+			from = position + _archer_feet(i) + Vector2(0, -12.0)
+			_arch_face[i] = 1.0 if t.position.x >= position.x + _archer_feet(i).x else -1.0
+			_arch_shot[i] = Time.get_ticks_msec() / 1000.0
+		else:
+			from = position + Vector2((-0.34 if t.position.x < position.x else 0.34) * size, -size * 0.95)
+		t.take_damage(st.dmg, self)
+		if t.get("dead") == true:
+			kills += 1
+		Fx.spawn(get_parent(), "arrow", from, {"to": t.position + Vector2(0, -9), "life": 0.3})
+
+## 箭塔贴图：塔身（含垛口）→ 塔上的弓手（朝目标、放箭时拉弓）→ 挑檐（挡住弓手的脚）
+func _draw_tower_art(foot: Vector2, mod: Color, shake: float) -> float:
+	var sfx := "2" if level >= 2 else ""
+	var w := art_w(kind, size)
+	var h := Art.draw_w(self, "buildings/tower_body" + sfx, foot + Vector2(shake, 0), w, mod)
+	var k := w / TOWER_CANVAS.x
+	var now := Time.get_ticks_msec() / 1000.0
+	for i in int(tower_stats().archers):
+		var act: bool = now - float(_arch_shot[i]) < 0.35
+		var key := "units/archer_act" if act and Art.has("units/archer_act") else "units/archer_idle"
+		var ah := TOWER_ARCHER_H * k * Unit.pose_scale("archer", key)
+		Art.draw(self, key, _archer_feet(i) + Vector2(shake, 0), ah, float(_arch_face[i]) < 0.0, mod)
+	Art.draw_w(self, "buildings/tower_top", foot + Vector2(shake, 0), w, mod)
+	return h
 
 ## ---------- 生产队列（帝国式）：点一次排一个，排队时就扣钱；排头的读条，读满出兵；最多排 5 个 ----
 const QUEUE_MAX := 5
@@ -133,6 +232,9 @@ var _was_selected := false
 func _process(delta: float) -> void:
 	if has_tower():
 		_tower(delta)
+	if kind == "tower":
+		queue_redraw()    # 塔上的弓手会转身、拉弓
+		return
 	if not queue.is_empty():
 		_produce(delta)
 	if is_processor():
@@ -149,6 +251,8 @@ var _hurt_until := 0
 
 func _art_draw() -> bool:
 	var key := "buildings/" + kind
+	if kind == "tower":
+		key = "buildings/tower_body"
 	if hp < max_hp * 0.5 and Art.has(key + "_damaged"):
 		key += "_damaged"
 	if not Art.has(key):
@@ -168,7 +272,11 @@ func _art_draw() -> bool:
 		var nw: float = Art.info(key.trim_suffix("_damaged")).get("w", 0.0)
 		if nw > 0.0:
 			w *= float(Art.info(key).w) / nw
-	var h := Art.draw_w(self, key, foot + Vector2(shake, 0), w, mod)
+	var h := 0.0
+	if kind == "tower":
+		h = _draw_tower_art(foot, mod, shake)
+	else:
+		h = Art.draw_w(self, key, foot + Vector2(shake, 0), w, mod)
 	if hp < max_hp or selected:
 		Art.hp_bar(self, foot - Vector2(0, h + 6.0), size * 0.7, hp / max_hp, team == 0, 4.0)
 	if is_processor():
@@ -198,6 +306,8 @@ func _draw() -> void:
 			_draw_workshop()
 		"hive":
 			_draw_hive()
+		"tower":
+			_draw_tower()
 	# 血条（悬在屋顶上方）
 	if hp < max_hp:
 		draw_rect(Rect2(-size * 0.5, -size * 0.74, size, 6.0), Color(0, 0, 0, 0.5))
@@ -390,6 +500,22 @@ func _draw_workshop() -> void:
 		var q := Vector2(-s * 0.3 + i * s * 0.1, s * 0.2)
 		draw_rect(Rect2(q.x, q.y - s * 0.2, s * 0.09, s * 0.26), OUTLINE)
 		draw_rect(Rect2(q.x + 1.5, q.y - s * 0.185, s * 0.06, s * 0.23), Color(0.85, 0.68, 0.42))
+
+## ---------- 箭塔（没贴图时的色块版）：石塔身 + 垛口 + 塔顶弓手小圆点 ----------
+func _draw_tower() -> void:
+	var s := size
+	var stone := Color(0.6, 0.58, 0.55)
+	draw_rect(Rect2(-s * 0.36, -s * 0.9, s * 0.72, s * 1.25), OUTLINE)
+	draw_rect(Rect2(-s * 0.32, -s * 0.86, s * 0.64, s * 1.17), stone)
+	for i in 3:
+		var x := -s * 0.42 + i * s * 0.32
+		draw_rect(Rect2(x, -s * 1.12, s * 0.2, s * 0.26), OUTLINE)
+		draw_rect(Rect2(x + 2.0, -s * 1.1, s * 0.2 - 4.0, s * 0.22), stone.lightened(0.15))
+	draw_rect(Rect2(-s * 0.06, -s * 0.6, s * 0.12, s * 0.3), OUTLINE)
+	for i in int(tower_stats().archers):
+		var p := Vector2(_archer_x(i) * s / 70.0, -s * 1.0)
+		draw_circle(p, s * 0.13, Color(0.35, 0.45, 0.25))
+		draw_arc(p, s * 0.13, 0, TAU, 16, OUTLINE, 2.0)
 
 ## ---------- 巢穴：岩石老窝 + 尖刺 + 红光洞口（无脸） ----------
 func _draw_hive() -> void:
@@ -702,4 +828,6 @@ func label_text() -> String:
 			return "熔炉"
 		"workshop":
 			return "木工台"
+		"tower":
+			return "箭塔" if level < 2 else "二级箭塔"
 	return "?"

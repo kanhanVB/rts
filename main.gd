@@ -499,6 +499,8 @@ func _on_key(event: InputEventKey) -> void:
 		_delete_selected()
 	elif k == KEY_H:
 		select_base()
+	elif k == KEY_N:
+		call_wave_early()
 	elif k == KEY_PERIOD:
 		select_next_idle(true)
 	elif k == KEY_COMMA:
@@ -746,6 +748,10 @@ func commands() -> Array:
 			else:
 				out.append(_cmd_entry("fetch_on", 2, "自取:关", r.in, {},
 					"现在：只用送货农民送来的料，仓库的%s一点不动。点一下打开（仓库留底 %d）" % [raw, int(Building.FETCH_RESERVE)]))
+		if b.can_upgrade():
+			var t2: Dictionary = Building.TOWER_LV[2]
+			out.append(_cmd_entry("upgrade", 0, "升级", "tower2", Economy.COST_TOWER_UP,
+				"升二级箭塔：2 名弓手、射程 %d、每箭 %d（护甲高的岩壳也扛不住），血 +%d" % [int(t2.range), int(t2.dmg), int(Building.TOWER_UP_HP)]))
 		if b.kind != "base":
 			out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "拆掉这座建筑（不退资源）", "Del"))
 		return out
@@ -758,6 +764,9 @@ func commands() -> Array:
 		out.append(_cmd_entry("smelter", 1, "熔炉", "smelter", Economy.COST_SMELTER, "矿石 → 铁锭（剑士要用）。要农民进厂守炉：一炉 5 矿烧 5 秒"))
 		out.append(_cmd_entry("workshop", 2, "木工台", "workshop", Economy.COST_WORKSHOP, "木材 → 木板（弓手要用）。要农民进厂锯板：一批 5 木锯 4 秒"))
 		out.append(_cmd_entry("barracks", 3, "兵营", "barracks", Economy.COST_BARRACKS, "训练剑士和弓手"))
+		var t1: Dictionary = Building.TOWER_LV[1]
+		out.append(_cmd_entry("tower", 4, "箭塔", "tower", Economy.COST_TOWER,
+			"盖在土路边：塔上弓手自动射路过的怪（射程 %d、每箭 %d），先打跑在最前面的。普通 Goo 和窜窜打不着塔，岩壳会来拆" % [int(t1.range), int(t1.dmg)]))
 		out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌就打"))
 		out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
 		return out
@@ -797,8 +806,12 @@ func run_command(id: String) -> void:
 			_on_sword_pressed()
 		"archer":
 			_on_archer_pressed()
-		"warehouse", "smelter", "workshop", "barracks":
+		"warehouse", "smelter", "workshop", "barracks", "tower":
 			_start_placing(id)
+		"upgrade":
+			_upgrade_selected_tower()
+		"call_wave":
+			call_wave_early()
 		"attack":
 			_target_mode = "attack"
 			_hud_msg("A 移动：点目的地（左右键都行），路上遇到敌人就开打 · Esc 取消")
@@ -872,7 +885,8 @@ func _pick_at(world: Vector2, include_res := false) -> Vector2:
 			if b is ResNode:
 				hit = absf(d.x) < 22.0 and d.y > -56.0 and d.y < 14.0
 			else:
-				hit = absf(d.x) < b.size * 0.8 and d.y > -b.size * 1.5 and d.y < b.size * 0.45
+				var top: float = b.size * (2.2 if b.kind == "tower" else 1.5)    # 箭塔又高又瘦
+				hit = absf(d.x) < b.size * 0.8 and d.y > -top and d.y < b.size * 0.45
 			if hit and b.position.y > best_y:
 				best = b
 				best_y = b.position.y
@@ -1058,6 +1072,37 @@ func fire_operator(b: Building) -> Worker:
 	w.auto_assign(b.recipe().in)
 	_hud_msg("%s放走 1 个工人，回去采%s（剩 %d/%d）" % [b.display_name, Economy.KIND_NAME[b.recipe().in], b.op_count(), Building.OP_MAX])
 	return w
+
+## ---------- 箭塔升级 / 提前叫波 ----------
+func _upgrade_selected_tower() -> void:
+	var list: Array = selected.filter(func(b): return b is Building and is_instance_valid(b) and b.can_upgrade())
+	if list.is_empty():
+		_hud_msg("先选中一座一级箭塔")
+		return
+	for b in list:    # 框了好几座就挨个升，钱不够为止
+		if not upgrade_tower(b):
+			break
+
+func upgrade_tower(b: Building) -> bool:
+	if b == null or not b.can_upgrade():
+		return false
+	if not economy.can_afford(Economy.COST_TOWER_UP):
+		_hud_msg(economy.short_msg(Economy.COST_TOWER_UP) + "（木板靠木工台、铁锭靠熔炉）")
+		return false
+	economy.spend(Economy.COST_TOWER_UP)
+	b.upgrade()
+	_hud_msg("箭塔升到二级：2 名弓手，射程 %d、每箭 %d" % [int(Building.TOWER_LV[2].range), int(Building.TOWER_LV[2].dmg)])
+	return true
+
+## N / 波次旁的按钮：倒计时没走完就放下一波，剩几秒给多少矿和木
+func call_wave_early() -> void:
+	if game_state != "play":
+		return
+	if not _wave_mgr.can_call_early():
+		_hud_msg("最后一波已经出了" if _wave_mgr.wave >= WaveManager.MAX_WAVES else "下一波马上就到")
+		return
+	var n := _wave_mgr.call_early()
+	_hud_msg("提前叫来第 %d 波（%s）：奖励 %d 矿 + %d 木" % [_wave_mgr.wave, WaveManager.wave_text(_wave_mgr.wave), n, n])
 
 ## ---------- 编队：Ctrl+数字 存，数字 召回 ----------
 func _save_control_group(idx: int) -> void:
@@ -1354,6 +1399,8 @@ func _place_name(kind: String) -> String:
 			return "木工台"
 		"barracks":
 			return "兵营"
+		"tower":
+			return "箭塔"
 	return "设施"
 
 func _on_sword_pressed() -> void:
@@ -1383,8 +1430,16 @@ func _selected_info_text() -> String:
 	if list.size() == 1:
 		var t = list[0]
 		if t is Building:
-			var extra := " · 箭塔 %.0f 伤害 / %.1f 秒 · 射程 %.0f" % [Building.TOWER_DMG, Building.TOWER_CD, Building.TOWER_RANGE] if t.has_tower() else ""
+			var extra := ""
+			if t.has_tower():
+				var st: Dictionary = t.tower_stats()
+				extra = " · 箭塔 %.0f 伤害 / %.1f 秒 · 射程 %.0f" % [st.dmg, st.cd, st.range]
 			var txt := "%s   血量 %.0f/%.0f · 建筑%s" % [t.display_name, t.hp, t.max_hp, extra]
+			if t.kind == "tower":
+				var st: Dictionary = t.tower_stats()
+				txt = "%s   血量 %.0f/%.0f · 弓手 %d · 每箭 %.0f（%.1f 秒/箭）· 射程 %.0f\n先打跑在最前面的 · 击杀 %d" % [
+					t.display_name, t.hp, t.max_hp, int(st.archers), st.dmg, st.cd, st.range, t.kills]
+				txt += " · Q 升级（%s）" % economy.cost_text(Economy.COST_TOWER_UP) if t.can_upgrade() else " · 已满级"
 			if t.trains():
 				txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
 				if t.waiting_pop:
@@ -1401,6 +1456,8 @@ func _selected_info_text() -> String:
 			rng_txt = "%.0f（近战）" % u.atk_range if u.atk_range <= 35.0 else "%.0f（远程）" % u.atk_range
 		var line := "%s   血量 %.0f/%.0f · 护甲 %.0f · 攻击 %s\n移速 %.0f · 射程 %s" % [
 			u.display_name, u.hp, u.max_hp, u.armor, atk_txt, u.speed, rng_txt]
+		if u is Goo:
+			line += "\n" + u.type_tip()
 		if u is Worker and u.team == 0:
 			var w: Worker = u
 			var dest := "就近仓库/基地"
@@ -1439,11 +1496,11 @@ func _update_labels() -> void:
 	if game_state != "play":
 		wave_label.text = ""
 	elif _wave_mgr.wave == 0:
-		wave_label.text = "敌情：第一波还有 %d 秒" % int(_wave_mgr.wave_timer)
+		wave_label.text = "敌情：第一波还有 %d 秒 · %s" % [int(_wave_mgr.wave_timer), WaveManager.wave_text(1)]
 	elif _wave_mgr.wave >= WaveManager.MAX_WAVES:
 		wave_label.text = "最后一波已出，清完即胜"
 	else:
-		wave_label.text = "第 %d/%d 波 · 下一波 %d 秒" % [_wave_mgr.wave, WaveManager.MAX_WAVES, int(_wave_mgr.wave_timer)]
+		wave_label.text = "第 %d/%d 波 · 下一波 %d 秒：%s" % [_wave_mgr.wave, WaveManager.MAX_WAVES, int(_wave_mgr.wave_timer), WaveManager.wave_text(_wave_mgr.wave + 1)]
 
 ## ================================ 产能面板 ================================
 func _update_panel() -> void:
@@ -1574,6 +1631,10 @@ func _draw() -> void:
 		Art.ellipse(self, m.pos, 16.0 * (1.2 - k * 0.6), c, false, 3.0)
 		Art.ellipse(self, m.pos, 6.0 * (1.2 - k * 0.6), c, false, 2.0)
 
+	# ---- 选中的箭塔 / 基地：射程圈 ----
+	for s in selected:
+		if s is Building and is_instance_valid(s) and s.has_tower():
+			_range_ring(s.position, s.tower_stats().range)
 	# ---- 集结点 / 排队路点 / 巡逻线（只画选中的；路点只画一个代表，多选时别画成一团乱麻） ----
 	var drew_wp := false
 	for s in selected:
@@ -1607,15 +1668,23 @@ func _draw() -> void:
 		var p := get_global_mouse_position()
 		var ok := _placement_ok(_placing_kind, p)
 		var tint := Color(0.6, 1.0, 0.6, 0.6) if ok else Color(1.0, 0.45, 0.4, 0.6)
+		if _placing_kind == "tower":
+			_range_ring(p, Building.TOWER_LV[1].range, ok)    # 放塔时就看得见能罩住哪段路
 		if Art.has("buildings/" + _placing_kind):
-			var sz: float = {"barracks": 60.0, "warehouse": 64.0, "smelter": 56.0, "workshop": 56.0}.get(_placing_kind, 60.0) * Building.SIZE_SCALE    # 和盖好后一样大
+			var sz: float = Building.size_of(_placing_kind)    # 和盖好后一样大
 			Art.ellipse(self, p + Vector2(0, sz * 0.38), sz * 0.95, Color(tint, 0.35))
-			Art.draw_w(self, "buildings/" + _placing_kind, p + Vector2(0, sz * 0.42), sz * Building.ART_W, tint)
+			Art.draw_w(self, "buildings/" + _placing_kind, p + Vector2(0, sz * 0.42), Building.art_w(_placing_kind, sz), tint)
 		else:
 			var half: float = 30.0 * Building.SIZE_SCALE    # 工地半宽
 			var r := Rect2(p - Vector2(half, half), Vector2(half * 2.0, half * 2.0))
 			draw_rect(r, Color(0.15, 0.6, 0.55, 0.5))
 			draw_rect(r, Color(1, 1, 1, 0.6), false, 1.0)
+
+## 射程圈（选中箭塔 / 放塔预览）：淡色实心 + 描边，画在地上、单位下面
+func _range_ring(c: Vector2, r: float, ok := true) -> void:
+	var col := Color(0.55, 0.85, 1.0) if ok else Color(1.0, 0.45, 0.4)
+	draw_circle(c, r, Color(col, 0.08))
+	draw_arc(c, r, 0, TAU, 72, Color(col, 0.65), 2.0 / cam.zoom.x)
 
 ## 虚线（集结点、路点）：每段 14px，线宽不随缩放变粗
 func _dashed(a: Vector2, b: Vector2, c: Color) -> void:
@@ -1637,7 +1706,7 @@ func _draw_flag(p: Vector2) -> void:
 
 ## 放置预览用：和 BuildManager.try_place 同一套规则（只判断，不提示）
 func _placement_ok(kind: String, pos: Vector2) -> bool:
-	return _build_mgr.placement_error(pos) == "" and economy.can_afford(BuildManager.COST_TABLE.get(kind, {}))
+	return _build_mgr.placement_error(pos, kind) == "" and economy.can_afford(BuildManager.COST_TABLE.get(kind, {}))
 
 ## ================================ 自测 ================================
 ## 套件本体已拆到 test_suite.gd。入口和用法不变：

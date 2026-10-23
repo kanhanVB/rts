@@ -609,6 +609,8 @@ func run() -> void:
 	if is_instance_valid(gl):
 		gl.take_damage(99999.0)
 
+	await _td_tests()
+
 	# ---- 回归：第二轮查 bug 修过的问题 ----
 	# 工程师同一帧挨两下致死，只能复活一个
 	var eng_list: Array = m._player_engineers()
@@ -667,6 +669,175 @@ func run() -> void:
 	else:
 		print("TEST FAIL（%d 项未过）" % m._fail)
 		m.get_tree().quit(1)
+
+## ---- 塔防：箭塔 / 三种怪 / 波次配表 / 提前叫波 ----
+func _td_tests() -> void:
+	# 品种数值：窜窜快又脆、岩壳慢又厚带甲
+	var st := {}
+	for t in ["goo", "runner", "brute"]:
+		var e := Goo.make(t)
+		m.add_child(e)
+		st[t] = {"hp": e.max_hp, "spd": e.speed, "armor": e.armor, "siege": e.siege, "key": e._art_key()}
+		e.queue_free()
+	_check(st.runner.spd > st.goo.spd * 1.6 and st.runner.hp < st.goo.hp, "窜窜比 Goo 快得多、血更少（速度 %.0f vs %.0f）" % [st.runner.spd, st.goo.spd])
+	_check(st.brute.hp >= st.goo.hp * 4.0 and st.brute.armor > 0.0 and st.brute.siege > 1.0 and st.brute.spd < st.goo.spd,
+		"岩壳又慢又厚、带甲、拆房加成（血 %.0f 甲 %.0f）" % [st.brute.hp, st.brute.armor])
+	_check(st.runner.key == "runner" and st.brute.key == "brute", "三种怪各用各的贴图")
+	var ab := Goo.make("brute")
+	ab.position = Vector2(-300, -300)
+	m.add_child(ab)
+	var ahp: float = ab.hp
+	ab.take_damage(9.0)
+	var d9: float = ahp - ab.hp
+	ab.take_damage(2.0)
+	_check(is_equal_approx(d9, 5.0) and is_equal_approx(ahp - ab.hp, 6.0), "岩壳护甲 4：9 点伤害只吃 5、小伤害保底 1")
+	ab.queue_free()
+
+	# 工程师命令卡有箭塔；箭塔不许压土路（不传品种的老接口不受影响）
+	var engs: Array = m._player_engineers()
+	if not engs.is_empty():
+		m._set_selection([engs[0]])
+		var tc: Array = m.commands().filter(func(c): return c.id == "tower")
+		_check(tc.size() == 1 and tc[0].key == "T", "工程师命令卡 T = 箭塔")
+	var road_ok := false
+	for rp in m.road():
+		if m._build_mgr.placement_error(rp) == "":
+			road_ok = m._build_mgr.placement_error(rp, "tower").contains("土路")
+			break
+	_check(road_ok, "箭塔不能盖在土路上（要盖在路边）")
+
+	# 找一块空地测箭塔：塔前（或塔后）60px 一段横着 230px 的土路，路边够不着别的房子/工地/人，射程里没别的怪
+	var spot = null
+	var side := 60.0
+	for y in range(120, int(m.H) - 120, 40):
+		for x in range(200, int(m.W) - 200, 40):
+			for sd in [60.0, -60.0]:
+				if spot != null:
+					break
+				var p := Vector2(x, y)
+				if m._build_mgr.placement_error(p, "tower") != "":
+					continue
+				var la: Vector2 = p + Vector2(-100, sd)
+				var lb: Vector2 = p + Vector2(130, sd)
+				var ok: bool = la.y > 70.0 and la.y < m.H - 50.0
+				for k in 8:
+					if m.area_blocked(la.lerp(lb, k / 7.0), 22.0):
+						ok = false
+				for grp in ["buildings", "sites", "player_units", "enemies", "res_nodes"]:
+					for n in m.get_tree().get_nodes_in_group(grp):
+						if not ok or not is_instance_valid(n):
+							continue
+						var dl: float = Geometry2D.get_closest_point_to_segment(n.position, la, lb).distance_to(n.position)
+						if grp == "buildings" and n.team != 0:
+							ok = dl > n.size + 10.0    # 巢穴脚下的路点会被 start_lane 剔掉，路就断了
+						elif grp == "buildings" or grp == "sites":
+							ok = dl > Goo.LANE_AGGRO + n.size * 0.5 + 8.0
+						elif grp == "player_units":
+							ok = dl > 120.0
+						elif grp == "res_nodes":
+							ok = dl > 50.0 and n.position.distance_to(p) > 56.0    # 矿/树挡路，路过时别被挤开
+						else:
+							ok = n.position.distance_to(p) > 300.0
+				if ok:
+					spot = p
+					side = sd
+	_check(spot != null, "找到测箭塔的空地 %s" % [spot])
+	if spot == null:
+		return
+	var tw: Building = m._build_mgr.add_building("tower", spot, 0)
+	var lane_pts := [spot + Vector2(130, side), spot + Vector2(-100, side)]    # 土路数据是基地端在前，怪反着走
+
+	# 普通 Goo 从塔下走过：不啃塔，只挨射，被射死记到塔的击杀上
+	var gp := Goo.make("goo")
+	gp.position = lane_pts[1]
+	m.add_child(gp)
+	gp.max_hp = 36.0    # 4 箭死：2.5 秒时还活着，走到路尽头前一定死
+	gp.hp = 36.0
+	gp.hunt_r = 0.0     # 别被路过的农民勾走（这里只测它理不理塔）
+	gp.start_lane(lane_pts)
+	await m.get_tree().create_timer(2.5).timeout
+	_check(is_instance_valid(gp) and gp.hp < gp.max_hp, "箭塔射路过的 Goo")
+	_check(is_instance_valid(gp) and gp.position.x - lane_pts[1].x > 80.0 and is_equal_approx(tw.hp, tw.max_hp),
+		"普通 Goo 打不着塔：从塔下走过（走了 %.0fpx，塔血 %.0f/%.0f）" % [gp.position.x - lane_pts[1].x if is_instance_valid(gp) else -1.0, tw.hp, tw.max_hp])
+	for i in 20:
+		if not is_instance_valid(gp) or gp.dead:
+			break
+		await m.get_tree().create_timer(0.25).timeout
+	_check((not is_instance_valid(gp) or gp.dead) and tw.kills >= 1, "箭塔射死 Goo 记击杀（%d）" % tw.kills)
+
+	# 岩壳在路上隔老远盯上箭塔，过去拆（拆房伤害 ×2.5）
+	var bp := Goo.make("brute")
+	bp.position = lane_pts[1]
+	m.add_child(bp)
+	bp.hunt_r = 0.0
+	bp.start_lane(lane_pts)
+	var thp0: float = tw.hp
+	await m.get_tree().create_timer(6.0).timeout
+	_check(tw.hp <= thp0 - 14.0 * 2.0, "岩壳离开土路去拆箭塔（塔血 %.0f -> %.0f）" % [thp0, tw.hp])
+	if is_instance_valid(bp):
+		bp.take_damage(99999.0)
+
+	# 窜窜在路上不理路边的房子，一路冲
+	var wh: Building = m._build_mgr.add_building("warehouse", spot + Vector2(90, side - signf(side) * 90.0), 0)    # 路边 90px
+	var rp2 := Goo.make("runner")
+	rp2.position = lane_pts[1]
+	m.add_child(rp2)
+	rp2.max_hp = 300.0
+	rp2.hp = 300.0
+	rp2.start_lane(lane_pts)
+	await m.get_tree().create_timer(1.5).timeout
+	_check(is_instance_valid(rp2) and rp2.position.x - lane_pts[1].x > 120.0 and is_equal_approx(wh.hp, wh.max_hp),
+		"窜窜不理路边房子，一路冲（1.5 秒跑了 %.0fpx）" % (rp2.position.x - lane_pts[1].x if is_instance_valid(rp2) else -1.0))
+	if is_instance_valid(rp2):
+		rp2.take_damage(99999.0)
+	wh.take_damage(99999.0)
+
+	# 升级：要木板 + 铁锭；二级两名弓手、射程更远、加血；满级不能再升
+	m._point_select(tw.position + Vector2(0, -20))
+	_check(m.selected.size() == 1 and m.selected[0] == tw and m.commands().any(func(c): return c.id == "upgrade"), "选中箭塔，命令卡有升级")
+	m.economy.plank = 0.0
+	m.economy.ingot = 0.0
+	_check(not m.upgrade_tower(tw) and tw.level == 1, "没木板铁锭升不了级")
+	m.economy.plank = float(Economy.COST_TOWER_UP.plank)
+	m.economy.ingot = float(Economy.COST_TOWER_UP.ingot)
+	var mhp0: float = tw.max_hp
+	_check(m.upgrade_tower(tw) and tw.level == 2 and m.economy.plank < 0.5 and m.economy.ingot < 0.5, "升二级扣木板 + 铁锭")
+	var s2: Dictionary = tw.tower_stats()
+	_check(int(s2.archers) == 2 and s2.range > Building.TOWER_LV[1].range and s2.dmg > Building.TOWER_LV[1].dmg and tw.max_hp > mhp0,
+		"二级箭塔：2 弓手、射程 %d、每箭 %d、血 %.0f" % [int(s2.range), int(s2.dmg), tw.max_hp])
+	_check(not tw.can_upgrade() and not m.commands().any(func(c): return c.id == "upgrade"), "满级不能再升")
+	tw.take_damage(99999.0)
+
+	# 波次：十波配表、文字、提前叫波奖励、一只只放（用一个不接主循环的波次管理器，不影响主局）
+	_check(WaveManager.WAVES.size() == WaveManager.MAX_WAVES and WaveManager.wave_text(4) == "Goo×4 岩壳×1 窜窜×3",
+		"波次配表（第 4 波：%s）" % WaveManager.wave_text(4))
+	var wm := WaveManager.new()
+	m.add_child(wm)
+	wm.remove_from_group("wave_mgr")
+	wm.wave_timer = 20.0
+	var ore0: float = m.economy.ore
+	var n := wm.call_early()
+	_check(n == 12 and is_equal_approx(m.economy.ore - ore0, 12.0) and wm.wave == 1 and wm.spawning() and is_equal_approx(wm.wave_timer, WaveManager.WAVE_INTERVAL),
+		"提前 20 秒叫波：奖励 12 矿 12 木，第 1 波开始放怪")
+	var before: Array = m.get_tree().get_nodes_in_group("enemies").duplicate()
+	wm.update(0.01)
+	var mid_cnt: int = wm._queue.size()
+	wm.update(0.3)
+	var mid_cnt2: int = wm._queue.size()
+	wm.update(0.4)
+	var fresh: Array = m.get_tree().get_nodes_in_group("enemies").filter(func(e): return not before.has(e))
+	_check(mid_cnt == 1 and mid_cnt2 == 1 and not wm.spawning() and fresh.size() == 2 and fresh.all(func(e): return e.lane),
+		"一波怪隔 0.6 秒一只只出、沿土路走（%d 只）" % fresh.size())
+	wm.wave = 5
+	var big: Goo = wm._spawn("brute")
+	_check(big != null and is_equal_approx(big.max_hp, Goo.TYPES.brute.hp * 1.24), "后面的波血量加成（第 5 波 ×1.24）")
+	if big != null:
+		fresh.append(big)
+	for e in fresh:
+		if is_instance_valid(e):
+			e.take_damage(99999.0)
+	wm.queue_free()
+	_check(m._wave_mgr.wave == 0 and not m._wave_mgr.spawning(), "主局波次没被测试动过")
 
 ## ---- 帝国时代式操作：生产队列 / 选择 / 热键 / 删除 / 闲置 / 占格 / 随机图 ----
 func _aoe_tests() -> void:
