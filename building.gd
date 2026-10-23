@@ -115,9 +115,11 @@ func has_tower() -> bool:
 	return team == 0 and (kind == "base" or kind == "tower")
 
 func tower_stats() -> Dictionary:
-	if kind == "tower":
-		return TOWER_LV[level]
-	return {"range": TOWER_RANGE, "dmg": TOWER_DMG, "cd": TOWER_CD, "archers": 1}
+	var st: Dictionary = TOWER_LV[level] if kind == "tower" else {"range": TOWER_RANGE, "dmg": TOWER_DMG, "cd": TOWER_CD, "archers": 1}
+	if team == 0 and Tech.has("up_arrows"):    # 破甲箭头：每箭 +3（表是常量，复制一份再改）
+		st = st.duplicate()
+		st.dmg = float(st.dmg) + Tech.ARROW_BONUS
+	return st
 
 func can_upgrade() -> bool:
 	return kind == "tower" and team == 0 and level < 2
@@ -593,6 +595,14 @@ func is_processor() -> bool:
 func recipe() -> Dictionary:
 	return RECIPES.get(kind, {})
 
+## 一批的读条秒数（研究过熟练工匠 ×0.7）
+func batch_time() -> float:
+	return float(recipe().get("time", 1.0)) * Tech.craft_mult()
+
+## 秒数显示：整数不带小数（5 秒），否则一位小数（3.5 秒）
+static func fmt_secs(t: float) -> String:
+	return "%d" % int(roundf(t)) if absf(t - roundf(t)) < 0.05 else "%.1f" % t
+
 ## 送料进料场，返回实际收下多少（料场满了多的不收）
 func put_input(n: float) -> float:
 	var take := clampf(IN_CAP - stock_in, 0.0, n)
@@ -713,7 +723,7 @@ func _run_line(delta: float) -> void:
 			batch = 0.0
 	var working := batch_on and present > 0
 	if working:
-		batch += delta * present / float(r.time)
+		batch += delta * present / batch_time()
 		if batch >= 1.0:
 			batch_on = false
 			batch = 0.0

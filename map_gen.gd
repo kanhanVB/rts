@@ -11,7 +11,7 @@ extends RefCounted
 ##   roads: Array[Array[Vector2]]        每个巢穴一条路，点从主城端排到巢穴端（Goo 反着走）
 ##   cells: PackedByteArray              每格地形：0 空地 / C_TREE 能砍的树 / C_WOODS 边缘密林 / C_ORE 矿
 ##   gw, gh: int                         网格尺寸
-##   ore: Array[Vector2]                 每堆矿的位置（格心 + 一点抖动）
+##   ore: Array[Vector2]                 每堆矿的位置（格心 + 抖开，一片片随机长成一团）
 ##   trees: Array[Vector2]               每棵能砍的树的位置
 ##   decor: Array[Dictionary]            {key, pos, flip} 纯装饰
 ##   camps: Array[Dictionary]            {pos, tier, rich: Array[Vector2]} Goo 据点（野怪小窝）和它守着的富矿
@@ -199,8 +199,9 @@ static func generate(seed_: int, w: float, h: float, n_hives := 2) -> Dictionary
 	crng.seed = seed_ * 7919 + 13
 	var camps: Array = []
 	tries = 0
-	while camps.size() < 3 and tries < 700:
+	while camps.size() < 3 and tries < 3000:
 		tries += 1
+		var relax := tries > 900    # 实在摆不下第三个：窝和窝、窝和普通矿之间都挨近一点（矿还是在清场圈 240 外）
 		var c := Vector2(crng.randf_range(300.0, w - 300.0), crng.randf_range(260.0, h - 260.0))
 		var dist := c.distance_to(base)
 		if dist < CAMP_MIN_D or dist > CAMP_MAX_D or _near_road(roads, c, 250.0):
@@ -210,10 +211,10 @@ static func generate(seed_: int, w: float, h: float, n_hives := 2) -> Dictionary
 			if c.distance_to(hp) < 460.0:
 				ok = false
 		for o in camps:
-			if c.distance_to(o.pos) < 650.0:
+			if c.distance_to(o.pos) < (540.0 if relax else 650.0):
 				ok = false
 		for o in ore:
-			if c.distance_to(o) < 300.0:
+			if c.distance_to(o) < (250.0 if relax else 300.0):
 				ok = false
 		# 窝脚下一块平地；警戒圈里不许有普通矿，零星几棵树就砍掉清出一块空场
 		# （不然自动去砍树的农民一头撞进窝里）。先在副本上试，富矿也摆得下才算数
@@ -224,8 +225,9 @@ static func generate(seed_: int, w: float, h: float, n_hives := 2) -> Dictionary
 			continue
 		var rich: Array = []
 		var away: float = (c - base).angle()
-		for k in 8:
-			var rc := c + Vector2.from_angle(away + crng.randf_range(-0.8, 0.8)) * crng.randf_range(100.0, 122.0)    # 整片都在警戒圈（190）里
+		for k in 14:
+			var spread := 0.8 if k < 8 else 1.7    # 背后摆不下（贴着地图边的密林）就往两侧挪
+			var rc := c + Vector2.from_angle(away + crng.randf_range(-spread, spread)) * crng.randf_range(100.0, 122.0)    # 整片都在警戒圈（190）里
 			if not _near_road(roads, rc, 150.0) and _place_rich(trial, gw, gh, rc, crng, rich, seen):
 				break
 		if rich.is_empty():
@@ -319,19 +321,49 @@ static func _free_angle(rng: RandomNumberGenerator, taken: Array, gap: float) ->
 			return a
 	return rng.randf() * TAU
 
-## 一片矿：2×2 或 1×3/3×1 的矿堆（每堆占一格），周围一圈必须是空地；home=主城矿，4 堆
+## 一团矿的形状：从中心格开始随机往外长 n 格（8 邻接；只挨着斜角的少长一点 → 抱成团又不方方正正）。
+## extent = 离中心最多几格
+static func _blob(n: int, extent: int, rng: RandomNumberGenerator) -> Array:
+	var shape: Array = [Vector2i.ZERO]
+	var tries := 0
+	while shape.size() < n and tries < 300:
+		tries += 1
+		var q: Vector2i = shape[rng.randi() % shape.size()] + Vector2i(rng.randi_range(-1, 1), rng.randi_range(-1, 1))
+		if shape.has(q) or absi(q.x) > extent or absi(q.y) > extent:
+			continue
+		var side := 0
+		var hole := false
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			if shape.has(q + d):
+				side += 1
+			elif _walled(shape, q, q + d):
+				hole = true    # 会围出一个四面都是矿的空格：人进不去（寻路也会挑它当落脚点）
+		if hole or (side == 0 and rng.randf() < 0.55):
+			continue
+		shape.append(q)
+	return shape
+
+## 加上 extra 以后，空格 e 是不是上下左右都被矿堵死了
+static func _walled(shape: Array, extra: Vector2i, e: Vector2i) -> bool:
+	for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		var q: Vector2i = e + d
+		if q != extra and not shape.has(q):
+			return false
+	return true
+
+## 矿堆在格子里的落点：格心再抖开一点（±8, ±6），别排成棋盘；还在本格里（res_node 按坐标认格子）
+static func _pile_pos(q: Vector2i, rng: RandomNumberGenerator) -> Vector2:
+	return (Vector2(q) + Vector2(0.5, 0.5)) * CELL + Vector2(rng.randf_range(-8.0, 8.0), rng.randf_range(-6.0, 6.0))
+
+## 一片矿：从中心格随机长出来的一团（home = 主城旁 4 堆；远处分矿 3~5 堆），每堆占一格、在格里抖开，
+## 大小/朝向/深浅 res_node 按坐标再错开——看着是一窝天然矿脉，不是码好的方阵。周围一圈必须是空地
 static func _place_ore(cells: PackedByteArray, gw: int, gh: int, c: Vector2,
 		rng: RandomNumberGenerator, out: Array, home: bool, seen: PackedByteArray) -> bool:
 	var cc := Vector2i(int(c.x / CELL), int(c.y / CELL))
 	if cc.x < 3 or cc.y < 3 or cc.x >= gw - 3 or cc.y >= gh - 3 or seen[cc.y * gw + cc.x] == 0:
 		return false    # 落在灌不到的地方（林子里的空洞）= 农民走不过去
-	var shape: Array
-	if home or rng.randf() < 0.5:
-		shape = [Vector2i(0, 0), Vector2i(1, 0), Vector2i(0, 1), Vector2i(1, 1)]
-	elif rng.randf() < 0.5:
-		shape = [Vector2i(-1, 0), Vector2i(0, 0), Vector2i(1, 0)]
-	else:
-		shape = [Vector2i(0, -1), Vector2i(0, 0), Vector2i(0, 1), Vector2i(1, 0)]
+	var n: int = 4 if home else [3, 4, 4, 5][rng.randi() % 4]
+	var shape := _blob(n, 2, rng)
 	# 落点和外围一圈都得是空地（不贴林子、不压路）
 	for s in shape:
 		for dy in range(-1, 2):
@@ -344,19 +376,18 @@ static func _place_ore(cells: PackedByteArray, gw: int, gh: int, c: Vector2,
 	for s in shape:
 		var q: Vector2i = cc + s
 		cells[q.y * gw + q.x] = C_ORE
-		out.append(Vector2(q.x + 0.5, q.y + 0.5) * CELL + Vector2(rng.randf_range(-3.0, 3.0), rng.randf_range(-2.0, 2.0)))
+		out.append(_pile_pos(q, rng))
 	return true
 
-## 一片富矿：3×2 或 2×3 共 6 堆（每堆占一格），外围一圈也得是空地；格子记成 C_RICH
+## 一片富矿：6 堆随机长成一团（挤在 3×3 里：一整窝、不是一块砖），外围一圈也得是空地；格子记成 C_RICH
 static func _place_rich(cells: PackedByteArray, gw: int, gh: int, c: Vector2,
 		rng: RandomNumberGenerator, out: Array, seen: PackedByteArray) -> bool:
 	var cc := Vector2i(int(c.x / CELL), int(c.y / CELL))
 	if cc.x < 4 or cc.y < 4 or cc.x >= gw - 5 or cc.y >= gh - 5 or seen[cc.y * gw + cc.x] == 0:
 		return false
-	var shape: Array = []
-	var wide := rng.randf() < 0.5
-	for i in 6:
-		shape.append(Vector2i(i % 3 - 1, i / 3) if wide else Vector2i(i % 2, i / 2 - 1))    # 围着 c 摆，别整片偏到一边
+	var shape := _blob(6, 1, rng)    # 围着 c 长，别整片偏到一边（整片都要在据点警戒圈里）
+	if shape.size() < 6:
+		return false
 	for sp in shape:
 		for dy in range(-1, 2):
 			for dx in range(-1, 2):
@@ -366,7 +397,7 @@ static func _place_rich(cells: PackedByteArray, gw: int, gh: int, c: Vector2,
 	for sp in shape:
 		var q: Vector2i = cc + sp
 		cells[q.y * gw + q.x] = C_RICH
-		out.append(Vector2(q.x + 0.5, q.y + 0.5) * CELL + Vector2(rng.randf_range(-3.0, 3.0), rng.randf_range(-2.0, 2.0)))
+		out.append(_pile_pos(q, rng))
 	return true
 
 ## 据点警戒圈清场：半径 r 内有矿 → 不行；能砍的树不超过 max_trees 棵就砍掉（格子改回空地），否则不行。

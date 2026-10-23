@@ -658,6 +658,7 @@ func run() -> void:
 
 	await _aoe_tests()
 	await _camp_tests()
+	await _tech_tests()
 
 	# 拆巢穴触发胜利
 	m.hive.take_damage(99999.0)
@@ -1147,6 +1148,147 @@ func _camp_tests() -> void:
 	for n in frozen:
 		if is_instance_valid(n):
 			n.process_mode = Node.PROCESS_MODE_INHERIT
+
+## ---- 科技：基地 / 兵营第二排研究；排队先扣钱、取消全额退、不占人口；研究完全军生效（已有的兵也算）----
+func _cmd_keys(ids_only_tech := true) -> String:
+	var parts: Array = []
+	for c in m.commands():
+		if not ids_only_tech or Tech.is_tech(c.id):
+			parts.append("%s=%s" % [c.key, c.id])
+	return " ".join(parts)
+
+func _tech_tests() -> void:
+	var tree := m.get_tree()
+	m._deselect_all()
+	Tech.reset()
+	var e: Economy = m.economy
+	e.ore += 1000.0
+	e.wood += 1000.0
+	e.ingot += 300.0
+	e.plank += 300.0
+	m.base.queue.clear()
+	m.select_base()
+	_check(_cmd_keys() == "A=up_cart S=up_tools D=up_craft F=up_arrows", "基地第二排 4 个研究：%s" % _cmd_keys())
+	var bk: Building = null
+	for b in m.barracks_list:
+		if is_instance_valid(b):
+			bk = b
+			break
+	if bk == null:
+		bk = m._build_mgr.add_building("barracks", m.base.position + Vector2(-260, 170), 0)
+		await tree.create_timer(0.1).timeout
+	bk.queue.clear()
+	m._set_selection([bk])
+	_check(_cmd_keys() == "A=up_blade S=up_mail D=up_longbow F=up_medic", "兵营第二排 4 个研究：%s" % _cmd_keys())
+	var ore0 := e.ore
+	_check(not m.research("up_cart") and absf(e.ore - ore0) < 0.01, "选着兵营研究不了基地的科技（不扣钱）")
+
+	# 排队：先扣钱、按钮藏起来、不占人口、取消全额退；读条走完才生效
+	m.select_base()
+	m.train_scale = 1.0
+	var w0 := e.wood
+	var p0 := e.plank
+	var pop0: int = m.queued_count()
+	m.run_hotkey("A")
+	_check(m.base.queue.size() == 1 and m.base.queue[0].kind == "up_cart" and absf(e.wood - (w0 - 80.0)) < 0.5 and absf(e.plank - (p0 - 20.0)) < 0.5,
+		"A 研究手推车：排进基地队列，先扣 80 木 20 木板（木 %.0f→%.0f）" % [w0, e.wood])
+	_check(not _cmd_keys().contains("up_cart") and _cmd_keys(false).contains("Q=worker"), "排上的研究按钮藏起来，造农民还在")
+	_check(m.queued_count() == pop0 and not m.pop_blocked("up_cart"), "研究不占人口")
+	_check(not m.research("up_cart") and m.base.queue.size() == 1, "同一项不能排两次")
+	_check(not Tech.has("up_cart") and is_equal_approx(Worker.carry_cap(), 10.0), "读条没完不生效")
+	m.cancel_train(m.base, 0)
+	_check(m.base.queue.is_empty() and absf(e.wood - w0) < 0.5 and absf(e.plank - p0) < 0.5 and _cmd_keys().contains("A=up_cart"),
+		"取消研究全额退，按钮回来")
+	m.train_scale = 0.02    # 25 秒 → 0.5 秒
+	m.run_hotkey("A")
+	await tree.create_timer(0.9).timeout
+	_check(Tech.has("up_cart") and m.base.queue.is_empty() and not _cmd_keys().contains("up_cart"), "读条走完：手推车研究完成，按钮不再出现")
+	m.train_scale = 0.0
+	_check(is_equal_approx(Worker.carry_cap(), 15.0), "手推车：每趟扛 15（%.1f）" % Worker.carry_cap())
+	_check(not m.research("up_cart"), "研究过的不能再研究")
+	# 采集的农民真的扛 15 才回去交
+	var ore_node: ResNode = null
+	for n in m.get_tree().get_nodes_in_group("res_nodes"):
+		if n is ResNode and n.kind == "ore" and n.amount > 60.0 and not n.guarded() and (ore_node == null or n.position.distance_to(m.base.position) < ore_node.position.distance_to(m.base.position)):
+			ore_node = n
+	var gw := Worker.new()
+	gw.position = m.open_point(ore_node.position + Vector2(0, 40)) if ore_node != null else m.base.position + Vector2(60, 60)
+	m.add_child(gw)
+	await tree.create_timer(0.1).timeout
+	if ore_node != null:
+		gw.command_gather(ore_node)
+	var full := -1.0
+	for i in 60:
+		await tree.create_timer(0.2).timeout
+		if gw.state == Worker.State.TO_BASE:
+			full = gw.carry_amount
+			break
+	_check(full >= 14.5, "研究手推车后农民采满 15 才回去交（%.1f）" % full)
+	gw.queue_free()
+
+	m.run_hotkey("S")
+	_check(Tech.has("up_tools") and is_equal_approx(Worker.gather_rate(), 5.2), "精工工具：采集每秒 5.2（%.2f）" % Worker.gather_rate())
+	var sm: Building = m._build_mgr.add_building("smelter", m.base.position + Vector2(-320, -170), 0)    # 临时摆一座（前面的熔炉可能被拆了）
+	var bt0: float = sm.batch_time()
+	m.run_hotkey("D")
+	_check(Tech.has("up_craft") and is_equal_approx(bt0, 5.0) and is_equal_approx(sm.batch_time(), 3.5), "熟练工匠：熔炉一批 %.1f → %.1f 秒" % [bt0, sm.batch_time()])
+	sm.queue_free()
+	var td0: float = m.base.tower_stats().dmg
+	m.run_hotkey("F")
+	_check(Tech.has("up_arrows") and is_equal_approx(m.base.tower_stats().dmg, td0 + 3.0), "破甲箭头：基地每箭 %.0f → %.0f" % [td0, m.base.tower_stats().dmg])
+	var tw: Building = m._build_mgr.add_building("tower", m.base.position + Vector2(200, -200), 0)
+	_check(is_equal_approx(tw.tower_stats().dmg, Building.TOWER_LV[1].dmg + 3.0) and is_equal_approx(Building.TOWER_LV[1].dmg, 9.0), "破甲箭头：箭塔每箭 12（常量表没被改）")
+	tw.queue_free()
+	_check(_cmd_keys() == "", "基地 4 项研究完：第二排空了")
+	_check(m._selected_info_text().contains("已研究：手推车、精工工具、熟练工匠、破甲箭头"), "基地信息栏列出已研究")
+
+	# 兵营：场上已有的兵研究完立刻变强，新出的兵也带着
+	var sw := Soldier.new()
+	sw.setup(false)
+	sw.position = m.base.position + Vector2(-140, 190)
+	m.add_child(sw)
+	var ar := Soldier.new()
+	ar.setup(true)
+	ar.position = sw.position + Vector2(40, 0)
+	m.add_child(ar)
+	await tree.create_timer(0.1).timeout
+	_check(is_equal_approx(sw.atk, 12.0) and is_equal_approx(sw.max_hp, 85.0) and is_equal_approx(ar.atk_range, 140.0), "研究前：剑士 12 攻 85 血，弓手射程 140")
+	m._set_selection([bk])
+	m.run_hotkey("A")
+	_check(Tech.has("up_blade") and is_equal_approx(sw.atk, 16.0) and is_equal_approx(ar.atk, 8.0), "锻铁剑：已有剑士 12 → 16，弓手不变")
+	m.run_hotkey("S")
+	_check(Tech.has("up_mail") and is_equal_approx(sw.max_hp, 100.0) and is_equal_approx(sw.hp, 100.0) and is_equal_approx(sw.armor, 4.0)
+		and is_equal_approx(ar.max_hp, 60.0) and is_equal_approx(ar.armor, 2.0), "锁子甲：剑士 100 血 4 甲、弓手 60 血 2 甲（满血的直接补满）")
+	m.run_hotkey("D")
+	_check(Tech.has("up_longbow") and is_equal_approx(ar.atk_range, 170.0) and is_equal_approx(ar.atk, 10.0) and ar.aggro_range >= 180.0,
+		"长弓：弓手射程 170、每箭 10、索敌 %.0f" % ar.aggro_range)
+	var ns := Soldier.new()
+	ns.setup(false)
+	_check(is_equal_approx(ns.atk, 16.0) and is_equal_approx(ns.max_hp, 100.0) and is_equal_approx(ns.hp, 100.0) and is_equal_approx(ns.armor, 4.0), "新出的剑士带着锻铁剑 + 锁子甲")
+	ns.free()
+	sw.apply_techs()
+	_check(is_equal_approx(sw.atk, 16.0) and is_equal_approx(sw.max_hp, 100.0) and is_equal_approx(sw.armor, 4.0), "重算一遍不会叠两次")
+	m.run_hotkey("F")
+	_check(Tech.has("up_medic") and _cmd_keys() == "", "战地包扎研究完，兵营第二排空了")
+	sw.take_damage(44.0)
+	var hp1 := sw.hp
+	await tree.create_timer(0.5).timeout
+	_check(is_equal_approx(sw.hp, hp1) and hp1 < 70.0, "刚挨打不回血（%.1f）" % sw.hp)
+	sw._calm_t = Tech.MEDIC_DELAY
+	await tree.create_timer(0.5).timeout
+	_check(sw.hp > hp1 + 0.8 and sw.hp < hp1 + 3.0, "战地包扎：脱战 4 秒后每秒回 3 血（%.1f → %.1f）" % [hp1, sw.hp])
+	m._set_selection([bk])
+	_check(m._selected_info_text().contains("已研究：锻铁剑、锁子甲、长弓、战地包扎"), "兵营信息栏列出已研究")
+
+	# 收尾：科技清零，兵恢复原样（后面的测试按原数值写的）
+	Tech.reset()
+	for u in m.get_tree().get_nodes_in_group("player_units"):
+		if u is Soldier:
+			u.apply_techs()
+	_check(is_equal_approx(sw.atk, 12.0) and is_equal_approx(sw.max_hp, 85.0) and is_equal_approx(sw.armor, 2.0) and is_equal_approx(ar.atk_range, 140.0), "清零后恢复原数值")
+	sw.queue_free()
+	ar.queue_free()
+	m._deselect_all()
 
 func _check(cond: bool, msg: String) -> void:
 	if cond:

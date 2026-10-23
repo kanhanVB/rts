@@ -49,10 +49,49 @@ func setup(ranged: bool) -> void:
 		atk = attack_damage
 		atk_range = attack_range
 		atk_cd = attack_cooldown
+	_base = {"hp": max_hp, "atk": attack_damage, "range": attack_range, "armor": armor, "aggro": aggro_range}
+	apply_techs()
+
+## ---------- 科技加成（tech.gd）：出生时、每次研究完都按基础数值重算一遍，不会叠两次 ----------
+var _base := {}
+var _calm_t := 0.0    # 离开战斗多久了（挨打、出手都清零）：战地包扎按它回血
+
+func apply_techs() -> void:
+	if _base.is_empty():
+		return
+	var mail := Tech.has("up_mail")
+	var new_max: float = _base.hp + (Tech.MAIL_HP if mail else 0.0)
+	if new_max > max_hp:
+		hp += new_max - max_hp    # 血上限涨了：涨的那截直接补上
+	max_hp = new_max
+	hp = minf(hp, max_hp)
+	armor = _base.armor + (Tech.MAIL_ARMOR if mail else 0.0)
+	attack_damage = _base.atk
+	attack_range = _base.range
+	aggro_range = _base.aggro
+	if not is_ranged and Tech.has("up_blade"):
+		attack_damage += Tech.BLADE_BONUS
+	if is_ranged and Tech.has("up_longbow"):
+		attack_damage += Tech.LONGBOW_DMG
+		attack_range += Tech.LONGBOW_RANGE
+		aggro_range = maxf(aggro_range, attack_range + 10.0)    # 射得远也要看得远，不然自动索敌还是 150 才开弓
+	atk = attack_damage
+	atk_range = attack_range
+
+func take_damage(amount: float, from: Node2D = null) -> void:
+	_calm_t = 0.0
+	super(amount, from)
+
+## 战地包扎：脱战 MEDIC_DELAY 秒后慢慢回血
+func _medic(delta: float) -> void:
+	_calm_t += delta
+	if hp < max_hp and _calm_t >= Tech.MEDIC_DELAY and Tech.has("up_medic") and not dead:
+		hp = minf(max_hp, hp + Tech.MEDIC_RATE * delta)
 
 func _step(delta: float) -> void:
 	_cd = max(0.0, _cd - delta)
 	_scan_t -= delta
+	_medic(delta)
 	# 帝国式移动：普通右键移动途中不被沿路敌人勾走（撤退/转进才撤得下来），
 	# 到站后恢复自动索敌；玩家点名的目标和 A 移动不受影响
 	var t: Node2D = null
@@ -66,6 +105,7 @@ func _step(delta: float) -> void:
 			reach += t.size * 0.5      # 打建筑按体量放宽射程
 		if d <= reach:
 			move_target = position     # 站定输出
+			_calm_t = 0.0
 			if _cd <= 0.0:
 				_cd = attack_cooldown
 				attack_anim = 1.0    # 挥刀/拉弓动画

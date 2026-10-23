@@ -8,6 +8,13 @@ enum State { IDLE, TO_NODE, GATHERING, TO_BASE, OPERATE }
 const CARRY_CAP := 10.0
 const GATHER_RATE := 4.0     # 每秒采集量
 
+## 研究过手推车 / 精工工具就多扛、采得快（见 tech.gd）
+static func carry_cap() -> float:
+	return CARRY_CAP * (Tech.CART_MULT if Tech.has("up_cart") else 1.0)
+
+static func gather_rate() -> float:
+	return GATHER_RATE * (Tech.TOOLS_MULT if Tech.has("up_tools") else 1.0)
+
 var state: int = State.IDLE
 var node_target: ResNode = null
 var carry_kind: String = ""       # "" / "ore" / "wood"
@@ -67,13 +74,14 @@ func _step(delta: float) -> void:
 			# 实采量 = min(采集速度, 剩余储量, 背包余量)：
 			# 以前最后一下会超采（储量扣成负数，背包照涨，多人同采时更明显），
 			# 背包满的那一帧又会多扣储量
-			var take := minf(GATHER_RATE * delta, minf(node_target.amount, CARRY_CAP - carry_amount))
+			var cap := carry_cap()
+			var take := minf(gather_rate() * delta, minf(node_target.amount, cap - carry_amount))
 			carry_amount += maxf(take, 0.0)
 			node_target.amount -= maxf(take, 0.0)
 			if node_target.amount <= 0.001:
 				node_target.deplete()    # 扬尘 + 树桩，格子变回空地
 				node_target = null
-			if carry_amount >= CARRY_CAP:
+			if carry_amount >= cap:
 				_back_to_base()
 			elif node_target == null:
 				_after_node_gone()
@@ -300,7 +308,7 @@ func command_gather(node: ResNode) -> void:
 		_back_to_base()
 		return
 	carry_kind = node.kind
-	if carry_amount >= CARRY_CAP:
+	if carry_amount >= carry_cap():
 		state = State.TO_BASE
 		var d := _depot()
 		_path = PackedVector2Array()
@@ -348,7 +356,7 @@ func set_deliver_to(b: Building) -> void:
 		return
 	if state == State.TO_BASE:
 		_repath(b)
-	elif carry_amount >= CARRY_CAP or (state == State.IDLE and carry_amount >= 0.5):
+	elif carry_amount >= carry_cap() or (state == State.IDLE and carry_amount >= 0.5):
 		_back_to_base()    # 闲着手里还有半车货（守线工人被叫走时扛着的成品）：也去交，不然一直攥在手里不入账
 
 ## 开局自动派活

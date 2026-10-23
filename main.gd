@@ -80,6 +80,7 @@ var _rally_i := 0            # 新兵在兵营前排队的序号     # 右键落
 
 func _ready() -> void:
 	add_to_group("game")
+	Tech.reset()    # 科技是全局静态的：开新局清空
 	randomize()
 	var args := OS.get_cmdline_user_args()
 	classic = "--test" in args or "--classic" in args
@@ -795,6 +796,13 @@ func commands() -> Array:
 			"barracks":
 				out.append(_cmd_entry("sword", 0, "剑士", "sword", Economy.COST_SWORD, "近战前排，护甲高（训练 %d 秒）" % int(TRAIN.sword.time)))
 				out.append(_cmd_entry("archer", 1, "弓手", "archer", Economy.COST_ARCHER, "远程输出，躲在剑士后面（训练 %d 秒）" % int(TRAIN.archer.time)))
+		if b.trains():
+			# 科技：第二排 A S D F；研究完或已经在排队的不再显示
+			for tid in Tech.ids_at(b.kind):
+				if Tech.has(tid) or tech_queued(tid):
+					continue
+				var d: Dictionary = Tech.DEFS[tid]
+				out.append(_cmd_entry(tid, int(d.slot), d.name, tid, d.cost, "研究：%s（%d 秒）" % [d.tip, int(d.time)]))
 		if b.is_processor():
 			var r: Dictionary = b.recipe()
 			var raw: String = Economy.KIND_NAME[r.in]
@@ -810,7 +818,7 @@ func commands() -> Array:
 		if b.can_upgrade():
 			var t2: Dictionary = Building.TOWER_LV[2]
 			out.append(_cmd_entry("upgrade", 0, "升级", "tower2", Economy.COST_TOWER_UP,
-				"升二级箭塔：2 名弓手、射程 %d、每箭 %d（护甲高的岩壳也扛不住），血 +%d" % [int(t2.range), int(t2.dmg), int(Building.TOWER_UP_HP)]))
+				"升二级箭塔：2 名弓手、射程 %d、每箭 %d（护甲高的岩壳也扛不住），血 +%d" % [int(t2.range), int(t2.dmg + Tech.arrow_bonus()), int(Building.TOWER_UP_HP)]))
 		if b.kind != "base":
 			out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "拆掉这座建筑（不退资源）", "Del"))
 		return out
@@ -825,7 +833,7 @@ func commands() -> Array:
 		out.append(_cmd_entry("barracks", 3, "兵营", "barracks", Economy.COST_BARRACKS, "训练剑士和弓手"))
 		var t1: Dictionary = Building.TOWER_LV[1]
 		out.append(_cmd_entry("tower", 4, "箭塔", "tower", Economy.COST_TOWER,
-			"盖在土路边：塔上弓手自动射路过的怪（射程 %d、每箭 %d），先打跑在最前面的。普通 Goo 和窜窜打不着塔，岩壳会来拆" % [int(t1.range), int(t1.dmg)]))
+			"盖在土路边：塔上弓手自动射路过的怪（射程 %d、每箭 %d），先打跑在最前面的。普通 Goo 和窜窜打不着塔，岩壳会来拆" % [int(t1.range), int(t1.dmg + Tech.arrow_bonus())]))
 		out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌就打"))
 		out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
 		return out
@@ -857,6 +865,9 @@ func run_hotkey(letter: String) -> bool:
 
 func run_command(id: String) -> void:
 	if game_state != "play":
+		return
+	if Tech.is_tech(id):
+		research(id)
 		return
 	match id:
 		"worker":
@@ -1158,7 +1169,7 @@ func upgrade_tower(b: Building) -> bool:
 		return false
 	economy.spend(Economy.COST_TOWER_UP)
 	b.upgrade()
-	_hud_msg("箭塔升到二级：2 名弓手，射程 %d、每箭 %d" % [int(Building.TOWER_LV[2].range), int(Building.TOWER_LV[2].dmg)])
+	_hud_msg("箭塔升到二级：2 名弓手，射程 %d、每箭 %d" % [int(Building.TOWER_LV[2].range), int(Building.TOWER_LV[2].dmg + Tech.arrow_bonus())])
 	return true
 
 ## N / 波次旁的按钮：倒计时没走完就放下一波，剩几秒给多少矿和木
@@ -1317,6 +1328,8 @@ const TRAIN := {
 var train_scale := 1.0    # 读条时间倍率；自测（--test）设 0 = 立刻出，老断言照旧
 
 func train_name(kind: String) -> String:
+	if Tech.is_tech(kind):
+		return Tech.tech_name(kind)
 	return TRAIN[kind].name if TRAIN.has(kind) else kind
 
 ## 排队中的单位数（kind 为空 = 全部）
@@ -1325,12 +1338,14 @@ func queued_count(kind := "") -> int:
 	for b in get_tree().get_nodes_in_group("buildings"):
 		if is_instance_valid(b) and b.team == 0:
 			for q in b.queue:
-				if kind == "" or q.kind == kind:
+				if (kind == "" and not Tech.is_tech(q.kind)) or q.kind == kind:    # 研究不占人口
 					n += 1
 	return n
 
 ## 出兵时人口满了没有（农民有单独上限）
 func pop_blocked(kind: String) -> bool:
+	if Tech.is_tech(kind):
+		return false
 	if get_tree().get_nodes_in_group("player_units").size() >= UNIT_CAP:
 		return true
 	return kind == "worker" and _player_workers().size() >= WORKER_CAP
@@ -1382,6 +1397,9 @@ func cancel_train(b: Building, i: int) -> void:
 
 ## 读条完成：在建筑门口出人，按集结点走（没设集结点：农民自动上岗，兵在门口列队）
 func on_trained(b: Building, kind: String) -> void:
+	if Tech.is_tech(kind):
+		finish_research(b, kind)
+		return
 	if kind == "worker":
 		var w := Worker.new()
 		w.position = b.position + Vector2(60, 40)
@@ -1414,6 +1432,56 @@ func on_trained(b: Building, kind: String) -> void:
 	_rally_i += 1
 	var at := b.rally if b.rally != Vector2.INF else b.position + Vector2(0, 86)
 	s.command_move(open_point(_spread_pos(_rally_i % 24, at)))
+
+## ---------- 科技研究（tech.gd）：和训练共用建筑的生产队列（占格子、先扣钱、点图标取消全额退），不占人口 ----------
+func tech_queued(id: String) -> bool:
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if is_instance_valid(b) and b.team == 0:
+			for q in b.queue:
+				if q.kind == id:
+					return true
+	return false
+
+func research(id: String) -> bool:
+	if game_state != "play" or not Tech.is_tech(id):
+		return false
+	var d: Dictionary = Tech.DEFS[id]
+	var b := _selected_building()
+	if b == null or b.team != 0 or b.kind != d.at:
+		_hud_msg("先点%s才能研究%s" % ["基地" if d.at == "base" else "兵营", d.name])
+		return false
+	if Tech.has(id):
+		_hud_msg("%s已经研究过了" % d.name)
+		return false
+	if tech_queued(id):
+		_hud_msg("%s已经在研究了" % d.name)
+		return false
+	if b.queue.size() >= Building.QUEUE_MAX:
+		_hud_msg("%s的队列满了（最多排 %d 个）" % [b.display_name, Building.QUEUE_MAX])
+		return false
+	var cost: Dictionary = d.cost
+	if not _can_afford(cost):
+		_hud_msg(economy.short_msg(cost))
+		return false
+	_spend(cost)
+	var t: float = float(d.time) * train_scale
+	if t <= 0.0:
+		finish_research(b, id)
+	else:
+		b.queue.append({"kind": id, "left": t, "total": t, "cost": cost})
+		_hud_msg("开始研究%s（%d 秒）" % [d.name, ceili(t)])
+	return true
+
+## 研究完：记一笔，场上已有的兵立刻按新数值重算（箭塔/农民/加工线是读的时候现查，不用管）
+func finish_research(b: Building, id: String) -> void:
+	Tech.done[id] = true
+	for s in get_tree().get_nodes_in_group("player_units"):
+		if s is Soldier:
+			s.apply_techs()
+	var d: Dictionary = Tech.DEFS[id]
+	_hud_msg("研究完成：%s——%s" % [d.name, d.done])
+	if is_instance_valid(b):
+		Fx.spawn(self, "floater", b.position + Vector2(0, -b.size * 0.9), {"life": 1.8, "text": "%s 研究完成" % d.name, "color": Color(1.0, 0.86, 0.35)})
 
 ## 设集结点：选中基地/兵营右键地面（点在矿/树上 = 新农民直接去采）
 func set_rally(b: Building, pos: Vector2) -> void:
@@ -1511,6 +1579,8 @@ func _selected_info_text() -> String:
 				txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
 				if t.waiting_pop:
 					txt += " · 人口满了，等空位"
+				var dn := Tech.done_names(t.kind)
+				txt += " · 已研究：%s" % "、".join(dn) if not dn.is_empty() else " · 第二排 A S D F 研究升级"
 			if t is Camp:
 				var c: Camp = t
 				var cnt := {}
@@ -1528,8 +1598,8 @@ func _selected_info_text() -> String:
 				txt += "\n敌人老窝：每波怪从这里出来，拆掉所有巢穴就赢"
 			if t.is_processor():
 				var r: Dictionary = t.recipe()
-				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %.0f 秒\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,
-					r.n, Economy.KIND_NAME[r.in], r.n, Economy.KIND_NAME[r.out], r.time, t.status_text(), "开" if t.self_fetch else "关"]
+				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %s 秒\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,
+					r.n, Economy.KIND_NAME[r.in], r.n, Economy.KIND_NAME[r.out], Building.fmt_secs(t.batch_time()), t.status_text(), "开" if t.self_fetch else "关"]
 			return txt
 		var u: Unit = t
 		var atk_txt := "—" if u.atk <= 0.0 else "%.0f（%.1f秒/下）" % [u.atk, u.atk_cd]

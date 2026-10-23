@@ -3,11 +3,13 @@ extends Node2D
 ## 随机地图的地面：一张铺满全图的矩形 + 着色器。
 ## 草地深浅斑、土路（沙色路面 + 下沿暗边 + 锯齿草边 + 小石子）、林下暗地、巢穴周围的黏液地，
 ## 都由一张低分辨率遮罩（1 像素 = 8 世界像素）+ 无缝噪声在 GPU 上算出来，边缘是硬朗的 KR 卡通色块。
-## 遮罩通道：R = 土路距离场（0.5 = 路边）/ G = 林地覆盖 / B = 巢穴黏液
+## 遮罩通道：R = 土路距离场（0.5 = 路边）/ G = 林地覆盖 / B = 巢穴黏液 / A = 矿场（矿堆脚下踩秃的土）
 
 const MASK_PX := 8.0
 const ROAD_HALF := 25.0     # 土路半宽（世界像素）
 const PLAZA_R := 118.0      # 主城脚下那片空地的半径
+const QUARRY_REACH := 64.0  # 每堆矿脚下的秃地：横向离矿心约 32px、纵向压扁 1.35 倍是边，几堆连成一片、边缘随噪声起伏
+const QUARRY_SQUASH := 1.35
 
 const SHADER := """
 shader_type canvas_item;
@@ -45,6 +47,16 @@ void fragment() {
 	float creep = smoothstep(0.49, 0.505, cv);
 	c = mix(c, vec3(0.29, 0.25, 0.20), creep_edge);
 	c = mix(c, vec3(0.42, 0.34, 0.38) * (0.92 + b1 * 0.16), creep);
+	// 矿场：一片踩秃的褐土，外沿一圈深色草边，土里撒灰色碎石（不是土路那种沙黄，远看分得开）
+	float qv = m.a + (b2 - 0.5) * 0.30 + (f - 0.5) * 0.12;
+	float q_edge = smoothstep(0.43, 0.445, qv);
+	float q_in = smoothstep(0.47, 0.485, qv);
+	c = mix(c, vec3(0.30, 0.44, 0.12), q_edge * 0.9);
+	vec3 earth = vec3(0.62, 0.50, 0.30) * (0.94 + b1 * 0.12);
+	earth = mix(earth, vec3(0.53, 0.42, 0.25), smoothstep(0.55, 0.75, qv) * 0.5);
+	float qpeb = 1.0 - smoothstep(0.07, 0.10, texture(cells, wp / 120.0 + vec2(0.31, 0.57)).r);
+	earth = mix(earth, vec3(0.50, 0.49, 0.46), qpeb * 0.85);
+	c = mix(c, earth, q_in);
 	// 土路：距离场 0.5 为路边；外面一圈锯齿状深绿草边，里面沙色路面
 	float r = m.r + (f - 0.5) * 0.10;
 	float fringe = smoothstep(0.415, 0.43, r + (texture(fine, wp / 75.0).r - 0.5) * 0.12);
@@ -74,6 +86,13 @@ func build(layout: Dictionary, w: float, h: float) -> void:
 	road.resize(mw * mh)
 	var creep := PackedFloat32Array()
 	creep.resize(mw * mh)
+	var quarry := PackedFloat32Array()
+	quarry.resize(mw * mh)
+	for p in layout.get("ore", []):
+		_splat(quarry, mw, mh, p + Vector2(0, 5), QUARRY_REACH, QUARRY_SQUASH)
+	for cp in layout.get("camps", []):
+		for p in cp.rich:
+			_splat(quarry, mw, mh, p + Vector2(0, 5), QUARRY_REACH * 1.06, QUARRY_SQUASH)
 	# 土路：沿路每 6px 取一点，按点到路心的距离写距离场（取最大值 = 离最近那段路的距离）
 	var noise := FastNoiseLite.new()
 	noise.seed = int(layout.get("seed", 1))
@@ -105,7 +124,7 @@ func build(layout: Dictionary, w: float, h: float) -> void:
 		data[i * 4] = int(clampf(road[i], 0.0, 1.0) * 255.0)
 		data[i * 4 + 1] = occ_data[i]
 		data[i * 4 + 2] = int(clampf(creep[i], 0.0, 1.0) * 255.0)
-		data[i * 4 + 3] = 255
+		data[i * 4 + 3] = int(clampf(quarry[i], 0.0, 1.0) * 255.0)
 	var mask := ImageTexture.create_from_image(Image.create_from_data(mw, mh, false, Image.FORMAT_RGBA8, data))
 	var mat := ShaderMaterial.new()
 	var sh := Shader.new()
@@ -132,13 +151,14 @@ static func _noise_tex(seed_: int, type: int, freq: float, octaves: int) -> Text
 		n.cellular_return_type = FastNoiseLite.RETURN_DISTANCE
 	return ImageTexture.create_from_image(n.get_seamless_image(256, 256))
 
-## 距离场盖章：p 周围 reach 像素内写 1 - d/reach（reach 的一半处 = 0.5 = 边界），和已有值取大
-static func _splat(f: PackedFloat32Array, mw: int, mh: int, p: Vector2, reach: float) -> void:
+## 距离场盖章：p 周围 reach 像素内写 1 - d/reach（reach 的一半处 = 0.5 = 边界），和已有值取大。
+## squash > 1 = 纵向压扁成椭圆（斜俯视下的一片地）
+static func _splat(f: PackedFloat32Array, mw: int, mh: int, p: Vector2, reach: float, squash := 1.0) -> void:
 	var c := p / MASK_PX
 	var r := reach / MASK_PX
 	for y in range(maxi(0, int(c.y - r)), mini(mh, int(c.y + r) + 2)):
 		for x in range(maxi(0, int(c.x - r)), mini(mw, int(c.x + r) + 2)):
-			var d := Vector2(x + 0.5, y + 0.5).distance_to(c)
+			var d := Vector2(x + 0.5 - c.x, (y + 0.5 - c.y) * squash).length()
 			var v := 1.0 - d / r
 			if v > f[y * mw + x]:
 				f[y * mw + x] = v

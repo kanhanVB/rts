@@ -124,17 +124,55 @@ func _sparkles(w: float) -> void:
 		draw_colored_polygon(pts, Color(1.0, 0.98, 0.8, 0.9 * a))
 		draw_circle(c, r * 0.32, Color(1, 1, 1, a))
 
+## 每堆矿长得不太一样（按坐标算，重画也不变）：大小 0.82~1.14、左右翻、深浅，脚边撒一两块碎石
+## ——一片矿看着是天然的一窝，不是同一块石头复制粘贴
+var _look := {}
+func _ore_look() -> Dictionary:
+	if _look.is_empty():
+		var r := RandomNumberGenerator.new()
+		r.seed = hash(Vector2i(roundi(position.x), roundi(position.y)))
+		var chips: Array = []
+		for i in r.randi_range(1, 2):
+			var side := -1.0 if r.randf() < 0.5 else 1.0
+			chips.append({"p": Vector2(side * r.randf_range(16.0, 24.0), r.randf_range(6.0, 13.0)),
+				"r": r.randf_range(2.6, 4.0), "gold": r.randf() < 0.35, "a": r.randf() * TAU})
+		_look = {"s": r.randf_range(0.82, 1.14), "flip": r.randf() < 0.5, "v": r.randf_range(0.9, 1.04), "chips": chips}
+	return _look
+
+## 脚边的碎石：深色描边 + 灰石块（有的带一点琥珀矿）
+func _chip(ch: Dictionary, k: float) -> void:
+	var c: Vector2 = ch.p * k
+	var r: float = ch.r * k
+	var pts := PackedVector2Array()
+	var rim := PackedVector2Array()
+	for i in 5:
+		var a: float = ch.a + i * TAU / 5.0
+		var rr := r * (1.0 if i % 2 == 0 else 0.8)
+		var d := Vector2(cos(a), sin(a) * 0.72)
+		pts.append(c + d * rr)
+		rim.append(c + d * (rr + 1.4))
+	draw_colored_polygon(rim, Color(0.16, 0.13, 0.09))
+	draw_colored_polygon(pts, Color(0.93, 0.7, 0.2) if ch.gold else Color(0.56, 0.55, 0.52))
+	draw_circle(c + Vector2(-r * 0.3, -r * 0.3), r * 0.28, Color(1, 1, 0.9, 0.55))
+
 func _draw() -> void:
 	var key := _art_key()
 	if Art.has(key):
-		Art.ellipse(self, Vector2(0, 10), 17.0, Color(0.05, 0.1, 0.02, 0.3))
 		if kind == "ore":
-			var ow := 54.0 if rich else 44.0
-			Art.draw_w(self, key, Vector2(0, 12), ow * float(Art.info(key).w) / float(Art.info("resources/ore_full").w), RICH_MOD if rich else Color.WHITE)
+			var lk := _ore_look()
+			var s: float = lk.s * (1.12 if rich else 1.0)
+			Art.ellipse(self, Vector2(0, 10), 17.0 * s, Color(0.05, 0.1, 0.02, 0.3))
+			for ch in lk.chips:
+				_chip(ch, s)
+			var ow := (48.0 if rich else 44.0) * s
+			var v: float = lk.v
+			Art.draw_w(self, key, Vector2(0, 12), ow * float(Art.info(key).w) / float(Art.info("resources/ore_full").w),
+				RICH_MOD * Color(v, v, v) if rich else Color(v, v, v), lk.flip)
 			if rich:
 				_sparkles(ow)
-		else:
-			Art.draw(self, key, Vector2(0, 12), tree_h, _variant == 2)
+			return
+		Art.ellipse(self, Vector2(0, 10), 17.0, Color(0.05, 0.1, 0.02, 0.3))
+		Art.draw(self, key, Vector2(0, 12), tree_h, _variant == 2)
 		return
 	var dark := Color(0.16, 0.13, 0.09)
 	# 软投影

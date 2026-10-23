@@ -378,9 +378,40 @@ func _draw_cmd(slot: int) -> void:
 			var s := minf(36.0 / ts.x, 27.0 / ts.y)
 			var sz := ts * s
 			b.draw_texture_rect(t, Rect2(Vector2(28, 17) - sz * 0.5, sz), false)
+	if Tech.is_tech(id):
+		tech_overlay(b, id, Rect2(10, 3, 36, 28))
 	var ok: bool = c.cost.is_empty() or main.economy.can_afford(c.cost)
 	Art.text(b, Vector2(28, 40), c.title, 11, Hud.CREAM if ok else Hud.RED_TEXT)
 	Art.text(b, Vector2(5, 12), c.key if c.key.length() == 1 else "", 11, Hud.GOLD, false)
+
+## 科技图标的叠加标记：右上角金色向上箭头（= 研究升级）；锁子甲叠一面小钢盾，战地包扎画白底红十字
+func tech_overlay(ci: CanvasItem, id: String, r: Rect2) -> void:
+	var ink := Hud.INK
+	var k := clampf(r.size.y / 28.0, 0.8, 1.2)
+	var c := r.get_center()
+	match str(Tech.DEFS[id].glyph):
+		"medic":
+			ci.draw_circle(c, 12.5 * k, ink)
+			ci.draw_circle(c, 11.0 * k, Color(0.97, 0.94, 0.86))
+			var red := Color(0.84, 0.16, 0.12)
+			ci.draw_rect(Rect2(c - Vector2(7.5, 2.6) * k, Vector2(15.0, 5.2) * k), red)
+			ci.draw_rect(Rect2(c - Vector2(2.6, 7.5) * k, Vector2(5.2, 15.0) * k), red)
+		"shield":
+			var sc := c + Vector2(8.0, 4.0) * k
+			var pts := PackedVector2Array()
+			for v in [Vector2(-6, -7), Vector2(6, -7), Vector2(6, 0), Vector2(0, 7.5), Vector2(-6, 0)]:
+				pts.append(sc + v * k)
+			ci.draw_colored_polygon(pts, Color(0.74, 0.78, 0.84))
+			pts.append(pts[0])
+			ci.draw_polyline(pts, ink, 1.6)
+			ci.draw_line(sc + Vector2(0, -5.5) * k, sc + Vector2(0, 5.5) * k, Hud.GOLD, 1.6)
+	var a := Vector2(r.end.x + 1.0, r.position.y + 4.0)
+	var tri := PackedVector2Array([a + Vector2(0, -4.5) * k, a + Vector2(4.5, 0.5) * k, a + Vector2(-4.5, 0.5) * k])
+	var stem := Rect2(a + Vector2(-1.8, 0.5) * k, Vector2(3.6, 4.0) * k)
+	ci.draw_rect(stem.grow(1.2), ink)
+	ci.draw_colored_polygon(PackedVector2Array([tri[0] + Vector2(0, -1.6), tri[1] + Vector2(1.6, 0.9), tri[2] + Vector2(-1.6, 0.9)]), ink)
+	ci.draw_colored_polygon(tri, Hud.GOLD)
+	ci.draw_rect(stem, Hud.GOLD)
 
 ## 通用指令的矢量符号（没有专门贴图）
 func _glyph(ci: CanvasItem, id: String, c: Vector2) -> void:
@@ -497,6 +528,7 @@ H：选基地 · .：闲置农民 · ,：闲置军队 · 空格：镜头回到�
 Ctrl+数字：编队 · 数字：选队（连按两下跳过去）· Shift+数字：加进当前选择
 滚轮：缩放 · 鼠标贴边 / 方向键 / 中键拖动：移动镜头 · 小地图：左键跳转、右键下指令
 底栏生产队列：点图标取消（全额退钱）· 人口满了排头会等空位
+升级：选中基地 / 兵营，第二排 A S D F 研究（排进生产队列读条，取消全额退；一次研究、全军生效）
 塔防：工程师 T 盖箭塔（盖在土路边，选中看射程圈）· 选中箭塔 Q 升级（木板 + 铁锭）· N / 顶栏"叫波"：提前叫下一波，剩几秒奖励多少矿木
 敌人：Goo 啃路边房子 · 窜窜跑得快、直冲基地 · 岩壳又厚又带甲、专拆箭塔（派剑士顶）
 C：产能面板 · F1：本说明"""
@@ -635,6 +667,10 @@ const ICON_KEY := {
 }
 
 func icon(key: String) -> Texture2D:
+	if Tech.is_tech(key):
+		key = Tech.DEFS[key].icon    # 科技借用单位/建筑贴图（战地包扎没有，只画红十字）
+		if key == "":
+			return null
 	var k: String = ICON_KEY.get(key, key)
 	return Art.tex(k) if Art.has(k) else null
 
@@ -738,6 +774,8 @@ class SelPanel extends Control:
 				var s := minf((r.size.x - 6.0) / ts.x, (r.size.y - 6.0) / ts.y)
 				var sz := ts * s
 				draw_texture_rect(t, Rect2(r.get_center() - sz * 0.5, sz), false)
+			if Tech.is_tech(q.kind):
+				hud.tech_overlay(self, q.kind, r.grow(-7.0))
 			if i == 0:
 				var k := 1.0 - clampf(float(q.left) / maxf(float(q.total), 0.001), 0.0, 1.0)
 				var pb := Rect2(r.position.x, r.end.y - 5.0, r.size.x, 5.0)
@@ -785,7 +823,7 @@ class SelPanel extends Control:
 		draw_rect(Rect2(bar.position, Vector2(bar.size.x * b.batch, bar.size.y)),
 			Color(0.98, 0.72, 0.2) if b.line_status == "work" else Color(0.62, 0.56, 0.46))
 		draw_colored_polygon(PackedVector2Array([Vector2(e - 10.0, y - 9.0), Vector2(e, y), Vector2(e - 10.0, y + 9.0)]), Color(0.1, 0.06, 0.03))
-		Art.text(self, Vector2((a + e) * 0.5, y - 9.0), "%d → %d · %.0f秒" % [r.n, r.n, r.time], 12, Hud.CREAM)
+		Art.text(self, Vector2((a + e) * 0.5, y - 9.0), "%d → %d · %s秒" % [r.n, r.n, Building.fmt_secs(b.batch_time())], 12, Hud.CREAM)
 		Art.text(self, Vector2((a + e) * 0.5, y + 21.0), b.status_text(), 12,
 			Hud.RED_TEXT if b.line_status in ["no_op", "no_in", "full"] else Color(0.85, 0.8, 0.68))
 		# 工人位：有人画头像，空位画虚框 +
