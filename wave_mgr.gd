@@ -45,7 +45,7 @@ func update(delta: float) -> void:
 			var t: String = _queue.pop_front()
 			_spawn(t)
 			_gap_t = float(GAP.get(t, 0.6))
-	if wave >= MAX_WAVES and _queue.is_empty() and get_tree().get_nodes_in_group("enemies").is_empty():
+	if wave >= MAX_WAVES and _queue.is_empty() and wave_enemies().is_empty():
 		var g := _game()
 		if g:
 			g._end("win", "十波全清，守住了！")
@@ -66,6 +66,10 @@ func _start_wave() -> void:
 		for t in fresh:
 			parts.append("%s——%s" % [Goo.TYPES[t].name, Goo.TYPES[t].tip])
 		g._hud_msg("第 %d 波来了新怪：%s" % [wave, "；".join(parts)])
+
+## 场上还活着的波次怪（据点守军不算：十波打完就赢，不用去清野）
+func wave_enemies() -> Array:
+	return get_tree().get_nodes_in_group("enemies").filter(func(e): return is_instance_valid(e) and not (e is Goo and e.is_guard()))
 
 ## 前 n 波里出现过这个品种没有
 func _seen(t: String, n: int) -> bool:

@@ -42,6 +42,10 @@ func placement_error(pos: Vector2, kind := "") -> String:
 	var h: float = g.H if g != null else 720.0
 	if pos.x < 40.0 or pos.x > w - 40.0 or pos.y < 90.0 or pos.y > h - 80.0:
 		return "放不下：离边界太近，往中间点"
+	# 据点先查：在禁建圈里怎么挪都没用，直接告诉玩家先拆窝
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if b.kind == "camp" and b.team != 0 and pos.distance_to(b.position) < Camp.NO_BUILD_R:
+			return "放不下：离 Goo 据点太近——先带兵把窝拆了"
 	for b in get_tree().get_nodes_in_group("buildings"):
 		if pos.distance_to(b.position) < b.size + 40.0:
 			return "放不下：离建筑太近，挪远一点"

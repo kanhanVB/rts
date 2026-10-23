@@ -102,10 +102,137 @@ func _ready() -> void:
 ## 拉仇恨：被谁打了就还手谁，防止被远程单位白白放风筝
 func take_damage(amount: float, from: Node2D = null) -> void:
 	if from != null and from is Unit and from.team == 0:
+		if is_guard():
+			# 守军：回窝路上不理人；没在回窝就还手，并喊全窝一起上（追得太远的不管）
+			if not returning and from.position.distance_to(home) < GUARD_LEASH:
+				attack_target = from
+				_rally_pack(from)
 		# 窜窜只还手贴身的（远处弓手放冷箭，它照样往基地冲）
-		if etype != "runner" or position.distance_to(from.position) < 60.0:
+		elif etype != "runner" or position.distance_to(from.position) < 60.0:
 			attack_target = from
 	super(amount, from)
+
+## ---------- 据点守军（野怪式，据点见 camp.gd）----------
+## 站在窝边不走土路；玩家的人进了警戒圈（离窝 GUARD_AGGRO）才扑上来，一只发现全窝一起上；
+## 追出拴绳（离岗位 GUARD_LEASH）就掉头回窝，回窝路上不理人；没架打时慢慢回血、在岗位边挪两步
+const GUARD_AGGRO := 190.0
+const GUARD_LEASH := 400.0
+const GUARD_REGEN := 0.06       # 没架打时每秒回最大血量的 6%
+const RETURN_MAX := 9.0         # 回窝最多走这么久（被挤住也算到家）
+var pack_center := Vector2.INF  # 守哪个窝（据点位置；窝拆了也认这个点）
+var home := Vector2.INF         # 自己的岗位
+var returning := false
+var _return_t := 0.0
+var _idle_t := 0.0
+var _idle_spot := Vector2.INF
+
+## 设成据点守军（add_child 之前调）
+func guard(center: Vector2, post: Vector2) -> void:
+	pack_center = center
+	home = post
+	_idle_spot = post
+	lane = false
+
+func is_guard() -> bool:
+	return home != Vector2.INF
+
+## 有人来犯：没在回窝、手上没架打的就扑过去（离窝太远的不追）
+func alert(t: Node2D) -> void:
+	if returning or t == null or not is_instance_valid(t) or t.position.distance_to(home) > GUARD_LEASH:
+		return
+	if attack_target == null or not is_instance_valid(attack_target):
+		attack_target = t
+
+## 喊同一个窝的守军一起上
+func _rally_pack(t: Node2D) -> void:
+	for e in _group("enemies"):
+		if e != self and is_instance_valid(e) and e is Goo and e.pack_center == pack_center:
+			e.alert(t)
+
+func _regen(delta: float) -> void:
+	if hp < max_hp:
+		hp = minf(max_hp, hp + max_hp * GUARD_REGEN * delta)
+
+## 追出拴绳 / 正在回窝：一路走回岗位、不理人。返回 true = 这一帧归它管
+func _guard_busy(delta: float) -> bool:
+	var dh := position.distance_to(home)
+	if not returning and dh > GUARD_LEASH:
+		returning = true
+		_return_t = 0.0
+		attack_target = null
+		_cached_target = null
+		_path_goal = home
+		_path = _find_path(home)
+		_path_idx = 0
+	if not returning:
+		return false
+	_regen(delta)
+	_return_t += delta
+	if dh < 16.0 or _return_t > RETURN_MAX:
+		returning = false
+		_path = PackedVector2Array()
+		move_target = position
+		_idle_spot = home
+		_scan_t = 0.0
+		return false
+	move_target = home
+	_move_toward(home, delta)
+	return true
+
+## 没架打：回血；打完架离岗位远了就走回去（路上有人来照样打），到了在岗位边偶尔挪两步
+func _guard_idle(delta: float) -> void:
+	_regen(delta)
+	if position.distance_to(home) > 40.0:
+		_repath_cd -= delta
+		# 追人留下的旧路径终点是那个人（多半已经死了）：作废，马上算回岗位的路；
+		# 路走完了还没到（被挤开）隔一秒再算
+		if _path_goal.distance_to(home) > 24.0 or (_repath_cd <= 0.0 and _path.is_empty()):
+			_repath_cd = 1.0
+			_path_goal = home
+			_path = _find_path(home)
+			_path_idx = 0
+		move_target = home
+		_move_toward(home, delta)
+		return
+	_idle_t -= delta
+	if _idle_t <= 0.0:
+		_idle_t = randf_range(2.5, 5.0)
+		_idle_spot = home + Vector2(randf_range(-16.0, 16.0), randf_range(-9.0, 9.0))
+	if position.distance_to(_idle_spot) > 5.0:
+		move_target = _idle_spot
+		_move_toward(_idle_spot, delta)
+	else:
+		move_target = position
+
+## 守军索敌：正在追的人没跑出拴绳就接着追；否则找进了警戒圈的玩家单位（离自己最近的），
+## 没人再看窝边有没有玩家的工地/房子（平时窝边不让盖，这里兜底）。找到了就喊全窝
+func _guard_scan() -> Node2D:
+	var cur := _cached_target
+	if cur != null and is_instance_valid(cur) and cur.get("dead") != true and cur.position.distance_to(home) < GUARD_LEASH:
+		return cur
+	var best: Node2D = null
+	var best_d := INF
+	for u in _group("player_units"):
+		if not is_instance_valid(u) or u.position.distance_to(pack_center) > GUARD_AGGRO:
+			continue
+		var d := position.distance_to(u.position)
+		if d < best_d:
+			best_d = d
+			best = u
+	if best == null:
+		for grp in ["sites", "buildings"]:
+			for b in _group(grp):
+				if not is_instance_valid(b) or (grp == "buildings" and (b.team != 0 or (b.kind == "tower" and etype != "brute"))):
+					continue
+				if b.position.distance_to(pack_center) > GUARD_AGGRO + b.size * 0.5:
+					continue
+				var d := position.distance_to(b.position)
+				if d < best_d:
+					best_d = d
+					best = b
+	if best != null:
+		_rally_pack(best)
+	return best
 
 ## 品种说明（信息栏用）
 func type_tip() -> String:
@@ -113,7 +240,12 @@ func type_tip() -> String:
 
 func _step(delta: float) -> void:
 	_cd = max(0.0, _cd - delta)
+	if is_guard() and _guard_busy(delta):
+		return
 	var t := _acquire_target()
+	if t == null and is_guard():
+		_guard_idle(delta)
+		return
 	if t == null and lane:
 		_follow_lane(delta)
 		return
@@ -185,6 +317,8 @@ func _acquire_target() -> Node2D:
 	return _cached_target
 
 func _scan_target() -> Node2D:
+	if is_guard():
+		return _guard_scan()
 	var best: Node2D = null
 	var best_d := hunt_r
 	for u in _group("player_units"):

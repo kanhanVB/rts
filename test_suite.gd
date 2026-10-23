@@ -657,6 +657,7 @@ func run() -> void:
 		hs.queue_free()    # 别在后面的测试里把巢穴拆了
 
 	await _aoe_tests()
+	await _camp_tests()
 
 	# 拆巢穴触发胜利
 	m.hive.take_damage(99999.0)
@@ -979,7 +980,7 @@ func _aoe_tests() -> void:
 		var cells: PackedByteArray = lay.cells
 		for i in cells.size():
 			var v: int = cells[i]
-			if v == MapGen.C_TREE or v == MapGen.C_WOODS or v == MapGen.C_ORE:
+			if v == MapGen.C_TREE or v == MapGen.C_WOODS or v == MapGen.C_ORE or v == MapGen.C_RICH:
 				t.set_cell(Vector2i(i % gw, i / gw), Terrain.T.WOODS)
 		var good: bool = lay.base == Vector2(1600, 1024) and lay.hives.size() == 2 and lay.roads.size() == 2 and lay.ore.size() >= 6
 		var st: Vector2 = lay.base + Vector2(0, 60)
@@ -989,8 +990,163 @@ func _aoe_tests() -> void:
 		for op in lay.ore:
 			if t.find_path(st, op).is_empty():
 				good = false
+		# Goo 据点：2~3 个，各守 6 堆富矿；离主城不远不近、不挨土路，警戒圈里没有树/普通矿，窝和富矿都走得到
+		var camp_ok: bool = lay.camps.size() >= 2
+		var n_rich := 0
+		for cp in lay.camps:
+			var cpos: Vector2 = cp.pos
+			var dd: float = cpos.distance_to(lay.base)
+			if cp.rich.size() != 6 or dd < MapGen.CAMP_MIN_D or dd > MapGen.CAMP_MAX_D or MapGen._near_road(lay.roads, cpos, 250.0):
+				camp_ok = false
+			if t.find_path(st, cpos).is_empty():
+				camp_ok = false
+			for rp in cp.rich:
+				n_rich += 1
+				if t.find_path(st, rp).is_empty() or rp.distance_to(cpos) > Goo.GUARD_AGGRO:
+					camp_ok = false
+			for i in cells.size():
+				var v: int = cells[i]
+				if (v == MapGen.C_TREE or v == MapGen.C_ORE) and (Vector2(i % gw + 0.5, i / gw + 0.5) * MapGen.CELL).distance_to(cpos) < MapGen.CAMP_CLEAR_R:
+					camp_ok = false
 		t.free()
 		_check(good, "随机图 seed=%d：主城居中、2 巢穴、到巢穴和 %d 堆矿都走得通" % [sd, lay.ore.size()])
+		_check(camp_ok, "随机图 seed=%d：%d 个 Goo 据点各守 6 堆富矿（共 %d，都在警戒圈里），不挨土路、窝边没树没普通矿、都走得到" % [sd, lay.camps.size(), n_rich])
+
+## ---- Goo 据点（野怪小窝）：守军警戒 / 全窝一起上 / 拴绳回窝 / 回血 / 补兵 / 缴获 / 富矿 / 不许贴脸盖房 ----
+func _camp_tests() -> void:
+	# 己方单位、建筑先冻住：农民采矿路过、箭塔放冷箭都会把守军勾走，测不准
+	var frozen: Array = []
+	for grp in ["player_units", "buildings"]:
+		for n in m.get_tree().get_nodes_in_group(grp):
+			if is_instance_valid(n) and n.process_mode != Node.PROCESS_MODE_DISABLED and not (n is Building and n.team != 0):
+				n.process_mode = Node.PROCESS_MODE_DISABLED
+				frozen.append(n)
+	# 经典图小：挑离己方单位/建筑/工地/矿最远的一块空地（巢穴和别的怪也离远点）
+	var spot := Vector2.ZERO
+	var best := -1.0
+	for y in range(150, int(m.H) - 130, 30):
+		for x in range(170, int(m.W) - 170, 30):
+			var p := Vector2(x, y)
+			if m.area_blocked(p, 40.0):
+				continue
+			var dmin := INF
+			for grp in ["player_units", "buildings", "sites", "enemies", "res_nodes"]:
+				for n in m.get_tree().get_nodes_in_group(grp):
+					if not is_instance_valid(n):
+						continue
+					var d: float = n.position.distance_to(p)
+					if grp == "enemies":
+						d += 60.0
+					elif grp == "res_nodes":
+						d += 100.0    # 资源点别太近就行（己方单位都冻住了，不会有人来采）
+					dmin = minf(dmin, d)
+			if dmin > best:
+				best = dmin
+				spot = p
+	_check(best > Goo.GUARD_AGGRO + 30.0, "找到摆据点的空地 %s（离己方最近 %.0f，在警戒圈外）" % [spot, best])
+	var away: Vector2 = (spot - m.base.position).normalized()
+	var rich_pts := [spot + away * 110.0, spot + away * 110.0 + away.orthogonal() * 44.0]
+	var c: Camp = m.add_camp(spot, 2, rich_pts)
+	await m.get_tree().create_timer(0.4).timeout
+	var gs: Array = c.alive_guards().duplicate()
+	var types: Array = gs.map(func(g): return g.etype)
+	_check(gs.size() == 4 and types.count("goo") == 3 and types.count("brute") == 1
+		and gs.all(func(g): return g.is_guard() and not g.lane and g.position.distance_to(spot) < 90.0),
+		"据点刷出守军：Goo×3 岩壳×1 站在窝边（%s）" % [types])
+	var rn: Array = m.get_tree().get_nodes_in_group("res_nodes").filter(func(n): return n.rich and n.guard_at == spot)
+	_check(rn.size() == 2 and rn.all(func(n): return is_equal_approx(n.amount, ResNode.RICH_AMOUNT) and n.guarded()), "富矿每堆 %d、据点看着" % int(ResNode.RICH_AMOUNT))
+	_check(m._build_mgr.placement_error(spot - away * 200.0, "warehouse").contains("据点"), "据点没拆不许在旁边盖房")
+	_check(not m._wave_mgr.wave_enemies().any(func(e): return e.is_guard()), "十波打完的胜利判定不算据点守军")
+	# 自动找矿：远处派活跳过有人看着的富矿；人已经在富矿边上（玩家派过去的）照采
+	var w0: Worker = m._player_workers()[0]
+	var far_from: Vector2 = rn[0].position + away * 300.0
+	var nn: ResNode = w0._nearest_node("ore", far_from)
+	var nn2: ResNode = w0._nearest_node("ore", rn[0].position + Vector2(4, 0))
+	_check((nn == null or not nn.rich) and nn2 != null and nn2.rich, "自动找矿跳过有守军的富矿，人在矿边上照采（远处挑了 %s）" % ["没有" if nn == null else ("富矿" if nn.rich else "普通矿")])
+	# 警戒圈外的人不理；没架打的守军待在岗位边
+	var bait := Worker.new()
+	bait.position = m.open_point(spot - away * 260.0)
+	m.add_child(bait)
+	bait.max_hp = 99999.0
+	bait.hp = 99999.0
+	await m.get_tree().create_timer(0.6).timeout
+	_check(gs.all(func(g): return is_instance_valid(g) and g.attack_target == null and g._cached_target == null and g.position.distance_to(g.home) < 30.0),
+		"警戒圈（%d）外的人守军不理，都站在岗位边" % int(Goo.GUARD_AGGRO))
+	_check(c.spotted, "人走近据点：横幅提示发现据点")
+	# 打一只 → 全窝一起上
+	gs[1].take_damage(1.0, bait)
+	_check(gs.all(func(g): return g.attack_target == bait), "打一只守军，全窝一起扑上来")
+	await m.get_tree().create_timer(0.8).timeout
+	_check(gs.all(func(g): return g.position.distance_to(bait.position) < g.home.distance_to(bait.position) - 20.0), "守军追出岗位去咬人")
+	# 追出拴绳：掉头回窝，回窝路上挨打也不理
+	var g0: Goo = gs[0]
+	g0.position = g0.home - away * (Goo.GUARD_LEASH + 30.0)
+	await m.get_tree().process_frame
+	await m.get_tree().process_frame
+	var ret0: bool = g0.returning and g0.attack_target == null
+	g0.take_damage(1.0, bait)
+	_check(ret0 and g0.returning and g0.attack_target == null, "追出拴绳（%d）就回窝，回窝路上挨打不理" % int(Goo.GUARD_LEASH))
+	g0.position = g0.home + Vector2(30, 0)
+	g0._path = PackedVector2Array()    # 瞬移回来的，从拴绳外算的那条回窝路作废
+	await m.get_tree().create_timer(0.8).timeout
+	_check(not g0.returning, "回到岗位就恢复警戒（离岗位 %.0fpx）" % g0.position.distance_to(g0.home))
+	# 人没了：全员走回岗位、回血
+	bait.queue_free()
+	for g in gs:
+		g.hp = g.max_hp * 0.3
+	var back := false
+	for i in 40:
+		await m.get_tree().create_timer(0.25).timeout
+		back = gs.all(func(g): return is_instance_valid(g) and not is_instance_valid(g.attack_target) and g.position.distance_to(g.home) < 50.0)
+		if back:
+			break
+	_check(back, "没人可咬了守军走回岗位（离岗位 %s）" % [gs.map(func(g): return int(g.position.distance_to(g.home)) if is_instance_valid(g) else -1)])
+	await m.get_tree().create_timer(0.5).timeout
+	_check(gs.all(func(g): return g.hp > g.max_hp * 0.32), "守军没架打时慢慢回血（%.0f%%）" % (gs[0].hp / gs[0].max_hp * 100.0))
+	# 补兵：死一只，隔一阵窝里钻出同种的一只
+	gs[3].take_damage(99999.0)
+	await m.get_tree().process_frame
+	var miss: int = c.alive_guards().size()
+	var rl: float = c.reinforce_left()
+	c._reinforce_t = 0.05
+	await m.get_tree().create_timer(0.3).timeout
+	var gs2: Array = c.alive_guards()
+	_check(miss == 3 and rl > 0.0 and gs2.size() == 4 and gs2.map(func(g): return g.etype).count("brute") == 1, "守军死了窝里会补（缺 1 只、%.0f 秒后补岩壳）" % rl)
+	# 点据点：只看属性
+	m._point_select(spot)
+	await m.get_tree().create_timer(0.1).timeout
+	_check(m.inspected == c and m.info_label.text.contains("Goo 据点") and m.info_label.text.contains("守军 4/4"), "点据点显示守军和缴获")
+	m._deselect_all()
+	# 窝挨打也喊守军；拆了缴获入账，旁边能盖房；守军还在 = 富矿还有人看着
+	var bait2 := Worker.new()
+	bait2.position = m.open_point(spot - away * 240.0)
+	m.add_child(bait2)
+	bait2.max_hp = 99999.0
+	bait2.hp = 99999.0
+	await m.get_tree().process_frame
+	c.take_damage(1.0, bait2)
+	_check(gs2.all(func(g): return g.attack_target == bait2), "窝挨打守军也扑上来")
+	var ore0: float = m.economy.ore
+	var wood0: float = m.economy.wood
+	c.take_damage(99999.0, bait2)
+	var d_ore: float = m.economy.ore - ore0    # 当场比（等一会儿农民交货会混进来）
+	var d_wood: float = m.economy.wood - wood0
+	await m.get_tree().create_timer(0.6).timeout
+	_check(not is_instance_valid(c) and is_equal_approx(d_ore, 150.0) and is_equal_approx(d_wood, 100.0),
+		"拆据点缴获 150 矿 100 木（+%.0f / +%.0f）" % [d_ore, d_wood])
+	_check(not m._build_mgr.placement_error(spot - away * 200.0, "warehouse").contains("据点"), "据点拆了旁边就能盖房")
+	_check(rn.all(func(n): return n.guarded()), "窝拆了守军还活着：富矿还有人看着")
+	for g in gs2:
+		if is_instance_valid(g):
+			g.take_damage(99999.0)
+	bait2.queue_free()
+	await m.get_tree().create_timer(0.6).timeout
+	_check(rn.all(func(n): return not n.guarded()), "守军也清光：富矿没人看了")
+	for n in rn:
+		n.queue_free()
+	for n in frozen:
+		if is_instance_valid(n):
+			n.process_mode = Node.PROCESS_MODE_INHERIT
 
 func _check(cond: bool, msg: String) -> void:
 	if cond:

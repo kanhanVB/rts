@@ -3,7 +3,7 @@ class_name Building
 ## 建筑：基地（交资源/造农民）、兵营（出兵）、巢穴（敌人老窝，拆了就赢）。
 ## KR 式建模：石基 + 半木墙 + 大出檐屋顶 + 旗帜；巢穴是黏液山包 + 尖刺 + 红光洞口。
 
-var kind: String = "base"    # base / barracks / warehouse / smelter / workshop / hive
+var kind: String = "base"    # base / barracks / warehouse / smelter / workshop / hive / tower / camp（Goo 据点，见 camp.gd）
 var team: int = 0
 var hp: float = 600.0
 var max_hp: float = 600.0
@@ -23,7 +23,7 @@ const COLORS := {
 const SIZE_SCALE := 0.85
 
 ## 各建筑的占地（缩放前）：放置预览 / 工地 / 真建筑共用
-const BASE_SIZE := {"base": 76.0, "barracks": 60.0, "warehouse": 64.0, "smelter": 56.0, "workshop": 56.0, "hive": 84.0, "tower": 40.0}
+const BASE_SIZE := {"base": 76.0, "barracks": 60.0, "warehouse": 64.0, "smelter": 56.0, "workshop": 56.0, "hive": 84.0, "tower": 40.0, "camp": 58.0}
 
 static func size_of(k: String) -> float:
 	return float(BASE_SIZE.get(k, 60.0)) * SIZE_SCALE
@@ -56,6 +56,9 @@ func setup(k: String) -> void:
 		"tower":
 			hp = 260.0
 			size = 40.0
+		"camp":
+			hp = 420.0
+			size = 58.0
 	size *= SIZE_SCALE
 	max_hp = hp
 	display_name = label_text()
@@ -247,12 +250,15 @@ func _process(delta: float) -> void:
 
 ## ---------- 贴图版 ----------
 const ART_W := 1.85            # 贴图显示宽度 = size × 这个系数
+const CAMP_MOD := Color(1.08, 0.9, 0.62)    # 据点：巢穴贴图压成土黄色，一眼和紫色的大巢穴分开
 var _hurt_until := 0
 
 func _art_draw() -> bool:
 	var key := "buildings/" + kind
 	if kind == "tower":
 		key = "buildings/tower_body"
+	elif kind == "camp":
+		key = "buildings/hive"    # 据点 = 缩小一号、泛土黄的巢穴
 	if hp < max_hp * 0.5 and Art.has(key + "_damaged"):
 		key += "_damaged"
 	if not Art.has(key):
@@ -262,10 +268,10 @@ func _art_draw() -> bool:
 	if selected:
 		Art.ellipse(self, foot - Vector2(0, 4), size * 0.95, Color(0.55, 1.0, 0.35) if team == 0 else Color(1.0, 0.35, 0.25), false, 3.0)
 	var shake := 0.0
-	var mod := Color.WHITE
+	var mod := CAMP_MOD if kind == "camp" else Color.WHITE
 	if Time.get_ticks_msec() < _hurt_until:
 		shake = sin(Time.get_ticks_msec() * 0.08) * 2.0
-		mod = Color(1.0, 0.75, 0.7)
+		mod = Color(1.0, 0.75, 0.7) * mod
 	# 受损版和正常版同一比例导出：按两张图宽度之比画，换图时房子不会缩放跳动
 	var w := size * ART_W
 	if key.ends_with("_damaged"):
@@ -304,7 +310,7 @@ func _draw() -> void:
 			_draw_smelter()
 		"workshop":
 			_draw_workshop()
-		"hive":
+		"hive", "camp":
 			_draw_hive()
 		"tower":
 			_draw_tower()
@@ -822,6 +828,8 @@ func label_text() -> String:
 			return "兵营"
 		"hive":
 			return "巢穴"
+		"camp":
+			return "Goo 据点"
 		"warehouse":
 			return "仓库"
 		"smelter":

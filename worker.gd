@@ -470,7 +470,8 @@ func _nearest_kind(kind: String) -> Building:
 			best = b
 	return best
 
-## 离 from（默认自己）最近的同类资源点；树林里面够不着的树跳过，except 也跳过（卡住时换一棵）
+## 离 from（默认自己）最近的同类资源点；树林里面够不着的树跳过，except 也跳过（卡住时换一棵）。
+## Goo 据点还守着的富矿也跳过（自动派活别把农民送进野怪窝）——除非人已经在那片矿上了（玩家自己派过去的）
 func _nearest_node(kind: String, from := Vector2.INF, except: ResNode = null) -> ResNode:
 	var o := position if from == Vector2.INF else from
 	var best: ResNode = null
@@ -479,10 +480,11 @@ func _nearest_node(kind: String, from := Vector2.INF, except: ResNode = null) ->
 		# 跳过已采空、等待销毁的资源点，别白跑一趟
 		if n.kind == kind and n != except and n.amount > 0.001 and not n.is_queued_for_deletion():
 			var d := o.distance_to(n.position)
-			if d < best_d and n.reachable():
+			if d < best_d and n.reachable() and not (n.rich and d > GUARDED_SKIP_R and n.guarded()):
 				best_d = d
 				best = n
 	return best
+const GUARDED_SKIP_R := 260.0
 
 ## 走到离资源点多近算到：实心的（占格的树/矿）人站在旁边格子里，放宽到 40
 static func _reach(n: ResNode) -> float:

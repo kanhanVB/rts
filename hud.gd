@@ -848,6 +848,8 @@ class SelPanel extends Control:
 	## 头像内容：农民/英雄/敌人用专门的圆头像图标，兵种裁立绘上半身，建筑整张缩进去
 	func _face(u) -> Array:
 		if u is Building:
+			if u.kind == "camp":
+				return ["buildings/hive", false]
 			return ["buildings/" + (u.kind + ("2" if u.level >= 2 else "") if u.kind == "tower" else u.kind), false]
 		var k: String = u._art_key()
 		match k:
@@ -914,6 +916,11 @@ class Minimap extends Control:
 				draw_circle(n.position * k, 2.2, Color(0.75, 0.75, 0.85) if n.kind == "ore" else Color(0.1, 0.3, 0.1))
 		for b in tree.get_nodes_in_group("buildings"):
 			var s: float = maxf(b.size * k * 1.1, 5.0)
+			if b.kind == "camp":
+				# Goo 据点：橙色圆点（巢穴是红方块），旁边的金色格子就是它守着的富矿
+				draw_circle(b.position * k, maxf(s * 0.6, 3.5), Hud.INK)
+				draw_circle(b.position * k, maxf(s * 0.6, 3.5) - 1.0, Color(1.0, 0.55, 0.15))
+				continue
 			var c := Color(0.3, 0.55, 1.0) if b.team == 0 else Color(0.85, 0.25, 0.2)
 			draw_rect(Rect2(b.position * k - Vector2(s, s) * 0.5, Vector2(s, s)), c)
 			draw_rect(Rect2(b.position * k - Vector2(s, s) * 0.5, Vector2(s, s)), Hud.INK, false, 1.0)

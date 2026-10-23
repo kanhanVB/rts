@@ -33,6 +33,7 @@ var base: Building
 var hive: Building                 # 第一个巢穴（兼容老代码/测试）；全部巢穴在 hives
 var hives: Array = []
 var roads: Array = []              # 每个巢穴一条行军土路（点从主城端排到巢穴端），和 hives 一一对应
+var camps: Array = []              # Goo 据点（随机图上守着富矿的野怪小窝，见 camp.gd）；拆不拆不影响胜负
 var classic := false               # 经典固定图（--test / --classic）：测试断言用的老坐标
 var map_seed := 0
 var layout := {}                   # 随机图布局（MapGen.generate 的结果）
@@ -44,7 +45,7 @@ var barracks_list: Array = []
 var warehouses_list: Array = []
 var processors_list: Array = []   # 熔炉 / 木工台：加工链上的设施
 var selected: Array = []
-var inspected: Unit = null         # 点敌人只看属性，不能指挥
+var inspected: Node2D = null       # 点敌人（怪 / 巢穴 / 据点）只看属性，不能指挥
 var respawn_timers: Array = []    # 每个阵亡工程师一个复活倒计时
 var terrain: Terrain
 
@@ -205,7 +206,64 @@ func _build_random_map() -> void:
 		n.tree_h = rng.randf_range(58.0, 70.0)
 	for p in layout.ore:
 		_add_res("ore", p, true)
+	# Goo 据点：窝 + 守军 + 背后那片富矿
+	camps = []
+	for cd in layout.get("camps", []):
+		add_camp(cd.pos, int(cd.tier), cd.rich)
 	_build_minimap_img()
+
+## 放一个 Goo 据点：窝、守军，rich 里每个点一堆富矿（随机图开局用；测试也拿它在经典图上摆）
+func add_camp(pos: Vector2, tier: int, rich: Array = []) -> Camp:
+	var c := Camp.new()
+	c.setup_camp(tier)
+	c.position = pos
+	_build_mgr.add_child(c)
+	c.spawn_garrison()
+	camps.append(c)
+	_camp_spots.append(pos)
+	for p in rich:
+		var n := _add_res("ore", p, not classic)
+		n.make_rich(pos)
+	return c
+
+## 据点被拆：缴获入账（不进产能统计）+ 横幅
+func on_camp_destroyed(c: Camp) -> void:
+	var lt: Dictionary = c.loot()
+	economy.ore += float(lt.ore)
+	economy.wood += float(lt.wood)
+	Fx.spawn(self, "floater", c.position + Vector2(0, -c.size * 0.9), {"life": 1.6, "text": "+%d 矿 +%d 木" % [int(lt.ore), int(lt.wood)], "color": Color(1.0, 0.86, 0.35)})
+	var left := c.alive_guards().size()
+	if left == 0:
+		_camp_spots.erase(c.position)    # 守军早清光了：这条横幅就是"清干净了"
+	_hud_msg("拆掉 Goo 据点！缴获 %d 矿 %d 木%s" % [int(lt.ore), int(lt.wood),
+		"——还剩 %d 只守军，清掉才能采富矿" % left if left > 0 else "——富矿旁盖个仓库，就是你的分矿"])
+
+## 玩家的人头一回走近某个据点：横幅说清楚这是什么、怎么打（每个据点只提示一次）；
+## 窝拆了、守军也死光 = 清干净了，再喊一声富矿能采了
+var _spot_t := 0.0
+var _camp_spots: Array = []    # 还没清干净的据点位置
+func _check_camp_spotted(delta: float) -> void:
+	_spot_t -= delta
+	if _spot_t > 0.0 or _camp_spots.is_empty():
+		return
+	_spot_t = 0.5
+	camps = camps.filter(func(c): return is_instance_valid(c))
+	for p in _camp_spots.duplicate():
+		if camps.any(func(c): return c.position == p):
+			continue
+		var left := get_tree().get_nodes_in_group("enemies").any(func(e): return is_instance_valid(e) and e is Goo and not e.dead and e.pack_center == p)
+		if not left:
+			_camp_spots.erase(p)
+			_hud_msg("据点清干净了：那片富矿可以放心采了，旁边盖个仓库就是分矿")
+	for c in camps:
+		if c.spotted:
+			continue
+		for u in get_tree().get_nodes_in_group("player_units"):
+			if u.position.distance_to(c.position) < Camp.SPOT_R:
+				c.spotted = true
+				_hud_msg("发现 Goo 据点！%d 只守军看着一片富矿（每堆 600）——带兵清掉，拆窝缴获 %s" % [
+					c.alive_guards().size(), economy.cost_text(c.loot())])
+				return
 
 ## 小地图底图：每格一个像素
 func _build_minimap_img() -> void:
@@ -219,7 +277,7 @@ func _build_minimap_img() -> void:
 			minimap_img.set_pixel(clampi(int(p.x / Terrain.CELL), 0, gw - 1), clampi(int(p.y / Terrain.CELL), 0, gh - 1), MINI_ROAD)
 	minimap_tex = ImageTexture.create_from_image(minimap_img)
 
-const MINI_COLORS := [Color(0.49, 0.65, 0.16), Color(0.2, 0.42, 0.12), Color(0.12, 0.3, 0.08), Color(0.95, 0.78, 0.25)]
+const MINI_COLORS := [Color(0.49, 0.65, 0.16), Color(0.2, 0.42, 0.12), Color(0.12, 0.3, 0.08), Color(0.95, 0.78, 0.25), Color(1.0, 0.95, 0.55)]
 const MINI_ROAD := Color(0.88, 0.72, 0.35)
 
 ## 树砍光 / 矿采空：小地图上那格变回草地
@@ -287,6 +345,7 @@ func _process(delta: float) -> void:
 		game_time += delta
 		_wave_mgr.update(delta)
 		_update_respawn(delta)
+		_check_camp_spotted(delta)
 		_check_end()
 	_update_labels()
 	_update_panel()
@@ -935,6 +994,12 @@ func _point_select(pos: Vector2) -> void:
 			inspected = e
 			e.selected = true
 			return
+	# 敌方建筑（巢穴 / 据点）：也只看属性
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if b.team != 0 and pos.distance_to(b.position) < b.size * 0.6:
+			inspected = b
+			b.selected = true
+			return
 
 ## 框选：只框单位；Shift 拖框 = 加进当前选择（建筑先剔掉，帝国式）
 func _box_select(rect: Rect2, add := false) -> void:
@@ -1004,6 +1069,8 @@ func _issue_command(pos: Vector2) -> void:
 			move_idx += 1
 	if _a_move_next:
 		_a_move_next = false
+	if target is ResNode and target.rich and target.guarded() and not _selected_workers().is_empty():
+		_hud_msg("这片富矿还有 Goo 据点的守军看着：农民过去会挨咬，先带兵清掉")
 	# 指派必须看得见反馈：说清楚这批货进去以后变成什么
 	if proc != null:
 		var parts: Array = []
@@ -1444,6 +1511,21 @@ func _selected_info_text() -> String:
 				txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
 				if t.waiting_pop:
 					txt += " · 人口满了，等空位"
+			if t is Camp:
+				var c: Camp = t
+				var cnt := {}
+				for gd in c.alive_guards():
+					cnt[gd.display_name] = int(cnt.get(gd.display_name, 0)) + 1
+				var parts: Array = []
+				for k in cnt:
+					parts.append("%s×%d" % [k, cnt[k]])
+				var rl := c.reinforce_left()
+				txt = "%s   血量 %.0f/%.0f · 守军 %d/%d%s%s\n守着背后的富矿（每堆 600）· 拆窝缴获 %s" % [
+					c.display_name, c.hp, c.max_hp, c.alive_guards().size(), c.garrison().size(),
+					"（%s）" % " ".join(parts) if not parts.is_empty() else "",
+					" · %d 秒后补 1 只" % ceili(rl) if rl >= 0.0 else "", economy.cost_text(c.loot())]
+			elif t.kind == "hive":
+				txt += "\n敌人老窝：每波怪从这里出来，拆掉所有巢穴就赢"
 			if t.is_processor():
 				var r: Dictionary = t.recipe()
 				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %.0f 秒\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,
