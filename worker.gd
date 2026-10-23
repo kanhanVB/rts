@@ -23,6 +23,7 @@ var op_phase := ""      # go（回工位，可能扛着原料）/ work（守线�
 var _op_think := 0.0
 var _op_stuck_n := 0
 var _op_stuck_at := Vector2.INF
+var _op_back := false    # 守线时被挤开、正在走回工位
 
 func _ready() -> void:
 	super()
@@ -216,8 +217,13 @@ func _step_operate(delta: float) -> void:
 		_:
 			# 守线：被人挤开了就挪回工位；每 0.3 秒看一眼要不要出门
 			var spot := b.work_spot(self)
-			if position.distance_to(spot) > 6.0:
-				_move_toward(spot, delta)
+			var off := position.distance_to(spot)
+			if off > 12.0:
+				_op_back = true
+			if _op_back:
+				_move_toward(spot, delta)    # 被挤开太远才挪回去（挪就挪到位），别在工位上来回抖
+				if off < 4.0:
+					_op_back = false
 			_op_think -= delta
 			if _op_think <= 0.0:
 				_op_think = 0.3
@@ -342,8 +348,8 @@ func set_deliver_to(b: Building) -> void:
 		return
 	if state == State.TO_BASE:
 		_repath(b)
-	elif carry_amount >= CARRY_CAP:
-		_back_to_base()
+	elif carry_amount >= CARRY_CAP or (state == State.IDLE and carry_amount >= 0.5):
+		_back_to_base()    # 闲着手里还有半车货（守线工人被叫走时扛着的成品）：也去交，不然一直攥在手里不入账
 
 ## 开局自动派活
 func auto_assign(kind: String) -> void:
@@ -419,6 +425,8 @@ func _on_stuck() -> void:
 			else:
 				_path = _find_path(spot)
 				_path_idx = 0
+			if op_phase == "work":
+				return    # 守线时被挤住：按新路走回工位就行，别往侧面乱绕
 			# 连着卡两回（同一处被人/墙角顶住）：先往侧面绕一步再走
 			_op_stuck_n = _op_stuck_n + 1 if position.distance_to(_op_stuck_at) < 12.0 else 1
 			_op_stuck_at = position

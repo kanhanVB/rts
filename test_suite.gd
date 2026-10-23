@@ -207,6 +207,50 @@ func run() -> void:
 	m.run_command("hire")
 	_check(sm.op_count() == 2 and op3.work_at == sm, "招工：先叫最近的闲农民（%d/2）" % sm.op_count())
 	m._deselect_all()
+	# 工位就在门口、人挡着房子：选农民右键点到守线工人身上 = 点他的熔炉
+	var fired: Worker = m.fire_operator(sm)
+	var keep: Worker = sm.operators[0]
+	keep.position = sm.work_spot(keep)
+	var wpick := Worker.new()
+	wpick.position = sm.position + Vector2(-90, 100)
+	m.add_child(wpick)
+	await m.get_tree().process_frame
+	m.selected = [wpick]
+	m._command_at(keep.position + Vector2(0, -8))
+	_check(wpick.work_at == sm and wpick.state == Worker.State.OPERATE, "右键点到门口守线的工人身上 = 进他的熔炉干活")
+	m.selected = []
+	wpick.command_stop()
+	wpick.queue_free()
+	# 基地集结点设在熔炉上：新农民出来直接进厂（人满了就在门口等）
+	m.set_rally(m.base, sm.position)
+	_check(m.base.rally_node == sm, "基地集结点能设到熔炉上")
+	await m.get_tree().process_frame
+	var nops: int = sm.op_count()
+	m.on_trained(m.base, "worker")
+	var rook: Worker = sm.operators.back()
+	_check(sm.op_count() == nops + 1 and rook != keep and rook.state == Worker.State.OPERATE, "集结点在熔炉：新农民出来直接进厂（%d/2）" % sm.op_count())
+	m.base.rally_node = null
+	m.base.rally = Vector2.INF
+	rook.command_stop()
+	rook.queue_free()
+	fired.cancel_orders()
+	fired.command_operate(sm)
+	# 自取只把料场补到 FETCH_FILL：多了是把仓库的矿压在门口（开局造不了农民/兵）
+	var sin0: float = sm.stock_in
+	sm.stock_in = Building.FETCH_FILL
+	_check(sm.fetch_amount() == 0.0, "自取只补到 %d（料场有 %d 就不再从仓库扛）" % [int(Building.FETCH_FILL), int(Building.FETCH_FILL)])
+	sm.stock_in = sin0
+	# 闲着手里攥着半车成品（守线工人被叫走时扛着的）：右键仓库就去交，别一直不入账
+	var wp := Worker.new()
+	wp.position = wh.position + Vector2(110, 0)
+	m.add_child(wp)
+	await m.get_tree().process_frame
+	wp.carry_kind = "ingot"
+	wp.carry_amount = 5.0
+	wp.set_deliver_to(wh)
+	await m.get_tree().create_timer(4.0).timeout
+	_check(wp.carry_amount < 0.5, "闲着手里有半车铁锭，右键仓库就去交（手上还剩 %.0f）" % wp.carry_amount)
+	wp.queue_free()
 
 	# ---- 帝国式操作：右键指定交货点、右键资源点派活、换工种先交货 ----
 	var plank_before: float = m.economy.plank

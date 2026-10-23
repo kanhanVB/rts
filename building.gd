@@ -442,6 +442,7 @@ const IN_CAP := 40.0         # 料场上限
 const OUT_CAP := 30.0        # 成品堆上限（堆满停工，等人搬）
 const LOAD := 10.0           # 工人一趟扛多少
 const FETCH_RESERVE := 30.0  # 自取原料时仓库至少留这么多
+const FETCH_FILL := 20.0     # 自取只把料场补到这么多（再多就是把仓库的矿/木压在门口，开局卡钱）；送货工照样能填到 IN_CAP
 
 var stock_in := 0.0          # 料场里的原料
 var stock_out := 0.0         # 门口堆着、还没搬回仓库的成品
@@ -535,7 +536,7 @@ func fetch_amount(w = null) -> float:
 	var e = _econ()
 	if e == null or not can_fetch():
 		return 0.0
-	var room := IN_CAP - stock_in - _incoming(w)
+	var room := minf(IN_CAP, FETCH_FILL) - stock_in - _incoming(w)
 	return floorf(minf(LOAD, minf(e.amount(recipe().in) - FETCH_RESERVE, room)))
 
 ## 工人每隔一会儿问一次：接着守线（work）还是出门跑一趟（trip：扛成品去仓库、顺路取料）

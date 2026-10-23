@@ -535,6 +535,12 @@ func _sel_units() -> Array:
 ## 左/右键在世界里点了一下：按当前模式下指令
 func _command_at(world: Vector2, shift := false) -> void:
 	var pos := _pick_at(world, true)
+	# 选着农民点到门口守线的工人：算点他的加工厂（工位就在门口，人正好挡着房子，
+	# 以前点人身上 = 走到那人脚下，招工/送料全落空）
+	if _thing_at(pos) == null and _friendly_depot_at(pos) == null and not _selected_workers().is_empty():
+		var ob := _operator_building_at(world, pos)
+		if ob != null:
+			pos = ob.position
 	var t := _thing_at(pos)
 	var mode := _target_mode
 	var attack: bool = mode != "" or ((t is Unit or t is Building) and t.team == 1)
@@ -1022,7 +1028,14 @@ func hire_operator(b: Building) -> Worker:
 	for w in _player_workers():
 		if w.state == Worker.State.OPERATE:
 			continue
-		var d: float = w.position.distance_to(b.position) + (0.0 if w.state == Worker.State.IDLE else 5000.0)
+		# 站着没事的 > 走在路上的闲人（玩家刚派走的，别抢）> 采集中的；给这条线送料的最后动
+		var d: float = w.position.distance_to(b.position)
+		if w.state != Worker.State.IDLE:
+			d += 5000.0
+		elif w.moving:
+			d += 1500.0
+		if w.deliver_to == b:
+			d += 2000.0
 		if d < best_d:
 			best_d = d
 			best = w
@@ -1103,6 +1116,15 @@ func _thing_at(pos: Vector2) -> Node2D:
 	for b in get_tree().get_nodes_in_group("buildings"):
 		if b.team == 1 and pos.distance_to(b.position) < b.size:
 			return b
+	return null
+
+## 鼠标下是不是守线工人（art 模式下 pos = 点中的那个人的脚底；方块模式看离鼠标多近）
+func _operator_building_at(world: Vector2, pos: Vector2) -> Building:
+	for w in _player_workers():
+		if w.state != Worker.State.OPERATE or not is_instance_valid(w.work_at):
+			continue
+		if w.position.distance_to(pos) < 1.0 or w.position.distance_to(world) < w.radius * 1.3:
+			return w.work_at
 	return null
 
 ## 右键扫到的己方"收货点"：基地 / 仓库 / 熔炉 / 木工台。
@@ -1255,6 +1277,10 @@ func on_trained(b: Building, kind: String) -> void:
 		if is_instance_valid(b.rally_node) and b.rally_node is ResNode:
 			w.command_gather(b.rally_node)
 			return
+		# 集结点设在熔炉/木工台上：出来直接进厂干活（人满了就在门口等）
+		if is_instance_valid(b.rally_node) and b.rally_node is Building and b.rally_node.is_processor():
+			if w.command_operate(b.rally_node):
+				return
 		if b.rally != Vector2.INF:
 			w.command_move(open_point(b.rally))
 			return
@@ -1280,6 +1306,12 @@ func on_trained(b: Building, kind: String) -> void:
 ## 设集结点：选中基地/兵营右键地面（点在矿/树上 = 新农民直接去采）
 func set_rally(b: Building, pos: Vector2) -> void:
 	var t := _thing_at(pos)
+	var proc := _friendly_depot_at(pos)
+	if t == null and proc != null and proc.is_processor() and b.kind == "base":
+		b.rally_node = proc
+		b.rally = proc.position + Vector2(0, proc.size * 1.1)
+		_hud_msg("集结点已设到%s：新农民出来直接进厂干活（人满了在门口等）" % proc.display_name)
+		return
 	b.rally_node = t if t is ResNode else null
 	b.rally = t.position if t is ResNode else open_point(pos)
 	_hud_msg("集结点已设到%s" % ("这片%s" % ("矿" if t.kind == "ore" else "树林") if t is ResNode else "这里"))
@@ -1454,7 +1486,9 @@ func _bottleneck() -> String:
 					return "%s缺料：仓库%s不到 %d（留底），多派人采" % [b.display_name, raw, int(Building.FETCH_RESERVE)]
 				return "%s缺料：派采%s的农民右键它送料，或打开自取" % [b.display_name, raw]
 			"full":
-				return "%s成品堆满了：再招 1 个工人专门搬货" % b.display_name
+				if b.op_count() < Building.OP_MAX:
+					return "%s成品堆满了：再招 1 个工人专门搬货" % b.display_name
+				return "%s成品堆满了：仓库太远搬不过来，在旁边盖个仓库" % b.display_name
 	if w < 4 and ore_r + wood_r < 1.2:
 		return "农民 %d/%d，人少产得慢" % [w, WORKER_CAP]
 	if not has_smelter:
