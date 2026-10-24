@@ -121,6 +121,9 @@ def main():
         elif a == "--right":
             rclick = [int(v) for v in args[i + 1].split(",")]
             i += 2
+        elif a == "--mouse":
+            steps.append(("mouse", [int(v) for v in args[i + 1].split(",")]))
+            i += 2
         elif a == "--shot":
             steps.append(("shot", args[i + 1]))
             i += 2
@@ -146,6 +149,9 @@ def main():
             elif kind == "right":
                 click(h, val[0], val[1], right=True)
                 time.sleep(1.5)
+            elif kind == "mouse":
+                u.SetCursorPos(*to_screen(h, val[0], val[1]))
+                time.sleep(0.3)
             elif kind == "wait":
                 time.sleep(val)
             else:
