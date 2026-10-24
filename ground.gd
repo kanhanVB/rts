@@ -4,6 +4,7 @@ extends Node2D
 ## 草地深浅斑、土路（沙色路面 + 下沿暗边 + 锯齿草边 + 小石子）、林下暗地、巢穴周围的黏液地，
 ## 都由一张低分辨率遮罩（1 像素 = 8 世界像素）+ 无缝噪声在 GPU 上算出来，边缘是硬朗的 KR 卡通色块。
 ## 遮罩通道：R = 土路距离场（0.5 = 路边）/ G = 林地覆盖 / B = 巢穴黏液 / A = 矿场（矿堆脚下踩秃的土）
+## 第二张遮罩 mask2：R = 河的距离场（0.5 = 岸边）/ G = 浅滩（0.5 以内是能趟的浅水）
 
 const MASK_PX := 8.0
 const ROAD_HALF := 25.0     # 土路半宽（世界像素）
@@ -14,6 +15,7 @@ const QUARRY_SQUASH := 1.35
 const SHADER := """
 shader_type canvas_item;
 uniform sampler2D mask : filter_linear, repeat_disable;
+uniform sampler2D mask2 : filter_linear, repeat_disable;
 uniform sampler2D blobs : filter_linear, repeat_enable;
 uniform sampler2D fine : filter_linear, repeat_enable;
 uniform sampler2D cells : filter_linear, repeat_enable;
@@ -71,6 +73,25 @@ void fragment() {
 	float peb = 1.0 - smoothstep(0.08, 0.11, texture(cells, wp / 260.0).r);
 	dirt = mix(dirt, vec3(0.80, 0.63, 0.32), peb * smoothstep(0.6, 0.7, r));
 	c = mix(c, dirt, road);
+	// 河：岸边一圈湿泥 → 白色浪花边 → 浅水 → 深水；水面上漂几道亮纹；浅滩颜色浅、看得见水底的石头
+	vec4 m2 = texture(mask2, uv);
+	float wv = m2.r + (f - 0.5) * 0.07 + (b2 - 0.5) * 0.05;
+	float bank = smoothstep(0.405, 0.42, wv);
+	float wet = smoothstep(0.455, 0.468, wv);
+	c = mix(c, vec3(0.33, 0.29, 0.18), bank);
+	float fd = smoothstep(0.42, 0.58, m2.g);
+	vec3 water = mix(vec3(0.33, 0.64, 0.72), vec3(0.17, 0.43, 0.62), smoothstep(0.5, 0.8, wv));
+	water = mix(water, vec3(0.47, 0.73, 0.73), fd);
+	float rp = texture(blobs, wp / 260.0 + vec2(TIME * 0.010, TIME * 0.006)).r * 0.55 + texture(fine, wp / 210.0 - vec2(TIME * 0.008, -TIME * 0.005)).r * 0.45;
+	float streak = smoothstep(0.575, 0.59, rp) * (1.0 - smoothstep(0.605, 0.62, rp));
+	water = mix(water, vec3(0.62, 0.86, 0.90), streak * 0.5 * (1.0 - fd));
+	// 浅滩：沙底透上来（偏黄绿），撒些卵石
+	water = mix(water, vec3(0.62, 0.74, 0.62), fd * 0.45);
+	float stone = 1.0 - smoothstep(0.10, 0.13, texture(cells, wp / 90.0 + vec2(0.13, 0.41)).r);
+	water = mix(water, vec3(0.6, 0.58, 0.5), stone * fd * 0.7);
+	float foam = 1.0 - smoothstep(0.475, 0.50, wv);
+	water = mix(water, vec3(0.88, 0.96, 0.95), foam * 0.9);
+	c = mix(c, water, wet);
 	COLOR = vec4(c, 1.0);
 }
 """
@@ -108,6 +129,34 @@ func build(layout: Dictionary, w: float, h: float) -> void:
 	for hp in layout.hives:
 		_splat(creep, mw, mh, hp, 290.0)
 		_splat(road, mw, mh, hp, 150.0)
+	# 河：沿中线每 6px 盖一个章（半宽处 = 0.5）；浅滩一圈
+	var water := PackedFloat32Array()
+	water.resize(mw * mh)
+	var ford := PackedFloat32Array()
+	ford.resize(mw * mh)
+	var rv: Dictionary = layout.get("river", {})
+	if not rv.is_empty():
+		var pts: Array = rv.pts
+		for i in pts.size() - 1:
+			var a: Vector2 = pts[i]
+			var b: Vector2 = pts[i + 1]
+			var n := maxi(1, int(a.distance_to(b) / 6.0))
+			for k in n:
+				var t := float(k) / n
+				_splat(water, mw, mh, a.lerp(b, t), lerpf(rv.hw[i], rv.hw[i + 1], t) * 2.0)
+	for fp in layout.get("fords", []):
+		_splat(ford, mw, mh, fp, MapGen.FORD_R * 2.0)
+		# 两岸各踩出一条小土路通到浅滩（纯视觉：告诉玩家这里能趟过去）
+		var n := RiverArt.cross_dir(rv, fp)
+		var hw := RiverArt.half_at(rv, fp)
+		var along := n.orthogonal()
+		for side in [-1.0, 1.0]:
+			var d := hw - 4.0
+			var len := 92.0
+			while d < hw + len:
+				var k := (d - hw) / len    # 0 = 岸边 → 1 = 小路尽头：越走越窄，轻轻拐个弯
+				_splat(road, mw, mh, fp + n * side * d + along * sin(k * 2.2) * 10.0 * side, lerpf(26.0, 10.0, clampf(k, 0.0, 1.0)))
+				d += 4.0
 	# 林地：格子占用图（树/密林 = 1）放大到遮罩分辨率，双线性插值后就是平滑的覆盖度
 	var gw: int = layout.gw
 	var gh: int = layout.gh
@@ -126,11 +175,18 @@ func build(layout: Dictionary, w: float, h: float) -> void:
 		data[i * 4 + 2] = int(clampf(creep[i], 0.0, 1.0) * 255.0)
 		data[i * 4 + 3] = int(clampf(quarry[i], 0.0, 1.0) * 255.0)
 	var mask := ImageTexture.create_from_image(Image.create_from_data(mw, mh, false, Image.FORMAT_RGBA8, data))
+	var data2 := PackedByteArray()
+	data2.resize(mw * mh * 4)
+	for i in mw * mh:
+		data2[i * 4] = int(clampf(water[i], 0.0, 1.0) * 255.0)
+		data2[i * 4 + 1] = int(clampf(ford[i], 0.0, 1.0) * 255.0)
+	var mask2 := ImageTexture.create_from_image(Image.create_from_data(mw, mh, false, Image.FORMAT_RGBA8, data2))
 	var mat := ShaderMaterial.new()
 	var sh := Shader.new()
 	sh.code = SHADER
 	mat.shader = sh
 	mat.set_shader_parameter("mask", mask)
+	mat.set_shader_parameter("mask2", mask2)
 	mat.set_shader_parameter("blobs", _noise_tex(noise.seed + 1, FastNoiseLite.TYPE_SIMPLEX_SMOOTH, 0.012, 3))
 	mat.set_shader_parameter("fine", _noise_tex(noise.seed + 2, FastNoiseLite.TYPE_SIMPLEX, 0.03, 2))
 	var cn := _noise_tex(noise.seed + 3, FastNoiseLite.TYPE_CELLULAR, 0.03, 1)

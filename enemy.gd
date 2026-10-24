@@ -52,10 +52,11 @@ func start_lane(points: Array) -> void:
 	_lane.clear()
 	for i in range(points.size() - 1, -1, -1):    # 道路数据从基地端到巢穴端，Goo 反着走
 		var p: Vector2 = points[i] + off
-		# 路的起点压在巢穴脚下：那几个点根本走不到（会被建筑推开），跳过
+		# 路的起点压在巢穴脚下、终点压在主城脚下：那几个点根本走不到（会被建筑推开），跳过
+		# （不然窜窜走到主城门口，对着城里的路点一个个干等 4 秒才开始啃）
 		var blocked := false
 		for b in _group("buildings"):
-			if is_instance_valid(b) and b.team == 1 and p.distance_to(b.position) < b.size * 0.8:
+			if is_instance_valid(b) and (b.team == 1 or b.kind == "base") and p.distance_to(b.position) < b.size * 0.8:
 				blocked = true
 		if not blocked:
 			_lane.append(p)

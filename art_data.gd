@@ -1,5 +1,5 @@
 ## 由 tools/prepare_art.py 自动生成，别手改：每张图的尺寸和锚点（像素）
-## （箭塔 tower* 由 tools/make_tower.py、窜窜/岩壳 runner_*/brute_* 由 tools/make_goo.py 拼出来，条目手工追加在 SPRITES 末尾）
+## （箭塔 tower* 由 tools/make_tower.py、窜窜/岩壳 runner_*/brute_* 由 tools/make_goo.py、宝箱/遗物/水车/前哨/废墟由 tools/make_props.py 画出来，条目手工追加在 SPRITES 末尾）
 class_name ArtData
 extends RefCounted
 
@@ -417,6 +417,72 @@ const SPRITES := {
   "h": 81,
   "ax": 177.0,
   "ay": 81
+ },
+ "props/chest": {
+  "w": 124,
+  "h": 104,
+  "ax": 62.0,
+  "ay": 104
+ },
+ "props/relic_gem": {
+  "w": 60,
+  "h": 78,
+  "ax": 30.0,
+  "ay": 78
+ },
+ "props/plinth": {
+  "w": 92,
+  "h": 66,
+  "ax": 46.0,
+  "ay": 66
+ },
+ "buildings/waterwheel_house": {
+  "w": 360,
+  "h": 262,
+  "ax": 180.0,
+  "ay": 252
+ },
+ "buildings/waterwheel_wheel": {
+  "w": 160,
+  "h": 160,
+  "ax": 80.0,
+  "ay": 80.0
+ },
+ "buildings/waterwheel": {
+  "w": 360,
+  "h": 262,
+  "ax": 180.0,
+  "ay": 252
+ },
+ "buildings/outpost_body": {
+  "w": 320,
+  "h": 262,
+  "ax": 160.0,
+  "ay": 262
+ },
+ "buildings/outpost_top": {
+  "w": 320,
+  "h": 262,
+  "ax": 160.0,
+  "ay": 262
+ },
+ "buildings/outpost_front": {
+  "w": 320,
+  "h": 262,
+  "ax": 160.0,
+  "ay": 262
+ },
+ "buildings/outpost": {
+  "w": 320,
+  "h": 262,
+  "ax": 160.0,
+  "ay": 262
+ },
+ "buildings/ruins": {
+  "w": 325,
+  "h": 131,
+  "ax": 162.5,
+  "ay": 131
  }
 }
 

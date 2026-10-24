@@ -11,7 +11,11 @@ const COST_TABLE := {
 	"smelter": Economy.COST_SMELTER,
 	"workshop": Economy.COST_WORKSHOP,
 	"tower": Economy.COST_TOWER,
+	"waterwheel": Economy.COST_WATERWHEEL,
+	"outpost": Economy.COST_OUTPOST,
 }
+const BRIDGE_CLEAR := 100.0    # 水车离桥至少这么远（别把桥头堵了）
+const FORD_CLEAR := 130.0      # 离浅滩中心至少这么远（浅滩是另一条过河的路）
 
 signal building_built(building: Building)
 
@@ -31,6 +35,9 @@ func add_building(kind: String, pos: Vector2, team_: int) -> Building:
 	b.setup(kind)
 	b.team = team_
 	b.position = pos
+	if team_ == 0 and Relic.has("relic_heart"):
+		b.max_hp *= Relic.HEART_MULT    # 磐石之心：之后盖的房子也结实
+		b.hp = b.max_hp
 	add_child(b)
 	return b
 
@@ -42,6 +49,20 @@ func placement_error(pos: Vector2, kind := "") -> String:
 	var h: float = g.H if g != null else 720.0
 	if pos.x < 40.0 or pos.x > w - 40.0 or pos.y < 90.0 or pos.y > h - 80.0:
 		return "放不下：离边界太近，往中间点"
+	if g != null and g.has_method("fog_explored") and not g.fog_explored(pos):
+		return "放不下：那里还没探过——先派人去看看"
+	# 前哨只认 Goo 据点的废墟：拆了窝、在旁边扎下来，这片地盘就永远是你的
+	if kind == "outpost":
+		var ruin: Node2D = null
+		for r in get_tree().get_nodes_in_group("buildings"):
+			if r is Ruins and not r.is_queued_for_deletion() and pos.distance_to(r.position) < Ruins.OUTPOST_R:
+				ruin = r
+				break
+		if ruin == null:
+			return "放不下：前哨只能盖在 Goo 据点的废墟旁边（先拆窝）"
+		for s in get_tree().get_nodes_in_group("sites"):
+			if is_instance_valid(s) and s.kind == "outpost" and s.position.distance_to(ruin.position) < Ruins.OUTPOST_R:
+				return "放不下：这片废墟已经在盖前哨了"
 	# 据点先查：在禁建圈里怎么挪都没用，直接告诉玩家先拆窝
 	for b in get_tree().get_nodes_in_group("buildings"):
 		if b.kind == "camp" and b.team != 0 and pos.distance_to(b.position) < Camp.NO_BUILD_R:
@@ -55,7 +76,10 @@ func placement_error(pos: Vector2, kind := "") -> String:
 	for n in get_tree().get_nodes_in_group("res_nodes"):
 		if is_instance_valid(n) and pos.distance_to(n.position) < 52.0:
 			return "放不下：压到矿/树了，挪开一点"
-	if g != null and g.area_blocked(pos, 26.0):
+	var water := _water_error(pos, kind, g)
+	if water != "":
+		return water
+	if kind != "waterwheel" and g != null and g.area_blocked(pos, 26.0):
 		return "放不下：那里是树林"
 	# 不许堵路：Goo 沿土路行军，房子压在路上会把整队怪卡住（箭塔要盖在路边）
 	if g != null and kind != "":
@@ -66,6 +90,52 @@ func placement_error(pos: Vector2, kind := "") -> String:
 				if Geometry2D.get_closest_point_to_segment(pos, rd[i], rd[i + 1]).distance_to(pos) < half + pad:
 					return "放不下：别堵土路，盖在路边" + ("（箭塔射程够得着）" if kind == "tower" else "")
 	return ""
+
+## 河：别的房子不许压水、不许堵浅滩；水车反过来——房子落在岸上，轮子那一侧得是深水
+func _water_error(pos: Vector2, kind: String, g: Node2D) -> String:
+	var t := Terrain.current
+	if g == null or t == null:
+		return ""
+	var lay: Dictionary = g.get("layout") if g.get("layout") != null else {}
+	for fp in lay.get("fords", []):
+		if pos.distance_to(fp) < (FORD_CLEAR if kind == "waterwheel" else MapGen.FORD_R + Building.size_of(kind) * 0.5 + 30.0):
+			return "放不下：别堵浅滩——那是另一条过河的路"
+	if kind != "waterwheel":
+		for dy in [-26.0, 0.0, 26.0]:
+			for dx in [-26.0, 0.0, 26.0]:
+				var ty := t.type_at(pos + Vector2(dx, dy))
+				if ty == Terrain.T.DEEP:
+					return "放不下：那是河（河边可以盖水车）"
+				if ty == Terrain.T.SHALLOW:
+					return "放不下：别堵浅滩——那是另一条过河的路"
+		return ""
+	for br in lay.get("bridges", []):
+		if Geometry2D.get_closest_point_to_segment(pos, br.a, br.b).distance_to(pos) < BRIDGE_CLEAR:
+			return "放不下：离桥太近，别把桥头堵了"
+	var flip := Building.wheel_flip_at(pos)
+	if not RiverArt.river.is_empty():
+		# 按画出来的水面：磨坊落在岸上，轮心泡进水里
+		if RiverArt.water_depth(pos) > -WHEEL_BANK:
+			return "放不下：磨坊得落在岸上，往岸边挪一点"
+		if RiverArt.water_depth(Building.wheel_hub(pos, flip)) < WHEEL_DEEP:
+			return "放不下：水车要贴着河盖，轮子得泡在水里"
+	else:
+		var ty0 := t.type_at(pos)
+		if ty0 == Terrain.T.DEEP or ty0 == Terrain.T.SHALLOW:
+			return "放不下：磨坊得落在岸上，往岸边挪一点"
+		if absi(Building.wheel_water(pos)) < WHEEL_WET:
+			return "放不下：水车要贴着河盖，轮子得泡在水里"
+	# 磨坊那一侧（背着水）别压树和矿
+	var back := 1.0 if flip else -1.0
+	for dy in [-24.0, 0.0, 24.0]:
+		for dx in [0.0, 24.0]:
+			var ty := t.type_at(pos + Vector2(dx * back, dy))
+			if ty == Terrain.T.TREE or ty == Terrain.T.WOODS or ty == Terrain.T.ORE:
+				return "放不下：那里是树林"
+	return ""
+const WHEEL_WET := 4       # 没有河的几何数据时（经典图测试）：轮子那一侧 9 个采样点至少几个是深水格
+const WHEEL_BANK := 6.0    # 磨坊中心至少离水面这么远（在岸上）
+const WHEEL_DEEP := 6.0    # 轮心至少泡进水面这么深
 
 func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
 	var why := placement_error(pos, kind)
@@ -86,6 +156,8 @@ func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
 	site.size = Building.size_of(kind)    # 工地和盖好后一样大（箭塔小一圈）
 	if kind == "tower":
 		site.build_time = 7.0
+	elif kind == "outpost":
+		site.build_time = 10.0    # 前哨大一圈，多敲两秒（施工期间废墟停表）
 	add_child(site)
 	if eng != null and is_instance_valid(eng):
 		eng.command_build(site)    # 谁下的令谁去盖
@@ -123,4 +195,8 @@ func _place_label(kind: String) -> String:
 			return "木工台完工！框选农民右键木工台，送来的木材就锯成木板"
 		"tower":
 			return "箭塔完工！塔上的弓手会自动射路过的敌人（选中它可用木板+铁锭升级）"
+		"waterwheel":
+			return "水车完工！附近 %d 以内的熔炉 / 木工台（最多 %d 座）一批快 30%%" % [int(Building.WHEEL_R), Building.WHEEL_MAX]
+		"outpost":
+			return "前哨完工！废墟清掉了，Goo 再也回不来；农民可以就近交货，塔上弓手看着这片矿"
 	return "设施完工！"

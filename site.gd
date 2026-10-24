@@ -57,6 +57,8 @@ func _art_draw() -> bool:
 		var frac := clampf(progress, 0.0, 1.0)
 		var src := Rect2(0, d.h * (1.0 - frac), d.w, d.h * frac)
 		var dst := Rect2(-w * 0.5, foot.y - h * frac, w, h * frac)
+		if kind == "waterwheel" and Building.wheel_flip_at(position):
+			dst = Rect2(w * 0.5, foot.y - h * frac, -w, h * frac)    # 河在左边：轮子朝左（负宽 = 水平翻转）
 		draw_texture_rect_region(t, dst, src, Color(1, 1, 1, 0.92))
 		top = minf(top, foot.y - h * frac)
 	# 进度条 + 状态字

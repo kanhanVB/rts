@@ -664,6 +664,7 @@ const ICON_KEY := {
 	"warehouse": "buildings/warehouse", "smelter": "buildings/smelter", "workshop": "buildings/workshop",
 	"barracks": "buildings/barracks", "base": "buildings/base", "hive": "buildings/hive", "wave": "ui/icon_wave",
 	"tower": "buildings/tower", "tower2": "buildings/tower2",
+	"waterwheel": "buildings/waterwheel", "outpost": "buildings/outpost",
 }
 
 func icon(key: String) -> Texture2D:
@@ -885,6 +886,8 @@ class SelPanel extends Control:
 
 	## 头像内容：农民/英雄/敌人用专门的圆头像图标，兵种裁立绘上半身，建筑整张缩进去
 	func _face(u) -> Array:
+		if u is Treasure:
+			return ["props/relic_gem", false, u.color().lightened(0.15)] if u.kind == "relic" else ["props/chest", false]
 		if u is Building:
 			if u.kind == "camp":
 				return ["buildings/hive", false]
@@ -916,13 +919,15 @@ class SelPanel extends Control:
 			else:
 				var s := minf(inner.size.x / ts.x, inner.size.y / ts.y)
 				var sz := ts * s
-				draw_texture_rect(t, Rect2(c - sz * 0.5, sz), false)
+				draw_texture_rect(t, Rect2(c - sz * 0.5, sz), false, f[2] if f.size() > 2 else Color.WHITE)
 		else:
 			draw_circle(c, rad * 0.4, Color(0.3, 0.55, 1.0) if not enemy else Color(0.85, 0.25, 0.2))
 		if Art.has("ui/portrait_frame"):
 			draw_texture_rect(Art.tex("ui/portrait_frame"), r, false, Color(1, 0.75, 0.7) if enemy else Color.WHITE)
 		else:
 			draw_arc(c, rad - 2.0, 0, TAU, 40, Hud.GOLD, 3.0)
+		if u is Treasure or u is Ruins:
+			return    # 宝箱 / 废墟没有血条
 		var hb := Rect2(r.position.x + 3.0, r.end.y + 2.0, r.size.x - 6.0, bar_h)
 		var ratio := clampf(u.hp / u.max_hp, 0.0, 1.0)
 		draw_rect(hb, Art.HP_BG)
@@ -952,8 +957,22 @@ class Minimap extends Control:
 		if main.minimap_tex == null:    # 随机图的树/矿已经画在底图上了
 			for n in tree.get_nodes_in_group("res_nodes"):
 				draw_circle(n.position * k, 2.2, Color(0.75, 0.75, 0.85) if n.kind == "ore" else Color(0.1, 0.3, 0.1))
+		# 战争迷雾：没去过的地方压黑、去过的蒙灰（怪只画看得见的，敌方房子只画去过的）
+		var fog = main.get("fog")
+		if fog != null and fog.enabled and fog.mini_tex != null:
+			draw_texture_rect(fog.mini_tex, Rect2(Vector2.ZERO, size), false)
+		for t in tree.get_nodes_in_group("treasures"):
+			if t.visible:
+				draw_circle(t.position * k, 2.6, Hud.INK)
+				draw_circle(t.position * k, 1.8, t.color())
 		for b in tree.get_nodes_in_group("buildings"):
+			if not b.visible:
+				continue
 			var s: float = maxf(b.size * k * 1.1, 5.0)
+			if b is Ruins:
+				draw_circle(b.position * k, maxf(s * 0.5, 3.0), Hud.INK)
+				draw_circle(b.position * k, maxf(s * 0.5, 3.0) - 1.0, Color(0.62, 0.6, 0.58))
+				continue
 			if b.kind == "camp":
 				# Goo 据点：橙色圆点（巢穴是红方块），旁边的金色格子就是它守着的富矿
 				draw_circle(b.position * k, maxf(s * 0.6, 3.5), Hud.INK)
@@ -965,7 +984,8 @@ class Minimap extends Control:
 		for s in tree.get_nodes_in_group("sites"):
 			draw_rect(Rect2(s.position * k - Vector2(3, 3), Vector2(6, 6)), Color(0.6, 0.75, 1.0, 0.7))
 		for u in tree.get_nodes_in_group("units"):
-			draw_circle(u.position * k, 2.0, Color(0.55, 0.85, 1.0) if u.team == 0 else Color(1.0, 0.35, 0.25))
+			if u.visible:
+				draw_circle(u.position * k, 2.0, Color(0.55, 0.85, 1.0) if u.team == 0 else Color(1.0, 0.35, 0.25))
 		# 视野框
 		var cam: Camera2D = main.cam
 		if cam != null:

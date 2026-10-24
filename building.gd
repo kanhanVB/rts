@@ -3,7 +3,7 @@ class_name Building
 ## 建筑：基地（交资源/造农民）、兵营（出兵）、巢穴（敌人老窝，拆了就赢）。
 ## KR 式建模：石基 + 半木墙 + 大出檐屋顶 + 旗帜；巢穴是黏液山包 + 尖刺 + 红光洞口。
 
-var kind: String = "base"    # base / barracks / warehouse / smelter / workshop / hive / tower / camp（Goo 据点，见 camp.gd）
+var kind: String = "base"    # base / barracks / warehouse / smelter / workshop / hive / tower / waterwheel / outpost / camp（Goo 据点，见 camp.gd）/ ruins（据点废墟，见 ruins.gd）
 var team: int = 0
 var hp: float = 600.0
 var max_hp: float = 600.0
@@ -23,13 +23,16 @@ const COLORS := {
 const SIZE_SCALE := 0.85
 
 ## 各建筑的占地（缩放前）：放置预览 / 工地 / 真建筑共用
-const BASE_SIZE := {"base": 76.0, "barracks": 60.0, "warehouse": 64.0, "smelter": 56.0, "workshop": 56.0, "hive": 84.0, "tower": 40.0, "camp": 58.0}
+const BASE_SIZE := {"base": 76.0, "barracks": 60.0, "warehouse": 64.0, "smelter": 56.0, "workshop": 56.0, "hive": 84.0, "tower": 40.0, "camp": 58.0,
+	"waterwheel": 56.0, "outpost": 70.0, "ruins": 58.0}
 
 static func size_of(k: String) -> float:
 	return float(BASE_SIZE.get(k, 60.0)) * SIZE_SCALE
 
 ## 贴图显示宽度：箭塔的画布比别的建筑窄高（还要给二级的旗留边）
 static func art_w(k: String, sz: float) -> float:
+	if k == "waterwheel":
+		return sz * WHEEL_ART_W
 	return sz * (TOWER_ART_W if k == "tower" else ART_W)
 
 func setup(k: String) -> void:
@@ -59,6 +62,15 @@ func setup(k: String) -> void:
 		"camp":
 			hp = 420.0
 			size = 58.0
+		"waterwheel":
+			hp = 200.0
+			size = 56.0
+		"outpost":
+			hp = 350.0
+			size = 70.0
+		"ruins":
+			hp = 1.0
+			size = 58.0
 	size *= SIZE_SCALE
 	max_hp = hp
 	display_name = label_text()
@@ -67,6 +79,8 @@ var _fp: Array = []    # 压住的地形格（A* 绕开）
 
 func _ready() -> void:
 	add_to_group("buildings")
+	if kind == "waterwheel":
+		wheel_flip = wheel_flip_at(position)
 	if Terrain.current != null:
 		_fp = Terrain.current.footprint(position, size * 0.5)
 		Terrain.current.occupy(_fp, 1)
@@ -112,10 +126,20 @@ var _arch_shot: Array = [-9.0, -9.0]       # 上次放箭的时间（秒）：�
 var _game_ref: Node = null
 
 func has_tower() -> bool:
-	return team == 0 and (kind == "base" or kind == "tower")
+	return team == 0 and (kind == "base" or kind == "tower" or kind == "outpost")
+
+## 前哨塔上的一名弓手（比箭塔射得远一点点，单发和城堡一样）
+const OUTPOST_TOWER := {"range": 190.0, "dmg": 8.0, "cd": 1.3, "archers": 1}
 
 func tower_stats() -> Dictionary:
-	var st: Dictionary = TOWER_LV[level] if kind == "tower" else {"range": TOWER_RANGE, "dmg": TOWER_DMG, "cd": TOWER_CD, "archers": 1}
+	var st: Dictionary = {"range": TOWER_RANGE, "dmg": TOWER_DMG, "cd": TOWER_CD, "archers": 1}
+	if kind == "tower":
+		st = TOWER_LV[level]
+	elif kind == "outpost":
+		st = OUTPOST_TOWER
+	if team == 0 and Relic.range_bonus() > 0.0:    # 鹰眼石：射程 +25
+		st = st.duplicate()
+		st.range = float(st.range) + Relic.range_bonus()
 	if team == 0 and Tech.has("up_arrows"):    # 破甲箭头：每箭 +3（表是常量，复制一份再改）
 		st = st.duplicate()
 		st.dmg = float(st.dmg) + Tech.ARROW_BONUS
@@ -144,6 +168,9 @@ func _archer_x(i: int) -> float:
 
 ## 弓手脚底 / 放箭点（本地坐标）
 func _archer_feet(i: int) -> Vector2:
+	if kind == "outpost":
+		var ko := art_w(kind, size) / OUTPOST_CANVAS.x
+		return Vector2(0, size * 0.42) + (OUTPOST_FEET - Vector2(OUTPOST_CANVAS.x * 0.5, OUTPOST_CANVAS.y)) * ko
 	var k := art_w(kind, size) / TOWER_CANVAS.x
 	return Vector2(0, size * 0.42) + Vector2(_archer_x(i) * k, -(TOWER_CANVAS.y - TOWER_FEET_Y) * k)
 
@@ -179,7 +206,7 @@ func _tower(delta: float) -> void:
 			continue
 		_arch_cd[i] = st.cd
 		var from: Vector2
-		if kind == "tower":
+		if kind == "tower" or kind == "outpost":
 			from = position + _archer_feet(i) + Vector2(0, -12.0)
 			_arch_face[i] = 1.0 if t.position.x >= position.x + _archer_feet(i).x else -1.0
 			_arch_shot[i] = Time.get_ticks_msec() / 1000.0
@@ -213,7 +240,7 @@ var rally_node: Node2D = null      # 集结点设在矿/树上：新农民出来
 var waiting_pop := false           # 排头读满了但人口已满，卡着等
 
 func trains() -> bool:
-	return team == 0 and (kind == "base" or kind == "barracks")
+	return team == 0 and (kind == "base" or kind == "barracks" or kind == "outpost")
 
 func _produce(delta: float) -> void:
 	var g := get_tree().get_first_node_in_group("game")
@@ -240,6 +267,12 @@ func _process(delta: float) -> void:
 	if kind == "tower":
 		queue_redraw()    # 塔上的弓手会转身、拉弓
 		return
+	if kind == "waterwheel":
+		_wheel_ang += delta * 1.2    # 轮子一直在转（河一直在流）
+		queue_redraw()
+		return
+	if kind == "outpost":
+		queue_redraw()
 	if not queue.is_empty():
 		_produce(delta)
 	if is_processor():
@@ -259,6 +292,10 @@ func _art_draw() -> bool:
 	var key := "buildings/" + kind
 	if kind == "tower":
 		key = "buildings/tower_body"
+	elif kind == "waterwheel":
+		key = "buildings/waterwheel_house"
+	elif kind == "outpost":
+		key = "buildings/outpost_body"
 	elif kind == "camp":
 		key = "buildings/hive"    # 据点 = 缩小一号、泛土黄的巢穴
 	if hp < max_hp * 0.5 and Art.has(key + "_damaged"):
@@ -283,6 +320,10 @@ func _art_draw() -> bool:
 	var h := 0.0
 	if kind == "tower":
 		h = _draw_tower_art(foot, mod, shake)
+	elif kind == "waterwheel":
+		h = _draw_wheel_art(foot, mod, shake)
+	elif kind == "outpost":
+		h = _draw_outpost_art(foot, mod, shake)
 	else:
 		h = Art.draw_w(self, key, foot + Vector2(shake, 0), w, mod)
 	if hp < max_hp or selected:
@@ -595,9 +636,13 @@ func is_processor() -> bool:
 func recipe() -> Dictionary:
 	return RECIPES.get(kind, {})
 
-## 一批的读条秒数（研究过熟练工匠 ×0.7）
+## 一批的读条秒数（研究过熟练工匠 ×0.7、古老齿轮 ×0.8、有水车带着 ×0.7，叠乘）
 func batch_time() -> float:
-	return float(recipe().get("time", 1.0)) * Tech.craft_mult()
+	return float(recipe().get("time", 1.0)) * Tech.craft_mult() * Relic.craft_mult() * (WHEEL_MULT if powered() else 1.0)
+
+## 有没有水车在带这条线
+func powered() -> bool:
+	return powered_by != null and is_instance_valid(powered_by) and not powered_by.is_queued_for_deletion()
 
 ## 秒数显示：整数不带小数（5 秒），否则一位小数（3.5 秒）
 static func fmt_secs(t: float) -> String:
@@ -848,4 +893,104 @@ func label_text() -> String:
 			return "木工台"
 		"tower":
 			return "箭塔" if level < 2 else "二级箭塔"
+		"waterwheel":
+			return "水车"
+		"outpost":
+			return "前哨"
+		"ruins":
+			return "据点废墟"
 	return "?"
+
+## ---------- 水车：盖在河边水里，轮子泡在河里一直转；带动附近两条加工线（熔炉/木工台）一批快 30% ----------
+## 贴图（tools/make_props.py）：磨坊（不含轮子）+ 单独一张轮子绕轴转；河在左边就整个镜像，轮子总朝着水
+const WHEEL_ART_W := 2.6                     # 磨坊画布（360px，左边留白让锚点居中）显示宽度 = size × 这个
+const WHEEL_CANVAS_W := 360.0
+const WHEEL_ANCHOR := Vector2(180, 252)      # 贴图锚点（磨坊石基底边中点）
+const WHEEL_HUB := Vector2(284, 178)         # 轮心（画布坐标）
+const WHEEL_R_PX := 76.0                     # 轮子半径（画布像素）
+const WHEEL_R := 260.0       # 带动范围：加工线离水车这么近
+const WHEEL_MULT := 0.7      # 被带动的线一批 ×0.7
+const WHEEL_MAX := 2         # 一架水车最多带两条线
+var wheel_flip := false      # 轮子在左边（河在左边）
+var _wheel_ang := 0.0
+var powered_by: Building = null    # 加工线：哪架水车在带它（main 每 0.5 秒重新分）
+var powering: Array = []           # 水车：带着哪几条线
+
+## 轮子朝哪边：哪边水深就朝哪边（放置预览、工地也用）。有河的图按画出来的水面算，没有就看深水格
+static func wheel_flip_at(p: Vector2) -> bool:
+	if not RiverArt.river.is_empty():
+		return RiverArt.water_depth(wheel_hub(p, true)) > RiverArt.water_depth(wheel_hub(p, false))
+	return wheel_water(p) < 0
+
+## 轮心（世界坐标）：磨坊盖在 p，轮子朝右（flip = 朝左）
+static func wheel_hub(p: Vector2, flip: bool) -> Vector2:
+	var sz := size_of("waterwheel")
+	var off := (WHEEL_HUB - WHEEL_ANCHOR) * (art_w("waterwheel", sz) / WHEEL_CANVAS_W)
+	if flip:
+		off.x = -off.x
+	return p + Vector2(0, sz * 0.42) + off
+
+## 磨坊两侧的深水打分：右边每个深水采样点 +1、左边 -1（各 9 个点）。放置要求一侧至少 4 个
+static func wheel_water(p: Vector2) -> int:
+	var t := Terrain.current
+	if t == null:
+		return 0
+	var score := 0
+	for dy in [-16.0, 0.0, 16.0]:
+		for dx in [24.0, 44.0, 64.0]:
+			if t.type_at(p + Vector2(dx, dy)) == Terrain.T.DEEP:
+				score += 1
+			if t.type_at(p + Vector2(-dx, dy)) == Terrain.T.DEEP:
+				score -= 1
+	return score
+
+func _draw_wheel_art(foot: Vector2, mod: Color, shake: float) -> float:
+	var w := art_w(kind, size)
+	var k := w / WHEEL_CANVAS_W
+	var o := foot + Vector2(shake, 0)
+	var h := Art.draw_w(self, "buildings/waterwheel_house", o, w, mod, wheel_flip)
+	var off := (WHEEL_HUB - WHEEL_ANCHOR) * k
+	if wheel_flip:
+		off.x = -off.x
+	var c := o + off
+	var r := WHEEL_R_PX * k
+	var now := Time.get_ticks_msec() / 1000.0
+	# 水线以下：先画一圈圈往外荡的涟漪（在轮子后面）
+	var wl := c + Vector2(0, r * 0.8)
+	for i in 2:
+		var t := fmod(now * 0.5 + i * 0.5, 1.0)
+		Art.ellipse(self, wl + Vector2(0, 4), r * (1.0 + t * 0.8), Color(0.88, 0.97, 1.0, 0.4 * (1.0 - t)), false, 2.0)
+	Art.draw(self, "buildings/waterwheel_wheel", c, float(Art.info("buildings/waterwheel_wheel").get("h", 160)) * k, wheel_flip, mod,
+		_wheel_ang * (-1.0 if wheel_flip else 1.0))
+	# 轮子下半截泡在水里：一片和河面同色的水盖住最下面的叶片（往河心那边偏一点，别漫上岸），两边翻白浪，叶片甩起一串水珠
+	var dirx := -1.0 if wheel_flip else 1.0
+	var wc := wl + Vector2(dirx * r * 0.12, 0)
+	Art.ellipse(self, wc + Vector2(0, 2), r * 0.92, Color(0.24, 0.52, 0.67, 0.92))
+	Art.ellipse(self, wc + Vector2(dirx * 2.0, 2), r * 0.72, Color(0.19, 0.45, 0.63, 0.92))
+	for side in [-1.0, 1.0]:
+		var fp := wc + Vector2(side * r * 0.6, -1.0)
+		var wob := 1.0 + 0.25 * sin(now * 6.0 + side)
+		Art.ellipse(self, fp, 4.5 * wob, Color(0.92, 0.98, 1.0, 0.75))
+	for i in 7:
+		var t := fmod(now * 1.1 + i / 7.0, 1.0)
+		var p := wl + Vector2(dirx * (r * 0.35 + t * r * 0.75), -sin(t * PI) * r * 0.55 - 1.0)
+		draw_circle(p, 1.7 * (1.0 - t * 0.5), Color(0.93, 0.98, 1.0, 0.9 * (1.0 - t)))
+	return h
+
+## ---------- 前哨：箭塔塔身 → 塔上弓手 → 挑檐 → 木屋和栅栏（make_props.py 拼的分层图，同一块画布）----------
+const OUTPOST_CANVAS := Vector2(320, 262)
+const OUTPOST_FEET := Vector2(87.0, 144.6)   # 弓手脚底（画布坐标）
+const OUTPOST_TOWER_K := 0.92                # 塔身在画布里缩了多少（弓手跟着缩）
+
+func _draw_outpost_art(foot: Vector2, mod: Color, shake: float) -> float:
+	var w := art_w(kind, size)
+	var o := foot + Vector2(shake, 0)
+	var h := Art.draw_w(self, "buildings/outpost_body", o, w, mod)
+	var k := w / OUTPOST_CANVAS.x
+	var act: bool = Time.get_ticks_msec() / 1000.0 - float(_arch_shot[0]) < 0.35
+	var key := "units/archer_act" if act and Art.has("units/archer_act") else "units/archer_idle"
+	var ah := TOWER_ARCHER_H * OUTPOST_TOWER_K * k * Unit.pose_scale("archer", key)
+	Art.draw(self, key, _archer_feet(0) + Vector2(shake, 0), ah, float(_arch_face[0]) < 0.0, mod)
+	Art.draw_w(self, "buildings/outpost_top", o, w, mod)
+	Art.draw_w(self, "buildings/outpost_front", o, w, mod)
+	return h

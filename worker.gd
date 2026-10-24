@@ -2,8 +2,9 @@ extends Unit
 class_name Worker
 ## 工人：可操控的"供应链"。采资源 -> 物理扛回基地，资源不会凭空入账。
 ## 也能进熔炉/木工台当工人：守线读条、把成品扛回仓库、顺路从仓库扛原料（State.OPERATE）。
+## 还能去野地捡宝箱 / 遗物（State.FETCH）：走过去弯腰扛起来，扛回基地 / 仓库 / 前哨才算到手；半路被打死就掉在原地。
 
-enum State { IDLE, TO_NODE, GATHERING, TO_BASE, OPERATE }
+enum State { IDLE, TO_NODE, GATHERING, TO_BASE, OPERATE, FETCH }
 
 const CARRY_CAP := 10.0
 const GATHER_RATE := 4.0     # 每秒采集量
@@ -13,7 +14,7 @@ static func carry_cap() -> float:
 	return CARRY_CAP * (Tech.CART_MULT if Tech.has("up_cart") else 1.0)
 
 static func gather_rate() -> float:
-	return GATHER_RATE * (Tech.TOOLS_MULT if Tech.has("up_tools") else 1.0)
+	return GATHER_RATE * (Tech.TOOLS_MULT if Tech.has("up_tools") else 1.0) * Relic.gather_mult()
 
 var state: int = State.IDLE
 var node_target: ResNode = null
@@ -31,6 +32,12 @@ var _op_think := 0.0
 var _op_stuck_n := 0
 var _op_stuck_at := Vector2.INF
 var _op_back := false    # 守线时被挤开、正在走回工位
+## 捡宝：去哪件、手上扛着哪件（{kind, loot, relic}；空 = 没扛）
+const PICK_TIME := 0.8   # 弯腰扛起来要多久
+var fetch_target: Treasure = null
+var treasure := {}
+var _pick_t := 0.0
+var _claim_t := 0.0
 
 func _ready() -> void:
 	super()
@@ -111,6 +118,15 @@ func _step(delta: float) -> void:
 						game.economy.add(carry_kind, rest)
 						_floater(rest, carry_kind)
 				carry_amount = 0.0
+				# 扛回来的宝箱 / 遗物：到手。原来在采的那处还在就接着采，否则原地待命（不自动乱派）
+				if not treasure.is_empty():
+					_claim(depot)
+					if node_target == null or not is_instance_valid(node_target):
+						state = State.IDLE
+						move_target = position
+						_path = PackedVector2Array()
+						_path_idx = 0
+						return
 				# 换工种的农民交完货要按新岗位认货种，否则"扛着木材去挖矿"会把木材记成矿石。
 				# node_target 空了就保持原货种，好让它接着找同类的下一处（树砍完换棵树）
 				if is_instance_valid(node_target):
@@ -128,9 +144,18 @@ func _step(delta: float) -> void:
 					_path_idx = 0
 		State.OPERATE:
 			_step_operate(delta)
+		State.FETCH:
+			_step_fetch(delta)
 		_:
 			# 空闲：执行玩家的移动指令（没有就原地站着）
 			_move_toward(move_target, delta)
+			# 扛着宝贝被手动带到收货点旁边：放下就算到手
+			_claim_t -= delta
+			if _claim_t <= 0.0 and not treasure.is_empty():
+				_claim_t = 0.5
+				var st := _store()
+				if st != null and position.distance_to(st.position) < 60.0:
+					_claim(st)
 
 ## 入账漂字（纯视觉；零头不弹"+0"）
 func _floater(n: float, k: String) -> void:
@@ -155,8 +180,8 @@ func command_operate(b: Building) -> bool:
 	node_target = null
 	deliver_to = null
 	_want_kind = ""
-	if carry_amount >= 0.5 and carry_kind != b.recipe().in:
-		_op_trip(false)
+	if (carry_amount >= 0.5 and carry_kind != b.recipe().in) or not treasure.is_empty():
+		_op_trip(false)    # 扛着别的货 / 宝贝：先送回仓库
 	else:
 		_op_go()
 	return true
@@ -257,6 +282,10 @@ func _op_at_store(b: Building) -> void:
 		game.economy.add(carry_kind, carry_amount)
 		_floater(carry_amount, carry_kind)
 	carry_amount = 0.0
+	if not treasure.is_empty():
+		var st := _store()
+		if st != null:
+			_claim(st)
 	if game != null:
 		var n: float = b.fetch_amount(self)
 		if n >= 1.0:
@@ -273,7 +302,7 @@ func _store() -> Building:
 	for b in _group("buildings"):
 		if not is_instance_valid(b) or b.team != 0:
 			continue
-		if b.kind != "warehouse" and b.kind != "base":
+		if b.kind != "warehouse" and b.kind != "base" and b.kind != "outpost":
 			continue
 		var d := position.distance_to(b.position)
 		if d < best_d:
@@ -283,6 +312,10 @@ func _store() -> Building:
 
 ## 当前干的活（信息栏用）
 func job_text() -> String:
+	if not treasure.is_empty():
+		return "扛着%s回去" % ("遗物 · " + Relic.relic_name(treasure.get("relic", "")) if treasure.get("kind", "") == "relic" else "宝箱")
+	if state == State.FETCH and is_instance_valid(fetch_target):
+		return "去捡" + ("遗物" if fetch_target.kind == "relic" else "宝箱")
 	if state == State.OPERATE and is_instance_valid(work_at):
 		var what := "守线"
 		if op_phase == "trip":
@@ -291,6 +324,65 @@ func job_text() -> String:
 			what = "扛料回厂" if carry_amount >= 0.5 else "回工位"
 		return "%s工人 · %s" % [work_at.display_name, what]
 	return ""
+
+## ---------- 捡宝 ----------
+## 右键宝箱 / 遗物：走过去扛起来再扛回去。原来在采的那处记着，送完接着采
+func command_fetch(t: Treasure) -> bool:
+	if t == null or not is_instance_valid(t) or t.is_queued_for_deletion():
+		return false
+	_leave_work()
+	if not treasure.is_empty():
+		_back_to_base()    # 一次只扛得动一件：先把手上这件送回去
+		return false
+	fetch_target = t
+	state = State.FETCH
+	_pick_t = 0.0
+	move_target = t.position
+	_path = _find_path(t.position)
+	_path_idx = 0
+	return true
+
+func _step_fetch(delta: float) -> void:
+	var t := fetch_target
+	if t == null or not is_instance_valid(t) or t.is_queued_for_deletion():
+		# 被别人先扛走了：原地待命
+		fetch_target = null
+		state = State.IDLE
+		move_target = position
+		_path = PackedVector2Array()
+		_path_idx = 0
+		return
+	if position.distance_to(t.position) > Treasure.PICK_R + radius:
+		_pick_t = 0.0
+		_move_toward(t.position, delta)
+		return
+	_pick_t += delta
+	if _pick_t < PICK_TIME:
+		return
+	treasure = t.take()
+	fetch_target = null
+	_back_to_base()
+
+## 到手：交给 main 记账（宝箱开资源 / 遗物生效）
+func _claim(at: Building) -> void:
+	var d := treasure
+	treasure = {}
+	var game := get_tree().get_first_node_in_group("game")
+	if game != null and game.has_method("claim_treasure"):
+		game.claim_treasure(d, at.position if at != null else position, self)
+
+## 扛着宝贝死了：东西掉在原地，再派人来捡
+func _death_fx() -> void:
+	if not treasure.is_empty():
+		var game := get_tree().get_first_node_in_group("game")
+		if game != null and game.has_method("spawn_treasure"):
+			game.spawn_treasure(treasure, position)
+		treasure = {}
+	super()
+
+## 疾风靴：农民跑得快
+func _terrain_speed_factor() -> float:
+	return super() * Relic.speed_mult()
 
 ## ---------- 指令 ----------
 func command_gather(node: ResNode) -> void:
@@ -302,9 +394,10 @@ func command_gather(node: ResNode) -> void:
 			node = alt
 	node_target = node
 	_want_kind = node.kind
+	fetch_target = null
 	# 帝国式：手上扛着别的东西被派去新岗位，先把旧货交回仓库再上岗。
-	# 直接改 carry_kind 会把"木材"记成"矿石"，账就错了
-	if carry_amount >= 0.5 and carry_kind != node.kind:
+	# 直接改 carry_kind 会把"木材"记成"矿石"，账就错了；扛着宝贝也先送回去
+	if (carry_amount >= 0.5 and carry_kind != node.kind) or not treasure.is_empty():
 		_back_to_base()
 		return
 	carry_kind = node.kind
@@ -323,12 +416,14 @@ func command_move(pos: Vector2) -> void:
 	super(pos)            # 先走过去
 	state = State.IDLE    # 手动移动会打断采集
 	node_target = null
+	fetch_target = null
 
 func command_stop() -> void:
 	_leave_work()
 	super()
 	state = State.IDLE
 	node_target = null
+	fetch_target = null
 
 ## 只有闲着的农民才给队友让路（采集/搬运中的不动）。
 ## 守线的工人也让：工位就在门口，出门的搭档常从这儿过，不让就两人顶死；让完自己走回工位
@@ -355,8 +450,8 @@ func set_deliver_to(b: Building) -> void:
 			_repath(_depot())
 		return
 	if state == State.TO_BASE:
-		_repath(b)
-	elif carry_amount >= carry_cap() or (state == State.IDLE and carry_amount >= 0.5):
+		_repath(_depot())
+	elif carry_amount >= carry_cap() or (state == State.IDLE and (carry_amount >= 0.5 or not treasure.is_empty())):
 		_back_to_base()    # 闲着手里还有半车货（守线工人被叫走时扛着的成品）：也去交，不然一直攥在手里不入账
 
 ## 开局自动派活
@@ -416,6 +511,10 @@ func _on_stuck() -> void:
 			var b := _depot()
 			if b != null:
 				_repath(b)
+		State.FETCH:
+			if is_instance_valid(fetch_target):
+				_path = _find_path(fetch_target.position)
+				_path_idx = 0
 		State.OPERATE:
 			if not is_instance_valid(work_at):
 				return
@@ -450,7 +549,7 @@ func _on_stuck() -> void:
 ## 加工厂故意不参与自动挑选：以前"有熔炉就一定送熔炉"，结果木材全变木板，
 ## 造农民要的 30 木永远攒不出来。现在只有玩家点名，原料才进加工线。
 func _depot() -> Building:
-	if deliver_to != null and is_instance_valid(deliver_to) and deliver_to.team == 0:
+	if deliver_to != null and is_instance_valid(deliver_to) and deliver_to.team == 0 and (treasure.is_empty() or not deliver_to.is_processor()):
 		return deliver_to
 	# 自动：在仓库和基地里挑最近的——仓库盖得远就没意义了
 	return _store()
@@ -510,7 +609,9 @@ func _art_pose() -> String:
 		return "act" if sin(anim_t * 0.9) > 0.0 else "idle"
 	if _working_line():
 		return "act" if sin(anim_t * (0.9 if work_at.kind == "smelter" else 1.5)) > 0.0 else "idle"
-	if carry_amount > 0.5 and moving:
+	if state == State.FETCH and _pick_t > 0.0:
+		return "act"    # 弯腰扛
+	if (carry_amount > 0.5 or not treasure.is_empty()) and moving:
 		return "carry"
 	return "idle"
 
@@ -530,7 +631,10 @@ func _art_extra(feet: Vector2, h: float) -> void:
 		# 脚下橙点 = 加工线工人
 		Art.ellipse(self, feet + Vector2(0, 1), 4.0, Color(0.2, 0.15, 0.1))
 		Art.ellipse(self, feet + Vector2(0, 1), 3.0, Color(1.0, 0.62, 0.2))
-	if carry_amount > 0.5:
+	if not treasure.is_empty():
+		# 扛着宝箱 / 遗物：顶在头上（比资源大一圈，远远就看得出谁扛着宝贝）
+		Treasure.draw_icon(self, treasure, feet - Vector2(-_face * 1.0, h - 3.0) + _head_off, 15.0)
+	elif carry_amount > 0.5:
 		var item := "items/" + carry_kind if Art.has("items/" + carry_kind) else "items/ore"
 		var top := feet - Vector2(-_face * 1.0, h - 2.0) + _head_off    # 跟着走路一颠一颠
 		Art.draw(self, item, top, 10.0)

@@ -11,6 +11,7 @@ var GRID_W := 40              # 1280 / 32
 var GRID_H := 23              # 720 / 32 向上取整
 
 enum T { EMPTY, SHALLOW, DEEP, CLIFF, FOREST, TREE, WOODS, ORE }
+const SHALLOW_COST := 3.0
 
 var grid: Array = []          # grid[y * GRID_W + x] = 地形类型 int
 ## 建筑/工地占格（引用计数，和地形类型分开存）：>0 就挡路，A* 绕着房子走，别再直线穿墙顶死
@@ -77,6 +78,8 @@ func set_cell(c: Vector2i, type: int) -> void:
 	var i := c.y * GRID_W + c.x
 	grid[i] = type
 	_sync(c)
+	# 浅滩能走但慢：寻路按 3 倍代价算，有桥就绕桥，绕太远才趟水
+	_astar.set_point_weight_scale(c, SHALLOW_COST if type == T.SHALLOW else 1.0)
 
 ## 格子的阻挡状态 = 地形挡路 或 有建筑压着；和 A* 同步并维护阻挡格计数
 func _sync(c: Vector2i) -> void:

@@ -200,6 +200,10 @@ func _drop_site() -> void:
 
 ## ---------- 绘制：KR 小人（橙色工装 + 黄安全帽 + 大锤） ----------
 ## ---------- 贴图版 ----------
+## 疾风靴：工程师也跑得快
+func _terrain_speed_factor() -> float:
+	return super() * Relic.speed_mult()
+
 func _art_key() -> String:
 	return "engineer"
 

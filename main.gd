@@ -32,8 +32,12 @@ var _wave_mgr: WaveManager
 var base: Building
 var hive: Building                 # 第一个巢穴（兼容老代码/测试）；全部巢穴在 hives
 var hives: Array = []
-var roads: Array = []              # 每个巢穴一条行军土路（点从主城端排到巢穴端），和 hives 一一对应
+var roads: Array = []              # 行军土路（点从主城端排到巢穴端）：前几条和 hives 一一对应，后面是分叉出去的岔路
+var road_hive: Array = []          # roads[i] 属于第几个巢穴（岔路和主路同一个巢穴，怪出巢随机挑一条）
 var camps: Array = []              # Goo 据点（随机图上守着富矿的野怪小窝，见 camp.gd）；拆不拆不影响胜负
+var wheels: Array = []             # 水车：每 0.5 秒给附近的熔炉 / 木工台重新分一次（_update_power）
+var fog: Fog = null                # 战争迷雾（随机图才有；--nofog 关掉）
+var _power_t := 0.0
 var classic := false               # 经典固定图（--test / --classic）：测试断言用的老坐标
 var map_seed := 0
 var layout := {}                   # 随机图布局（MapGen.generate 的结果）
@@ -81,6 +85,7 @@ var _rally_i := 0            # 新兵在兵营前排队的序号     # 右键落
 func _ready() -> void:
 	add_to_group("game")
 	Tech.reset()    # 科技是全局静态的：开新局清空
+	Relic.reset()   # 遗物也是
 	randomize()
 	var args := OS.get_cmdline_user_args()
 	classic = "--test" in args or "--classic" in args
@@ -118,6 +123,15 @@ func _on_building_built(b: Building) -> void:
 		warehouses_list.append(b)
 	elif b.kind == "smelter" or b.kind == "workshop":
 		processors_list.append(b)
+		_update_power()
+	elif b.kind == "waterwheel":
+		wheels.append(b)
+		_update_power()
+	elif b.kind == "outpost":
+		# 前哨扎下来：旁边的废墟清掉，Goo 再也回不来
+		for r in get_tree().get_nodes_in_group("buildings"):
+			if r is Ruins and not r.is_queued_for_deletion() and r.position.distance_to(b.position) < Ruins.OUTPOST_R:
+				r.queue_free()
 func _build_camera() -> void:
 	cam = Camera2D.new()
 	cam.position = Vector2(W / 2.0, H / 2.0) if classic else base.position + Vector2(0, 60)
@@ -144,6 +158,28 @@ func _build_map() -> void:
 
 	# 开局 1 名工程师，负责建造
 	_spawn_engineer(base.position + Vector2(90.0, 40.0))
+	if not classic and not "--nofog" in OS.get_cmdline_user_args():
+		_build_fog()
+
+## 战争迷雾：开局就知道主城周围、土路沿线（怪从哪来）和巢穴，别处得派人去探
+func _build_fog() -> void:
+	fog = Fog.new()
+	add_child(fog)
+	fog.setup(W, H)
+	fog.reveal(base.position, Fog.START_BASE)
+	for rd in roads:
+		fog.reveal_road(rd, Fog.START_ROAD)
+	for h in hives:
+		fog.reveal(h.position, Fog.START_HIVE)
+	fog.refresh()
+
+## 现在看不看得见（没迷雾 = 都看得见）
+func fog_visible(p: Vector2) -> bool:
+	return fog == null or fog.visible_at(p)
+
+## 去没去过
+func fog_explored(p: Vector2) -> bool:
+	return fog == null or fog.explored_at(p)
 
 ## 经典固定图（测试用）：1280×720，基地左下、巢穴右上，三片矿三片树，资源点不占格
 func _build_classic_map() -> void:
@@ -153,6 +189,7 @@ func _build_classic_map() -> void:
 	hive = _build_mgr.add_building("hive", Vector2(1110, 160), 1)
 	hives = [hive]
 	roads = [ArtData.ROAD if Art.has("map/map") and not ArtData.ROAD.is_empty() else DIRT_PATH]
+	road_hive = [0]
 	for c in [Vector2(430, 470), Vector2(720, 260), Vector2(960, 560)]:
 		for i in 3:
 			_add_res("ore", c + Vector2((i - 1) * 46.0, 0.0 if i == 1 else 36.0))
@@ -200,6 +237,17 @@ func _build_random_map() -> void:
 		hives.append(_build_mgr.add_building("hive", hp, 1))
 	hive = hives[0]
 	roads = layout.roads
+	road_hive = layout.get("road_hive", range(roads.size()))
+	# 河：深水挡路；浅滩能趟（慢，寻路尽量走桥）；桥就是平地。桥画在地面装饰那一层
+	for i in gw * gh:
+		var v: int = layout.cells[i]
+		if v == MapGen.C_WATER:
+			terrain.set_cell(Vector2i(i % gw, i / gw), Terrain.T.DEEP)
+		elif v == MapGen.C_SHALLOW:
+			terrain.set_cell(Vector2i(i % gw, i / gw), Terrain.T.SHALLOW)
+	var ra := RiverArt.new()
+	add_child(ra)
+	ra.setup(layout.get("bridges", []), layout.get("river", {}), layout.get("fords", []))
 	# 能砍的树（每棵 100 木）和矿堆（每堆 250 矿），都占格挡路
 	for p in layout.trees:
 		var n := _add_res("wood", p, true)
@@ -211,6 +259,11 @@ func _build_random_map() -> void:
 	camps = []
 	for cd in layout.get("camps", []):
 		add_camp(cd.pos, int(cd.tier), cd.rich)
+	# 宝箱 / 遗物：野地里散几件，据点窝边藏几件（选农民右键去扛）
+	for cd in layout.get("chests", []):
+		spawn_treasure({"kind": "chest", "loot": cd.loot}, cd.pos)
+	for rd in layout.get("relics", []):
+		spawn_treasure({"kind": "relic", "relic": rd.id}, rd.pos)
 	_build_minimap_img()
 
 ## 放一个 Goo 据点：窝、守军，rich 里每个点一堆富矿（随机图开局用；测试也拿它在经典图上摆）
@@ -236,8 +289,86 @@ func on_camp_destroyed(c: Camp) -> void:
 	var left := c.alive_guards().size()
 	if left == 0:
 		_camp_spots.erase(c.position)    # 守军早清光了：这条横幅就是"清干净了"
+	# 窝塌成一堆废墟：没人看着 150 秒后 Goo 回来重新占；旁边盖个前哨就永远是你的
+	var r := Ruins.new()
+	r.setup_ruins(c.tier)
+	r.loot_mult = c.loot_mult * 0.5
+	r.position = c.position
+	_build_mgr.add_child(r)
 	_hud_msg("拆掉 Goo 据点！缴获 %d 矿 %d 木%s" % [int(lt.ore), int(lt.wood),
-		"——还剩 %d 只守军，清掉才能采富矿" % left if left > 0 else "——富矿旁盖个仓库，就是你的分矿"])
+		"——还剩 %d 只守军，清掉才能采富矿" % left if left > 0 else "——留兵守着或在废墟旁盖前哨（工程师 F），不然 %d 秒后 Goo 回来" % int(Ruins.REOCCUPY)])
+
+## 废墟快被 Goo 重新占了：喊一声
+func on_ruins_warning(r: Ruins) -> void:
+	_hud_msg("Goo 还有 %d 秒回来占窝！派兵守着，或在废墟旁盖前哨" % int(Ruins.WARN_AT))
+
+## 没人看着的废墟：Goo 回来了——窝立起来、守军刷满，背后那片富矿又被看住（再拆缴获按比例减半）
+func reoccupy(r: Ruins) -> Camp:
+	if not is_instance_valid(r) or r.is_queued_for_deletion():
+		return null
+	var pos := r.position
+	var t := r.tier
+	var lm := r.loot_mult
+	r.queue_free()
+	var c := add_camp(pos, t)
+	c.loot_mult = lm
+	c.spotted = true
+	_hud_msg("Goo 回来重新占了据点！守军刷满了，再拆只缴获 %s" % economy.cost_text(c.loot()))
+	return c
+
+## 地上放一件宝箱 / 遗物（开局刷的、扛着的农民死了掉的）
+func spawn_treasure(d: Dictionary, pos: Vector2) -> Treasure:
+	var t := Treasure.make(d)
+	t.position = open_point(pos)
+	add_child(t)
+	return t
+
+## 农民扛回收货点：宝箱开出资源，遗物永久生效
+func claim_treasure(d: Dictionary, at: Vector2, _by: Node2D = null) -> void:
+	if d.get("kind", "") == "relic":
+		var id: String = d.get("relic", "")
+		if not Relic.DEFS.has(id) or Relic.has(id):
+			return
+		Relic.owned[id] = true
+		_apply_relic(id)
+		Fx.spawn(self, "floater", at + Vector2(0, -70), {"life": 2.2, "text": "遗物 · " + Relic.relic_name(id), "color": Relic.DEFS[id].color})
+		_hud_msg("遗物到手：%s——%s（永久生效）" % [Relic.relic_name(id), Relic.DEFS[id].tip])
+		return
+	var lt: Dictionary = d.get("loot", {})
+	economy.gain(lt)
+	Fx.spawn(self, "floater", at + Vector2(0, -70), {"life": 1.8, "text": "宝箱 +" + Treasure.loot_text(lt), "color": Color(1.0, 0.86, 0.35)})
+	_hud_msg("宝箱开了！%s 入库" % Treasure.loot_text(lt))
+
+## 遗物拿到手的那一刻：要改现有东西的在这里改（别的都是用到时现算）
+func _apply_relic(id: String) -> void:
+	if id == "relic_heart":
+		for b in get_tree().get_nodes_in_group("buildings"):
+			if is_instance_valid(b) and b.team == 0:
+				b.max_hp *= Relic.HEART_MULT
+				b.hp *= Relic.HEART_MULT    # 按比例：满血的还是满血
+
+## 水车分活：每条加工线找离它最近、还没带满（2 条）的水车
+func _update_power() -> void:
+	wheels = wheels.filter(func(w): return is_instance_valid(w) and not w.is_queued_for_deletion() and w.hp > 0.0)
+	processors_list = processors_list.filter(func(b): return is_instance_valid(b) and not b.is_queued_for_deletion())
+	for p in processors_list:
+		p.powered_by = null
+	for w in wheels:
+		w.powering = []
+	var pairs: Array = []
+	for p in processors_list:
+		for w in wheels:
+			var d: float = p.position.distance_to(w.position)
+			if d <= Building.WHEEL_R:
+				pairs.append([d, p, w])
+	pairs.sort_custom(func(a, b): return a[0] < b[0])
+	for pr in pairs:
+		var p: Building = pr[1]
+		var w: Building = pr[2]
+		if p.powered_by != null or w.powering.size() >= Building.WHEEL_MAX:
+			continue
+		p.powered_by = w
+		w.powering.append(p)
 
 ## 玩家的人头一回走近某个据点：横幅说清楚这是什么、怎么打（每个据点只提示一次）；
 ## 窝拆了、守军也死光 = 清干净了，再喊一声富矿能采了
@@ -262,6 +393,8 @@ func _check_camp_spotted(delta: float) -> void:
 		for u in get_tree().get_nodes_in_group("player_units"):
 			if u.position.distance_to(c.position) < Camp.SPOT_R:
 				c.spotted = true
+				if fog != null:
+					fog.reveal(c.position, Camp.NO_BUILD_R)    # 远远望见了窝（守军还得走近才看得清）
 				_hud_msg("发现 Goo 据点！%d 只守军看着一片富矿（每堆 600）——带兵清掉，拆窝缴获 %s" % [
 					c.alive_guards().size(), economy.cost_text(c.loot())])
 				return
@@ -278,7 +411,8 @@ func _build_minimap_img() -> void:
 			minimap_img.set_pixel(clampi(int(p.x / Terrain.CELL), 0, gw - 1), clampi(int(p.y / Terrain.CELL), 0, gh - 1), MINI_ROAD)
 	minimap_tex = ImageTexture.create_from_image(minimap_img)
 
-const MINI_COLORS := [Color(0.49, 0.65, 0.16), Color(0.2, 0.42, 0.12), Color(0.12, 0.3, 0.08), Color(0.95, 0.78, 0.25), Color(1.0, 0.95, 0.55)]
+const MINI_COLORS := [Color(0.49, 0.65, 0.16), Color(0.2, 0.42, 0.12), Color(0.12, 0.3, 0.08), Color(0.95, 0.78, 0.25), Color(1.0, 0.95, 0.55),
+	Color(0.22, 0.47, 0.72), Color(0.45, 0.72, 0.8), Color(0.6, 0.42, 0.24)]
 const MINI_ROAD := Color(0.88, 0.72, 0.35)
 
 ## 树砍光 / 矿采空：小地图上那格变回草地
@@ -291,10 +425,21 @@ func add_stump(pos: Vector2) -> void:
 	if decor_layer != null:
 		decor_layer.add_item("decor/stump", pos, randf() < 0.5)
 
-## 某个巢穴的行军路线
+## 某个巢穴的行军路线：有岔路就随机挑一条（每只怪出巢时各挑各的）
 func road_for(h: Node2D) -> Array:
+	var opts := roads_of(h)
+	return opts[randi() % opts.size()] if not opts.is_empty() else road()
+
+## 某个巢穴的全部路线（主路 + 岔路）
+func roads_of(h: Node2D) -> Array:
 	var i := hives.find(h)
-	return roads[i] if i >= 0 and i < roads.size() else road()
+	var out: Array = []
+	if i < 0:
+		return out
+	for k in roads.size():
+		if int(road_hive[k] if k < road_hive.size() else k) == i:
+			out.append(roads[k])
+	return out
 
 ## 点到树林/矿里（不能站人）→ 最近的空地。经典图看手绘地图的树林，随机图看地形格子
 func open_point(p: Vector2) -> Vector2:
@@ -347,6 +492,10 @@ func _process(delta: float) -> void:
 		_wave_mgr.update(delta)
 		_update_respawn(delta)
 		_check_camp_spotted(delta)
+		_power_t -= delta
+		if _power_t <= 0.0:
+			_power_t = 0.5
+			_update_power()
 		_check_end()
 	_update_labels()
 	_update_panel()
@@ -791,8 +940,8 @@ func commands() -> Array:
 	if not bs.is_empty() and not _has_units_selected():
 		var b: Building = bs[0]
 		match b.kind:
-			"base":
-				out.append(_cmd_entry("worker", 0, "农民", "worker", Economy.COST_WORKER, "采矿、伐木、搬运（训练 %d 秒）" % int(TRAIN.worker.time)))
+			"base", "outpost":
+				out.append(_cmd_entry("worker", 0, "农民", "worker", Economy.COST_WORKER, "采矿、伐木、搬运、捡宝箱（训练 %d 秒）" % int(TRAIN.worker.time)))
 			"barracks":
 				out.append(_cmd_entry("sword", 0, "剑士", "sword", Economy.COST_SWORD, "近战前排，护甲高（训练 %d 秒）" % int(TRAIN.sword.time)))
 				out.append(_cmd_entry("archer", 1, "弓手", "archer", Economy.COST_ARCHER, "远程输出，躲在剑士后面（训练 %d 秒）" % int(TRAIN.archer.time)))
@@ -836,6 +985,10 @@ func commands() -> Array:
 			"盖在土路边：塔上弓手自动射路过的怪（射程 %d、每箭 %d），先打跑在最前面的。普通 Goo 和窜窜打不着塔，岩壳会来拆" % [int(t1.range), int(t1.dmg + Tech.arrow_bonus())]))
 		out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌就打"))
 		out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
+		out.append(_cmd_entry("waterwheel", 7, "水车", "waterwheel", Economy.COST_WATERWHEEL,
+			"贴着河岸盖，轮子泡在深水里：%d 以内的熔炉 / 木工台（最多 %d 座）一批快 30%%" % [int(Building.WHEEL_R), Building.WHEEL_MAX]))
+		out.append(_cmd_entry("outpost", 8, "前哨", "outpost", Economy.COST_OUTPOST,
+			"盖在拆掉的 Goo 据点废墟旁：Goo 再也回不来；能交货、能造农民，塔上一名弓手（射程 %d）" % int(Building.OUTPOST_TOWER.range)))
 		return out
 	if all_workers:
 		out.append(_cmd_entry("mine", 0, "采矿", "ore", {}, "去最近的矿堆采矿"))
@@ -876,7 +1029,7 @@ func run_command(id: String) -> void:
 			_on_sword_pressed()
 		"archer":
 			_on_archer_pressed()
-		"warehouse", "smelter", "workshop", "barracks", "tower":
+		"warehouse", "smelter", "workshop", "barracks", "tower", "waterwheel", "outpost":
 			_start_placing(id)
 		"upgrade":
 			_upgrade_selected_tower()
@@ -942,17 +1095,21 @@ func _pick_at(world: Vector2, include_res := false) -> Vector2:
 	var tree := get_tree()
 	for u in tree.get_nodes_in_group("units"):
 		var h: float = Unit.ART_H.get(u._art_key(), 0.0)
-		if h <= 0.0:
+		if h <= 0.0 or not u.visible:
 			continue
 		var d: Vector2 = world - u.position
 		if absf(d.x) < u.radius * 1.4 and d.y > -h + u.radius * 0.4 and d.y < u.radius * 0.9 and u.position.y > best_y:
 			best = u
 			best_y = u.position.y
-	for g in (["buildings", "sites", "res_nodes"] if include_res else ["buildings"]):
+	for g in (["buildings", "sites", "res_nodes", "treasures"] if include_res else ["buildings", "treasures"]):
 		for b in tree.get_nodes_in_group(g):
+			if not b.visible:
+				continue
 			var d: Vector2 = world - b.position
 			var hit := false
-			if b is ResNode:
+			if b is Treasure:
+				hit = absf(d.x) < 18.0 and d.y > -30.0 and d.y < 8.0
+			elif b is ResNode:
 				hit = absf(d.x) < 22.0 and d.y > -56.0 and d.y < 14.0
 			else:
 				var top: float = b.size * (2.2 if b.kind == "tower" else 1.5)    # 箭塔又高又瘦
@@ -999,15 +1156,21 @@ func _point_select(pos: Vector2) -> void:
 			b.selected = true
 			selected.append(b)
 			return
+	# 宝箱 / 遗物：看看里面是什么
+	var tr := _treasure_at(pos)
+	if tr != null:
+		inspected = tr
+		tr.selected = true
+		return
 	# 也不是建筑 → 看是不是点了敌人（只读属性，不能下指令）
 	for e in get_tree().get_nodes_in_group("enemies"):
-		if pos.distance_to(e.position) < 18.0:
+		if e.visible and pos.distance_to(e.position) < 18.0:
 			inspected = e
 			e.selected = true
 			return
-	# 敌方建筑（巢穴 / 据点）：也只看属性
+	# 敌方建筑（巢穴 / 据点 / 废墟）：也只看属性
 	for b in get_tree().get_nodes_in_group("buildings"):
-		if b.team != 0 and pos.distance_to(b.position) < b.size * 0.6:
+		if b.team != 0 and b.visible and pos.distance_to(b.position) < b.size * 0.6:
 			inspected = b
 			b.selected = true
 			return
@@ -1041,6 +1204,9 @@ func _issue_command(pos: Vector2) -> void:
 	var n_feed := 0
 	var n_full := 0
 	var move_idx := 0    # 纯移动的单位排队领环形散点，别全挤向同一个坐标
+	if target is Treasure:
+		_order_fetch(target)
+		return
 	for u in selected:
 		if not (u is Unit) or not is_instance_valid(u):
 			continue    # 选中的是建筑（基地/兵营）：建筑不会走路，跳过
@@ -1098,6 +1264,33 @@ func _issue_command(pos: Vector2) -> void:
 		if nw > 0:
 			_hud_msg("%d 个农民改送%s：%s" % [nw, depot.display_name, _depot_result(depot)])
 
+## 右键宝箱 / 遗物：选中的农民里最近的那个去扛（别的农民手上的活不动）；兵跟过去护着
+func _order_fetch(t: Treasure) -> void:
+	var best: Worker = null
+	var best_d := INF
+	for w in _selected_workers():
+		var d: float = w.position.distance_to(t.position)
+		if d < best_d:
+			best_d = d
+			best = w
+	var move_idx := 0
+	for u in selected:
+		if u is Unit and is_instance_valid(u) and not (u is Worker):
+			u.cancel_orders()
+			u.command_move(_spread_pos(move_idx + 1, t.position))
+			move_idx += 1
+	if best == null:
+		if move_idx == 0:
+			_hud_msg("选农民右键%s才能扛回去" % t.title())
+		return
+	best.cancel_orders()
+	if not best.command_fetch(t):
+		_hud_msg("这个农民手上已经扛着一件了：先送回去")
+		return
+	var where := "开箱" if t.kind == "chest" else "生效"
+	_hud_msg("农民去扛%s：扛回基地 / 仓库 / 前哨就%s%s" % [t.title(), where,
+		"——小心，Goo 守军看着呢" if t.guarded() else ""])
+
 ## 送进这个建筑变成什么账（给玩家看，别让人盲猜）
 func _depot_result(b: Building) -> String:
 	match b.kind:
@@ -1105,7 +1298,7 @@ func _depot_result(b: Building) -> String:
 			return "矿石卸进料场，等工人炼成铁锭（木材照样存原料）"
 		"workshop":
 			return "木材卸进料场，等工人锯成木板（矿石照样存原料）"
-		"warehouse":
+		"warehouse", "outpost":
 			return "原样入库，攒着造农民"
 	return "原样入库"
 
@@ -1221,13 +1414,17 @@ func _thing_at(pos: Vector2) -> Node2D:
 	var best: Node2D = null
 	var best_d := 20.0
 	for e in get_tree().get_nodes_in_group("enemies"):
+		if not e.visible:
+			continue    # 迷雾里看不见的怪点不中
 		var d := pos.distance_to(e.position)
 		if d < best_d:
 			best_d = d
 			best = e
 	if best:
 		return best
-	best = null
+	best = _treasure_at(pos)
+	if best:
+		return best
 	best_d = 26.0
 	for n in get_tree().get_nodes_in_group("res_nodes"):
 		var d := pos.distance_to(n.position)
@@ -1237,9 +1434,22 @@ func _thing_at(pos: Vector2) -> Node2D:
 	if best:
 		return best
 	for b in get_tree().get_nodes_in_group("buildings"):
-		if b.team == 1 and pos.distance_to(b.position) < b.size:
+		if b.team == 1 and b.visible and pos.distance_to(b.position) < b.size:
 			return b
 	return null
+
+## 点中的宝箱 / 遗物（迷雾里没探过的不算）
+func _treasure_at(pos: Vector2) -> Treasure:
+	var best: Treasure = null
+	var best_d := 24.0
+	for t in get_tree().get_nodes_in_group("treasures"):
+		if not is_instance_valid(t) or t.is_queued_for_deletion() or not t.visible:
+			continue
+		var d := pos.distance_to(t.position + Vector2(0, -8))
+		if d < best_d:
+			best_d = d
+			best = t
+	return best
 
 ## 鼠标下是不是守线工人（art 模式下 pos = 点中的那个人的脚底；方块模式看离鼠标多近）
 func _operator_building_at(world: Vector2, pos: Vector2) -> Building:
@@ -1252,7 +1462,7 @@ func _operator_building_at(world: Vector2, pos: Vector2) -> Building:
 
 ## 右键扫到的己方"收货点"：基地 / 仓库 / 熔炉 / 木工台。
 ## 兵营不算——那是出兵的地方，不是货场。
-const DEPOT_KINDS := ["base", "warehouse", "smelter", "workshop"]
+const DEPOT_KINDS := ["base", "warehouse", "smelter", "workshop", "outpost"]
 func _friendly_depot_at(pos: Vector2) -> Building:
 	var best: Building = null
 	var best_d := INF
@@ -1355,8 +1565,8 @@ func _on_worker_pressed() -> void:
 	if game_state != "play":
 		return
 	var home := _selected_building()
-	if home == null or home.kind != "base":
-		_hud_msg("先点基地才能造农民")
+	if home == null or not (home.kind in ["base", "outpost"]):
+		_hud_msg("先点基地（或前哨）才能造农民")
 		return
 	if _player_workers().size() + queued_count("worker") >= WORKER_CAP:
 		_hud_msg("农民已到上限（%d），够用就好" % WORKER_CAP)
@@ -1402,7 +1612,7 @@ func on_trained(b: Building, kind: String) -> void:
 		return
 	if kind == "worker":
 		var w := Worker.new()
-		w.position = b.position + Vector2(60, 40)
+		w.position = open_point(b.position + Vector2(60, 40))
 		add_child(w)
 		if is_instance_valid(b.rally_node) and b.rally_node is ResNode:
 			w.command_gather(b.rally_node)
@@ -1536,6 +1746,10 @@ func _place_name(kind: String) -> String:
 			return "兵营"
 		"tower":
 			return "箭塔"
+		"waterwheel":
+			return "水车（贴着河岸，轮子朝着深水）"
+		"outpost":
+			return "前哨（盖在 Goo 据点废墟旁）"
 	return "设施"
 
 func _on_sword_pressed() -> void:
@@ -1564,6 +1778,10 @@ func _selected_info_text() -> String:
 		return ""
 	if list.size() == 1:
 		var t = list[0]
+		if t is Treasure:
+			return t.info_text(economy)
+		if t is Ruins:
+			return "%s   %s\n旁边盖前哨（工程师 F）= 永久占下 · Goo 回来占的窝再拆只缴获一半" % [t.display_name, t.status_text()]
 		if t is Building:
 			var extra := ""
 			if t.has_tower():
@@ -1580,7 +1798,21 @@ func _selected_info_text() -> String:
 				if t.waiting_pop:
 					txt += " · 人口满了，等空位"
 				var dn := Tech.done_names(t.kind)
-				txt += " · 已研究：%s" % "、".join(dn) if not dn.is_empty() else " · 第二排 A S D F 研究升级"
+				if not dn.is_empty():
+					txt += " · 已研究：%s" % "、".join(dn)
+				elif not Tech.ids_at(t.kind).is_empty():
+					txt += " · 第二排 A S D F 研究升级"
+			if t.kind == "base" and not Relic.owned_names().is_empty():
+				txt += "\n遗物：%s" % "、".join(Relic.owned_names())
+			elif t.kind == "outpost":
+				txt += "\n农民能就近交货 · 能造农民 · 废墟清掉了，Goo 回不来"
+			elif t.kind == "waterwheel":
+				var names: Array = []
+				for pb in t.powering:
+					if is_instance_valid(pb):
+						names.append(pb.display_name)
+				txt = "%s   血量 %.0f/%.0f · 带动 %d/%d 条加工线%s\n%d 以内的熔炉 / 木工台一批快 30%%（离得近的先带）" % [t.display_name, t.hp, t.max_hp,
+					names.size(), Building.WHEEL_MAX, "（%s）" % "、".join(names) if not names.is_empty() else "", int(Building.WHEEL_R)]
 			if t is Camp:
 				var c: Camp = t
 				var cnt := {}
@@ -1598,8 +1830,9 @@ func _selected_info_text() -> String:
 				txt += "\n敌人老窝：每波怪从这里出来，拆掉所有巢穴就赢"
 			if t.is_processor():
 				var r: Dictionary = t.recipe()
-				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %s 秒\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,
-					r.n, Economy.KIND_NAME[r.in], r.n, Economy.KIND_NAME[r.out], Building.fmt_secs(t.batch_time()), t.status_text(), "开" if t.self_fetch else "关"]
+				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %s 秒%s\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,
+					r.n, Economy.KIND_NAME[r.in], r.n, Economy.KIND_NAME[r.out], Building.fmt_secs(t.batch_time()),
+					"（水车带动 快 30%）" if t.powered() else "", t.status_text(), "开" if t.self_fetch else "关"]
 			return txt
 		var u: Unit = t
 		var atk_txt := "—" if u.atk <= 0.0 else "%.0f（%.1f秒/下）" % [u.atk, u.atk_cd]
@@ -1787,6 +2020,14 @@ func _draw() -> void:
 	for s in selected:
 		if s is Building and is_instance_valid(s) and s.has_tower():
 			_range_ring(s.position, s.tower_stats().range)
+		# 水车：带动范围 + 连着它带的线；加工线：连到带它的水车
+		if s is Building and is_instance_valid(s) and s.kind == "waterwheel":
+			_wheel_ring(s.position)
+			for pb in s.powering:
+				if is_instance_valid(pb):
+					_dashed(s.position, pb.position, Color(0.55, 0.9, 1.0, 0.85))
+		elif s is Building and is_instance_valid(s) and s.is_processor() and s.powered():
+			_dashed(s.position, s.powered_by.position, Color(0.55, 0.9, 1.0, 0.85))
 	# ---- 集结点 / 排队路点 / 巡逻线（只画选中的；路点只画一个代表，多选时别画成一团乱麻） ----
 	var drew_wp := false
 	for s in selected:
@@ -1822,15 +2063,32 @@ func _draw() -> void:
 		var tint := Color(0.6, 1.0, 0.6, 0.6) if ok else Color(1.0, 0.45, 0.4, 0.6)
 		if _placing_kind == "tower":
 			_range_ring(p, Building.TOWER_LV[1].range, ok)    # 放塔时就看得见能罩住哪段路
+		elif _placing_kind == "waterwheel":
+			_wheel_ring(p, ok)    # 放水车：看得见能带动哪几座熔炉 / 木工台
+			for pb in processors_list:
+				if is_instance_valid(pb) and pb.position.distance_to(p) <= Building.WHEEL_R:
+					_dashed(p, pb.position, Color(0.55, 0.9, 1.0, 0.7))
+		elif _placing_kind == "outpost":
+			# 放前哨：废墟周围一圈能放的范围
+			for r in get_tree().get_nodes_in_group("buildings"):
+				if r is Ruins and r.position.distance_to(p) < 1400.0:
+					_range_ring(r.position, Ruins.OUTPOST_R, ok)
 		if Art.has("buildings/" + _placing_kind):
 			var sz: float = Building.size_of(_placing_kind)    # 和盖好后一样大
 			Art.ellipse(self, p + Vector2(0, sz * 0.38), sz * 0.95, Color(tint, 0.35))
-			Art.draw_w(self, "buildings/" + _placing_kind, p + Vector2(0, sz * 0.42), Building.art_w(_placing_kind, sz), tint)
+			Art.draw_w(self, "buildings/" + _placing_kind, p + Vector2(0, sz * 0.42), Building.art_w(_placing_kind, sz), tint,
+				_placing_kind == "waterwheel" and Building.wheel_flip_at(p))
 		else:
 			var half: float = 30.0 * Building.SIZE_SCALE    # 工地半宽
 			var r := Rect2(p - Vector2(half, half), Vector2(half * 2.0, half * 2.0))
 			draw_rect(r, Color(0.15, 0.6, 0.55, 0.5))
 			draw_rect(r, Color(1, 1, 1, 0.6), false, 1.0)
+
+## 水车带动范围：蓝绿色的圈
+func _wheel_ring(c: Vector2, ok := true) -> void:
+	var col := Color(0.45, 0.95, 0.85) if ok else Color(1.0, 0.45, 0.4)
+	draw_circle(c, Building.WHEEL_R, Color(col, 0.07))
+	draw_arc(c, Building.WHEEL_R, 0.0, TAU, 96, Color(col, 0.75), 2.0 / cam.zoom.x)
 
 ## 射程圈（选中箭塔 / 放塔预览）：淡色实心 + 描边，画在地上、单位下面
 func _range_ring(c: Vector2, r: float, ok := true) -> void:

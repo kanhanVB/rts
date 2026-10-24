@@ -19,6 +19,7 @@ var guards: Array = []
 var spotted := false
 var _reinforce_t := REINFORCE
 var _looted := false
+var loot_mult := 1.0        # Goo 回来重新占的窝：缴获按比例打折（见 ruins.gd）
 
 ## 定档（add_child 之前调）
 func setup_camp(t: int) -> void:
@@ -32,7 +33,13 @@ func garrison() -> Array:
 	return TIERS[tier].garrison
 
 func loot() -> Dictionary:
-	return TIERS[tier].loot
+	var lt: Dictionary = TIERS[tier].loot
+	if loot_mult == 1.0:
+		return lt
+	var out := {}
+	for k in lt:
+		out[k] = int(round(float(lt[k]) * loot_mult))
+	return out
 
 ## 守军（已死的剔掉）
 func alive_guards() -> Array:

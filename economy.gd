@@ -15,6 +15,8 @@ const COST_SWORD := {"ore": 20, "ingot": 15}
 const COST_ARCHER := {"ore": 20, "plank": 15}
 const COST_TOWER := {"ore": 40, "wood": 50}
 const COST_TOWER_UP := {"plank": 20, "ingot": 15}    # 升二级吃加工线的成品：塔防和经济绑在一起
+const COST_WATERWHEEL := {"wood": 50, "plank": 20}     # 河边水车：带动附近的熔炉 / 木工台
+const COST_OUTPOST := {"wood": 80, "ore": 60}          # 前哨：盖在 Goo 据点废墟旁，地盘永久归你
 
 var ore: float = 100.0
 var wood: float = 100.0
@@ -65,6 +67,19 @@ func add(kind: String, n: float) -> void:
 		"plank":
 			plank += n
 	_note(kind, n)
+
+## 白捡的一笔（宝箱、拆窝缴获）：直接入账，不算进产能速率
+func gain(loot: Dictionary) -> void:
+	for k in loot:
+		match k:
+			"ore":
+				ore += float(loot[k])
+			"wood":
+				wood += float(loot[k])
+			"ingot":
+				ingot += float(loot[k])
+			"plank":
+				plank += float(loot[k])
 
 func can_afford(cost: Dictionary) -> bool:
 	for k in cost:

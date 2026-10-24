@@ -659,6 +659,7 @@ func run() -> void:
 	await _aoe_tests()
 	await _camp_tests()
 	await _tech_tests()
+	await _explore_tests()
 
 	# 拆巢穴触发胜利
 	m.hive.take_damage(99999.0)
@@ -983,7 +984,12 @@ func _aoe_tests() -> void:
 			var v: int = cells[i]
 			if v == MapGen.C_TREE or v == MapGen.C_WOODS or v == MapGen.C_ORE or v == MapGen.C_RICH:
 				t.set_cell(Vector2i(i % gw, i / gw), Terrain.T.WOODS)
-		var good: bool = lay.base == Vector2(1600, 1024) and lay.hives.size() == 2 and lay.roads.size() == 2 and lay.ore.size() >= 6
+			elif v == MapGen.C_WATER:
+				t.set_cell(Vector2i(i % gw, i / gw), Terrain.T.DEEP)
+			elif v == MapGen.C_SHALLOW:
+				t.set_cell(Vector2i(i % gw, i / gw), Terrain.T.SHALLOW)
+		# 岔路：主路之外多出来的几条（整条从主城排到巢穴），road_hive 一一对应
+		var good: bool = lay.base == Vector2(1600, 1024) and lay.hives.size() == 2 and lay.roads.size() >= 2 and lay.road_hive.size() == lay.roads.size() and lay.ore.size() >= 6
 		var st: Vector2 = lay.base + Vector2(0, 60)
 		for hp in lay.hives:
 			if t.find_path(st, hp).is_empty():
@@ -1010,7 +1016,7 @@ func _aoe_tests() -> void:
 				if (v == MapGen.C_TREE or v == MapGen.C_ORE) and (Vector2(i % gw + 0.5, i / gw + 0.5) * MapGen.CELL).distance_to(cpos) < MapGen.CAMP_CLEAR_R:
 					camp_ok = false
 		t.free()
-		_check(good, "随机图 seed=%d：主城居中、2 巢穴、到巢穴和 %d 堆矿都走得通" % [sd, lay.ore.size()])
+		_check(good, "随机图 seed=%d：主城居中、2 巢穴 %d 条路、过河到巢穴和 %d 堆矿都走得通" % [sd, lay.roads.size(), lay.ore.size()])
 		_check(camp_ok, "随机图 seed=%d：%d 个 Goo 据点各守 6 堆富矿（共 %d，都在警戒圈里），不挨土路、窝边没树没普通矿、都走得到" % [sd, lay.camps.size(), n_rich])
 
 ## ---- Goo 据点（野怪小窝）：守军警戒 / 全窝一起上 / 拴绳回窝 / 回血 / 补兵 / 缴获 / 富矿 / 不许贴脸盖房 ----
@@ -1137,12 +1143,18 @@ func _camp_tests() -> void:
 		"拆据点缴获 150 矿 100 木（+%.0f / +%.0f）" % [d_ore, d_wood])
 	_check(not m._build_mgr.placement_error(spot - away * 200.0, "warehouse").contains("据点"), "据点拆了旁边就能盖房")
 	_check(rn.all(func(n): return n.guarded()), "窝拆了守军还活着：富矿还有人看着")
+	var ru: Ruins = _ruins_at(spot)
+	_check(ru != null and ru.tier == 2 and is_equal_approx(ru.loot_mult, 0.5) and ru.team == 2 and ru.hold == "guards" and is_equal_approx(ru.left, Ruins.REOCCUPY),
+		"窝塌成废墟（二档、Goo 回来占了再拆缴获减半）；守军还在 = 还是 Goo 的地盘，不倒计时（%s）" % ["没有废墟" if ru == null else ru.hold])
 	for g in gs2:
 		if is_instance_valid(g):
 			g.take_damage(99999.0)
 	bait2.queue_free()
 	await m.get_tree().create_timer(0.6).timeout
 	_check(rn.all(func(n): return not n.guarded()), "守军也清光：富矿没人看了")
+	_check(ru != null and is_instance_valid(ru) and ru.hold != "guards", "守军清光：废墟不再算 Goo 的地盘（%s）" % [ru.hold if ru != null and is_instance_valid(ru) else "没了"])
+	if ru != null and is_instance_valid(ru):
+		ru.queue_free()    # 别在后面的测试里倒计时到点、Goo 回来占窝
 	for n in rn:
 		n.queue_free()
 	for n in frozen:
@@ -1289,6 +1301,663 @@ func _tech_tests() -> void:
 	sw.queue_free()
 	ar.queue_free()
 	m._deselect_all()
+
+## ---- 地图和探索：岔路 / 河 / 桥 / 浅滩 / 宝箱遗物（随机图生成）；水车；捡宝；废墟和前哨；战争迷雾 ----
+func _explore_tests() -> void:
+	_explore_mapgen_tests()
+	await _wheel_tests()
+	await _treasure_tests()
+	await _outpost_tests()
+	await _fog_tests()
+
+func _explore_mapgen_tests() -> void:
+	var n_forks := 0
+	var n_camp_tr := 0
+	for sd in [3, 7, 11, 19]:
+		var lay: Dictionary = MapGen.generate(sd, 3200.0, 2048.0)
+		var gw: int = lay.gw
+		var cells: PackedByteArray = lay.cells
+		var t := Terrain.new()
+		t.setup(3200.0, 2048.0)
+		for i in cells.size():
+			var v: int = cells[i]
+			var cc := Vector2i(i % gw, i / gw)
+			if v == MapGen.C_TREE or v == MapGen.C_WOODS or v == MapGen.C_ORE or v == MapGen.C_RICH:
+				t.set_cell(cc, Terrain.T.WOODS)
+			elif v == MapGen.C_WATER:
+				t.set_cell(cc, Terrain.T.DEEP)
+			elif v == MapGen.C_SHALLOW:
+				t.set_cell(cc, Terrain.T.SHALLOW)
+		var st: Vector2 = lay.base + Vector2(0, 60)
+		# 岔路：每条都从主城走到自己那个巢穴；岔出去那段离主路够远（不是一条加宽的路）
+		var roads_ok: bool = lay.roads.size() <= lay.hives.size() + 2
+		for ri in lay.roads.size():
+			var rd: Array = lay.roads[ri]
+			var hp: Vector2 = lay.hives[lay.road_hive[ri]]
+			if rd[0].distance_to(lay.base) > 80.0 or rd[rd.size() - 1].distance_to(hp) > 80.0:
+				roads_ok = false
+			if ri >= lay.hives.size():
+				var main_rd: Array = lay.roads[lay.road_hive[ri]]
+				var far := 0.0
+				for q in rd:
+					var dmin := INF
+					for q2 in main_rd:
+						dmin = minf(dmin, q.distance_to(q2))
+					far = maxf(far, dmin)
+				if far < 180.0:
+					roads_ok = false
+		n_forks += lay.roads.size() - lay.hives.size()
+		_check(roads_ok, "随机图 seed=%d：%d 条路都从主城通到自己的巢穴，岔路和主路分得开" % [sd, lay.roads.size()])
+		# 河：横穿土路，过路的地方架桥（1~3 座，桥面走得通）；浅滩是浅水，从那里趟过去比绕桥近得多
+		var rv: Dictionary = lay.river
+		var river_ok: bool = not rv.is_empty() and rv.pts.size() >= 20 and rv.hw.size() == rv.pts.size()
+		var br_ok: bool = lay.bridges.size() >= 1 and lay.bridges.size() <= 3
+		for br in lay.bridges:
+			var mid: Vector2 = (br.a + br.b) * 0.5
+			if not t.walkable(int(mid.x / 32.0), int(mid.y / 32.0)):
+				br_ok = false
+		var ford_ok: bool = lay.fords.size() >= 1 and river_ok
+		var ford_note := ""
+		for fp in lay.fords:
+			if not ford_ok:
+				break
+			var fc := Vector2i(int(fp.x / 32.0), int(fp.y / 32.0))
+			if cells[fc.y * gw + fc.x] != MapGen.C_SHALLOW:
+				ford_ok = false
+				break
+			var i := RiverArt._nearest(rv, fp)
+			var tan: Vector2 = rv.pts[mini(i + 1, rv.pts.size() - 1)] - rv.pts[maxi(i - 1, 0)]
+			var nrm := tan.orthogonal().normalized()
+			var off: float = float(rv.hw[i]) + 60.0
+			var a: Vector2 = fp + nrm * off
+			var b: Vector2 = fp - nrm * off
+			var path: PackedVector2Array = t.find_path(a, b)
+			var plen := 0.0
+			var prev := a
+			for q in path:
+				plen += prev.distance_to(q)
+				prev = q
+			ford_note += " %.0f/%.0f" % [plen, a.distance_to(b)]
+			if path.is_empty() or plen > a.distance_to(b) * 2.5:
+				ford_ok = false
+		_check(river_ok and br_ok and ford_ok, "随机图 seed=%d：一条河、%d 座桥走得通、%d 处浅滩趟得过去（路长/直线%s）" % [sd, lay.bridges.size(), lay.fords.size(), ford_note])
+		# 水车位：至少一处；磨坊落在岸上、轮心泡进水里（套 build_mgr 的规则），走得到
+		var mill_ok: bool = lay.mills.size() >= 1
+		for mp in lay.mills:
+			var wet := maxf(RiverArt.depth_in(rv, Building.wheel_hub(mp, true)), RiverArt.depth_in(rv, Building.wheel_hub(mp, false)))
+			if RiverArt.depth_in(rv, mp) > -BuildManager.WHEEL_BANK or wet < BuildManager.WHEEL_DEEP:
+				mill_ok = false
+			var mpath: PackedVector2Array = t.find_path(st, mp)
+			if mpath.is_empty() or mpath[mpath.size() - 1].distance_to(mp) > 60.0:
+				mill_ok = false
+		_check(mill_ok, "随机图 seed=%d：河边留了 %d 处水车位，磨坊在岸上、轮子泡在水里，走得到" % [sd, lay.mills.size()])
+		# 宝箱遗物：至少 4 箱 1 件，都走得到、不压土路；遗物不重样
+		var tr_ok: bool = lay.chests.size() >= 4 and lay.relics.size() >= 1
+		var ids := {}
+		for d in lay.chests + lay.relics:
+			var p: Vector2 = d.pos
+			if t.find_path(st, p).is_empty() or MapGen._near_road(lay.roads, p, 40.0):
+				tr_ok = false
+			if d.get("camp", false):
+				n_camp_tr += 1
+		for d in lay.relics:
+			if ids.has(d.id) or not Relic.DEFS.has(d.id):
+				tr_ok = false
+			ids[d.id] = true
+		for d in lay.chests:
+			if d.loot.is_empty():
+				tr_ok = false
+		_check(tr_ok, "随机图 seed=%d：%d 个宝箱 %d 件遗物，都走得到、不压土路、遗物不重样" % [sd, lay.chests.size(), lay.relics.size()])
+		if sd == 3:
+			var again: Dictionary = MapGen.generate(sd, 3200.0, 2048.0)
+			_check(again.river.pts == rv.pts and again.fords == lay.fords and again.chests.size() == lay.chests.size()
+				and again.relics.map(func(r): return r.id) == lay.relics.map(func(r): return r.id) and again.roads.size() == lay.roads.size(),
+				"同一个 seed 同一条河、同一套岔路和宝贝")
+		t.free()
+	_check(n_forks >= 1, "随机图会分叉：4 张图共 %d 条岔路" % n_forks)
+	_check(n_camp_tr >= 4, "据点窝边藏着宝箱 / 遗物（4 张图共 %d 件）" % n_camp_tr)
+
+## 别的人和房子先冻住（自动采集、交货、箭塔放箭会混进账里）
+func _freeze_own() -> Array:
+	var frozen: Array = []
+	for grp in ["player_units", "buildings"]:
+		for n in m.get_tree().get_nodes_in_group(grp):
+			if is_instance_valid(n) and n.process_mode != Node.PROCESS_MODE_DISABLED and not (n is Building and n.team != 0):
+				n.process_mode = Node.PROCESS_MODE_DISABLED
+				frozen.append(n)
+	return frozen
+
+func _unfreeze(frozen: Array) -> void:
+	for n in frozen:
+		if is_instance_valid(n):
+			n.process_mode = Node.PROCESS_MODE_INHERIT
+
+func _ruins_at(p: Vector2) -> Ruins:
+	for b in m.get_tree().get_nodes_in_group("buildings"):
+		if b is Ruins and is_instance_valid(b) and not b.is_queued_for_deletion() and b.position.distance_to(p) < 4.0:
+			return b
+	return null
+
+func _site_at(p: Vector2) -> ConstructionSite:
+	for s in m.get_tree().get_nodes_in_group("sites"):
+		if is_instance_valid(s) and not s.is_queued_for_deletion() and s.position.distance_to(p) < 2.0:
+			return s
+	return null
+
+## 这个点放房子，除了水以外的条件都满足（离边界、建筑、工地、矿树、土路都够远）
+func _dry_ok(q: Vector2, kind: String) -> bool:
+	if q.x < 60.0 or q.x > m.W - 60.0 or q.y < 110.0 or q.y > m.H - 100.0:
+		return false
+	for b in m.get_tree().get_nodes_in_group("buildings"):
+		if is_instance_valid(b) and q.distance_to(b.position) < b.size + 50.0 + (Camp.NO_BUILD_R if b.kind == "camp" else 0.0):
+			return false
+	for s in m.get_tree().get_nodes_in_group("sites"):
+		if is_instance_valid(s) and q.distance_to(s.position) < s.size + 40.0:
+			return false
+	for n in m.get_tree().get_nodes_in_group("res_nodes"):
+		if is_instance_valid(n) and q.distance_to(n.position) < 64.0:
+			return false
+	var half: float = Building.size_of(kind) * 0.5
+	for rd in m.roads:
+		for i in rd.size() - 1:
+			if Geometry2D.get_closest_point_to_segment(q, rd[i], rd[i + 1]).distance_to(q) < half + 36.0:
+				return false
+	return true
+
+## center 周围 rmin~rmax 一圈找块空地（离建筑、工地、矿树、宝箱都远点），找不到 = INF
+func _open_spot(center: Vector2, rmin: float, rmax: float) -> Vector2:
+	for ri in 4:
+		var r := lerpf(rmin, rmax, ri / 3.0)
+		for k in 16:
+			var p := center + Vector2.from_angle(TAU * k / 16.0 + ri * 0.4) * r
+			if p.x < 60.0 or p.x > m.W - 60.0 or p.y < 110.0 or p.y > m.H - 100.0 or m.area_blocked(p, 30.0):
+				continue
+			var ok := true
+			for grp in ["buildings", "sites", "res_nodes", "treasures", "player_units"]:
+				for n in m.get_tree().get_nodes_in_group(grp):
+					if not is_instance_valid(n):
+						continue
+					var need := 50.0
+					if n is Building or n is ConstructionSite:
+						need = n.size * 0.6 + 40.0
+					elif grp == "player_units":
+						need = 36.0
+					if n.position.distance_to(p) < need:
+						ok = false
+			if ok and not m.terrain.find_path(m.base.position + Vector2(0, 80), p).is_empty():
+				return p
+	return Vector2.INF
+
+## 离己方单位 / 建筑 / 工地 / 矿 / 怪都最远的一块空地；剑士弓手离得比 soldier_r 远（摆据点、废墟用）
+func _far_spot(soldier_r := 0.0) -> Vector2:
+	var spot := Vector2.ZERO
+	var best := -1.0
+	for y in range(150, int(m.H) - 130, 30):
+		for x in range(170, int(m.W) - 170, 30):
+			var p := Vector2(x, y)
+			if m.area_blocked(p, 40.0):
+				continue
+			var dmin := INF
+			var near_soldier := false
+			for grp in ["player_units", "buildings", "sites", "enemies", "res_nodes", "treasures"]:
+				for n in m.get_tree().get_nodes_in_group(grp):
+					if not is_instance_valid(n) or n.is_queued_for_deletion():
+						continue
+					var d: float = n.position.distance_to(p)
+					if n is Soldier and d < soldier_r:
+						near_soldier = true
+					if grp == "enemies":
+						d += 60.0
+					elif grp == "res_nodes":
+						d += 100.0
+					dmin = minf(dmin, d)
+			if not near_soldier and dmin > best:
+				best = dmin
+				spot = p
+	return spot
+
+## ---- 水车：贴着河岸盖、轮子朝水；带动附近两条加工线一批 ×0.7 ----
+func _wheel_tests() -> void:
+	var tree := m.get_tree()
+	var bm: BuildManager = m._build_mgr
+	var e: Economy = m.economy
+	m._deselect_all()
+	var engs: Array = m._player_engineers()
+	if not engs.is_empty():
+		m._set_selection([engs[0]])
+		var keys := _cmd_keys(false)
+		e.wood += 200.0
+		e.plank += 50.0
+		m.run_hotkey("D")
+		var pk: String = m._placing_kind
+		m._placing_kind = ""
+		m._build_eng = null
+		_check(keys.contains("D=waterwheel") and keys.contains("F=outpost") and pk == "waterwheel", "工程师命令卡：D 水车、F 前哨，D 进放置（%s）" % keys)
+		m._deselect_all()
+	# 经典图没有河：找块空地，临时摆一条竖着的河（中线 + 半宽当画出来的水面，格子刷成深水）
+	var c := Vector2.INF
+	for gy in range(4, 19):
+		for gx in range(5, 36):
+			var p := Vector2(gx * 32 + 16, gy * 32 + 16)
+			if not (_dry_ok(p + Vector2(-100, 0), "waterwheel") and _dry_ok(p + Vector2(-56, 0), "waterwheel") and _dry_ok(p + Vector2(56, 0), "waterwheel")
+					and _dry_ok(p + Vector2(-10, 0), "waterwheel") and _dry_ok(p, "warehouse")):
+				continue
+			var busy := false
+			for grp in ["buildings", "sites", "res_nodes", "treasures", "player_units", "enemies"]:
+				for n in tree.get_nodes_in_group(grp):
+					if is_instance_valid(n) and absf(n.position.x - p.x) < 100.0 and absf(n.position.y - p.y) < 210.0:
+						busy = true
+			for b in m.processors_list:
+				if is_instance_valid(b) and b.position.distance_to(p) < 300.0:
+					busy = true
+			if not busy:
+				c = p
+				break
+		if c != Vector2.INF:
+			break
+	_check(c != Vector2.INF, "经典图找到摆临时河的空地 %s" % c)
+	if c == Vector2.INF:
+		return
+	var frozen := _freeze_own()
+	var pts: Array = []
+	var hws: Array = []
+	for i in 17:
+		pts.append(c + Vector2(0, -160 + i * 20))
+		hws.append(36.0)
+	RiverArt.river = {"pts": pts, "hw": hws}
+	var ter: Terrain = m.terrain
+	var painted: Array = []
+	var cx := int(c.x / 32.0)
+	var cy := int(c.y / 32.0)
+	for gy in range(cy - 5, cy + 6):
+		for gx in range(cx - 1, cx + 2):
+			if ter.in_bounds(gx, gy):
+				painted.append([Vector2i(gx, gy), ter.cell_type(Vector2i(gx, gy))])
+				ter.set_cell(Vector2i(gx, gy), Terrain.T.DEEP)
+	var west := c + Vector2(-56, 0)
+	var east := c + Vector2(56, 0)
+	var e_far: String = bm.placement_error(c + Vector2(-100, 0), "waterwheel")
+	var e_wet: String = bm.placement_error(c + Vector2(-10, 0), "waterwheel")
+	var e_w: String = bm.placement_error(west, "waterwheel")
+	var e_e: String = bm.placement_error(east, "waterwheel")
+	_check(e_far.contains("贴着河") and e_wet.contains("岸上") and e_w == "" and e_e == "",
+		"水车：离河远了不行、压进水里不行、两岸贴着河都能盖（%s / %s / %s / %s）" % [e_far, e_wet, e_w, e_e])
+	_check(not Building.wheel_flip_at(west) and Building.wheel_flip_at(east) and RiverArt.water_depth(Building.wheel_hub(west, false)) >= BuildManager.WHEEL_DEEP,
+		"轮子朝着河：西岸朝右、东岸镜像朝左，轮心泡在水里")
+	var e_wh: String = bm.placement_error(c, "warehouse")
+	var e_wh2: String = bm.placement_error(west, "warehouse")
+	_check(e_wh.contains("河") and e_wh2.contains("河"), "别的房子不许压河（%s / %s）" % [e_wh, e_wh2])
+	# 没有河的几何数据（经典图）：按深水格判断
+	RiverArt.river = {}
+	var g_ok: String = bm.placement_error(west, "waterwheel")
+	var g_far: String = bm.placement_error(c + Vector2(-100, 0), "waterwheel")
+	var g_flip := Building.wheel_flip_at(east)
+	RiverArt.river = {"pts": pts, "hw": hws}
+	_check(g_ok == "" and g_far.contains("贴着河") and g_flip, "没有河的画面数据时按深水格判断（%s / %s）" % [g_ok, g_far])
+	# 盖起来：扣钱 → 工地 → 完工记进水车列表
+	e.wood += 300.0
+	e.plank += 100.0
+	var wood0 := e.wood
+	var plank0 := e.plank
+	var r0: int = bm.try_place("waterwheel", west, null)
+	var site := _site_at(west)
+	_check(r0 == 0 and site != null and absf(e.wood - (wood0 - 50.0)) < 0.5 and absf(e.plank - (plank0 - 20.0)) < 0.5, "放水车：扣 50 木 20 木板，落下工地")
+	var wh: Building = null
+	if site != null:
+		bm.complete_site(site)
+		await tree.process_frame
+		for b in m.wheels:
+			if is_instance_valid(b) and b.position == west:
+				wh = b
+	_check(wh != null and wh.kind == "waterwheel" and not wh.wheel_flip, "水车盖好：记进水车列表，轮子朝河")
+	if wh != null:
+		var p1: Building = bm.add_building("smelter", c + Vector2(-150, -60), 0)
+		var p2: Building = bm.add_building("workshop", c + Vector2(-170, 60), 0)
+		var p3: Building = bm.add_building("smelter", c + Vector2(150, 80), 0)
+		for b in [p1, p2, p3]:
+			b.process_mode = Node.PROCESS_MODE_DISABLED
+			bm.building_built.emit(b)
+		_check(p1.powered() and p2.powered() and not p3.powered() and wh.powering.size() == Building.WHEEL_MAX and p3.position.distance_to(wh.position) < Building.WHEEL_R,
+			"一架水车只带最近的两条线，第三座在范围里也带不动")
+		_check(is_equal_approx(p1.batch_time() / p3.batch_time(), Building.WHEEL_MULT), "被带动的熔炉一批快 30%%（%.1f → %.1f 秒）" % [p3.batch_time(), p1.batch_time()])
+		m._set_selection([wh])
+		var ti: String = m._selected_info_text()
+		m._set_selection([p1])
+		var tp: String = m._selected_info_text()
+		m._deselect_all()
+		_check(ti.contains("带动 2/2") and tp.contains("水车带动"), "信息栏：水车带了几条线、加工线写着被水车带动（%s）" % ti.get_slice("\n", 0))
+		p1.queue_free()
+		await tree.create_timer(0.7).timeout
+		_check(p3.powered() and p2.powered(), "拆掉一座，空出来的名额给下一座")
+		wh.take_damage(99999.0)
+		await tree.create_timer(0.7).timeout
+		_check(not p2.powered() and not p3.powered() and not m.wheels.has(wh), "水车被拆：加工线恢复原速")
+		p2.queue_free()
+		p3.queue_free()
+	for pc in painted:
+		ter.set_cell(pc[0], pc[1])
+	RiverArt.river = {}
+	_unfreeze(frozen)
+	await tree.process_frame
+
+## ---- 宝箱 / 遗物：选农民右键 → 走过去扛起来 → 扛回收货点才到手；死了掉在原地 ----
+func _treasure_tests() -> void:
+	var tree := m.get_tree()
+	var e: Economy = m.economy
+	Relic.reset()
+	m._deselect_all()
+	var frozen := _freeze_own()
+	var w := Worker.new()
+	w.position = m.open_point(m.base.position + Vector2(100, -100))
+	m.add_child(w)
+	await tree.create_timer(0.1).timeout
+	var cp := _open_spot(m.base.position, 170.0, 300.0)
+	_check(cp != Vector2.INF, "基地附近找得到放宝箱的空地 %s" % cp)
+	if cp == Vector2.INF:
+		w.queue_free()
+		_unfreeze(frozen)
+		return
+	var ch: Treasure = m.spawn_treasure({"kind": "chest", "loot": {"ore": 50, "wood": 30}}, cp)
+	await tree.process_frame
+	_check(m._thing_at(ch.position) == ch and m._treasure_at(ch.position + Vector2(0, -12)) == ch, "宝箱点得中")
+	m._point_select(ch.position + Vector2(0, -8))
+	var it: String = m._selected_info_text()
+	await tree.create_timer(0.1).timeout
+	_check(m.inspected == ch and ch.selected and it.contains("宝箱") and it.contains("50 矿石"), "点宝箱：信息栏写着开出来什么（%s）" % it.get_slice("\n", 0))
+	m._deselect_all()
+	ch.selected = false
+	var ore0 := e.ore
+	var wood0 := e.wood
+	m._set_selection([w])
+	m._issue_command(ch.position)
+	_check(w.state == Worker.State.FETCH and w.fetch_target == ch and w.job_text().contains("去捡宝箱"), "选农民右键宝箱：走过去捡（%s）" % w.job_text())
+	var picked := false
+	for i in 100:
+		await tree.create_timer(0.1).timeout
+		if not w.treasure.is_empty():
+			picked = true
+			break
+	var gone := not is_instance_valid(ch) or ch.is_queued_for_deletion()    # 计时器可能和捡起同一帧：还没真删
+	_check(picked and gone and w.state == Worker.State.TO_BASE and w.job_text().contains("扛着宝箱"),
+		"走到跟前弯腰扛起来，往回走（%s · 状态 %d · 箱子%s）" % [w.job_text(), w.state, "没了" if gone else "还在"])
+	var claimed := false
+	for i in 140:
+		await tree.create_timer(0.1).timeout
+		if w.treasure.is_empty():
+			claimed = true
+			break
+	_check(claimed and is_equal_approx(e.ore - ore0, 50.0) and is_equal_approx(e.wood - wood0, 30.0) and w.state == Worker.State.IDLE,
+		"扛回收货点开箱：+50 矿 +30 木，农民原地待命（+%.0f / +%.0f）" % [e.ore - ore0, e.wood - wood0])
+	m._deselect_all()
+	# 遗物：丰饶号角，扛回去采集快 20%；扛着的时候派去捡别的 = 先把手上这件送回去
+	var gr0 := Worker.gather_rate()
+	var rp := _open_spot(m.base.position, 170.0, 300.0)
+	var rl: Treasure = m.spawn_treasure({"kind": "relic", "relic": "relic_horn"}, rp if rp != Vector2.INF else cp)
+	await tree.process_frame
+	_check(w.command_fetch(rl), "派农民去扛遗物")
+	picked = false
+	for i in 100:
+		await tree.create_timer(0.1).timeout
+		if not w.treasure.is_empty():
+			picked = true
+			break
+	var extra: Treasure = m.spawn_treasure({"kind": "chest", "loot": {"ore": 10}}, w.position + Vector2(50, 0))
+	_check(picked and w.job_text().contains("遗物") and not w.command_fetch(extra) and w.treasure.get("relic", "") == "relic_horn" and w.state == Worker.State.TO_BASE,
+		"扛着遗物再派去捡宝箱：一次只扛一件，先送回去（%s）" % w.job_text())
+	claimed = false
+	for i in 140:
+		await tree.create_timer(0.1).timeout
+		if w.treasure.is_empty():
+			claimed = true
+			break
+	_check(claimed and Relic.has("relic_horn") and is_equal_approx(Worker.gather_rate() / gr0, Relic.HORN_MULT),
+		"丰饶号角到手：采集快 20%%（%.2f → %.2f）" % [gr0, Worker.gather_rate()])
+	# 扛着宝贝的农民死了：东西掉在原地
+	extra.queue_free()
+	w.treasure = {"kind": "chest", "loot": {"ore": 11}, "relic": ""}
+	var dp := w.position
+	w.take_damage(99999.0)
+	await tree.process_frame
+	var drop: Treasure = null
+	for t in tree.get_nodes_in_group("treasures"):
+		if is_instance_valid(t) and not t.is_queued_for_deletion() and t.position.distance_to(dp) < 40.0 and t.kind == "chest" and int(t.loot.get("ore", 0)) == 11:
+			drop = t
+	_check(drop != null, "扛着宝箱的农民死了：箱子掉在原地，再派人来捡")
+	if drop != null:
+		drop.queue_free()
+	# 其余几件遗物：直接记账看效果
+	var bmax0: float = m.base.max_hp
+	var bfrac: float = m.base.hp / m.base.max_hp
+	m.claim_treasure({"kind": "relic", "relic": "relic_heart"}, m.base.position)
+	_check(is_equal_approx(m.base.max_hp, bmax0 * Relic.HEART_MULT) and is_equal_approx(m.base.hp / m.base.max_hp, bfrac),
+		"磐石之心：基地血量上限 %.0f → %.0f，按比例回血" % [bmax0, m.base.max_hp])
+	var nb: Building = m._build_mgr.add_building("warehouse", Vector2(-400, -400), 0)
+	var ref := Building.new()
+	ref.setup("warehouse")
+	_check(is_equal_approx(nb.max_hp, ref.max_hp * Relic.HEART_MULT) and is_equal_approx(nb.hp, nb.max_hp), "磐石之心：之后盖的房子也结实 25%")
+	ref.free()
+	nb.queue_free()
+	m.claim_treasure({"kind": "relic", "relic": "relic_heart"}, m.base.position)
+	_check(is_equal_approx(m.base.max_hp, bmax0 * Relic.HEART_MULT), "同一件遗物不会叠两次")
+	var rg0: float = m.base.tower_stats().range
+	m.claim_treasure({"kind": "relic", "relic": "relic_eye"}, m.base.position)
+	_check(is_equal_approx(m.base.tower_stats().range, rg0 + Relic.EYE_RANGE) and is_equal_approx(Building.TOWER_LV[1].range, 190.0), "鹰眼石：基地射程 %.0f → %.0f（常量表没被改）" % [rg0, m.base.tower_stats().range])
+	var sm: Building = m._build_mgr.add_building("smelter", Vector2(-400, -400), 0)
+	var bt0: float = sm.batch_time()
+	m.claim_treasure({"kind": "relic", "relic": "relic_gear"}, m.base.position)
+	_check(is_equal_approx(sm.batch_time(), bt0 * Relic.GEAR_MULT), "古老齿轮：熔炉一批 %.1f → %.1f 秒" % [bt0, sm.batch_time()])
+	sm.queue_free()
+	var w2 := Worker.new()
+	w2.position = m.open_point(m.base.position + Vector2(100, -60))
+	m.add_child(w2)
+	await tree.process_frame
+	var sf0: float = w2._terrain_speed_factor()
+	var eng: Engineer = m._player_engineers()[0] if not m._player_engineers().is_empty() else null
+	var ef0: float = eng._terrain_speed_factor() if eng != null else 1.0
+	m.claim_treasure({"kind": "relic", "relic": "relic_boots"}, m.base.position)
+	_check(is_equal_approx(w2._terrain_speed_factor() / sf0, Relic.BOOTS_MULT) and (eng == null or is_equal_approx(eng._terrain_speed_factor() / ef0, Relic.BOOTS_MULT)),
+		"疾风靴：农民、工程师移速 ×1.15")
+	w2.queue_free()
+	m.select_base()
+	var bt: String = m._selected_info_text()
+	_check(bt.contains("遗物：古老齿轮、鹰眼石、丰饶号角、疾风靴、磐石之心"), "基地信息栏列出到手的遗物（%s）" % bt.get_slice("\n", bt.get_slice_count("\n") - 1))
+	m._deselect_all()
+	# 收尾：遗物清掉，磐石之心加的血还回去（后面的测试按原数值写的）
+	Relic.reset()
+	for b in tree.get_nodes_in_group("buildings"):
+		if is_instance_valid(b) and b.team == 0:
+			b.max_hp /= Relic.HEART_MULT
+			b.hp /= Relic.HEART_MULT
+	_check(is_equal_approx(m.base.max_hp, bmax0) and is_equal_approx(Worker.gather_rate() / gr0, 1.0), "遗物清零后恢复原数值")
+	_unfreeze(frozen)
+
+## ---- 废墟 / 前哨：拆了窝没人看着就倒计时，Goo 回来重新占；兵守着 / 前哨工地停表；盖好前哨 = 永久占下 ----
+func _outpost_tests() -> void:
+	var tree := m.get_tree()
+	var bm: BuildManager = m._build_mgr
+	var e: Economy = m.economy
+	m._deselect_all()
+	var frozen := _freeze_own()
+	var spot := _far_spot(Ruins.HOLD_R + 40.0)
+	var c: Camp = m.add_camp(spot, 1)
+	await tree.create_timer(0.3).timeout
+	var gs: Array = c.alive_guards().duplicate()
+	for g in gs:
+		g.take_damage(99999.0)
+	await tree.process_frame
+	var ore0 := e.ore
+	c.take_damage(99999.0)
+	var d0 := e.ore - ore0
+	await tree.create_timer(0.7).timeout
+	var r := _ruins_at(spot)
+	_check(gs.size() == 3 and is_equal_approx(d0, 80.0) and r != null and r.tier == 1 and is_equal_approx(r.loot_mult, 0.5),
+		"一档据点：守军清光再拆窝缴获 %.0f 矿，留下一片废墟" % d0)
+	if r == null:
+		_unfreeze(frozen)
+		return
+	_check(r.hold == "" and r.left < Ruins.REOCCUPY and r.left > Ruins.REOCCUPY - 1.5, "废墟没人看着：开始倒计时（还剩 %.1f 秒）" % r.left)
+	m._point_select(spot)
+	var rt: String = m._selected_info_text()
+	_check(m.inspected == r and rt.contains("没人看着") and rt.contains("前哨"), "点废墟：显示倒计时和怎么守住（%s）" % rt.get_slice("\n", 0))
+	m._deselect_all()
+	# 兵站在旁边：停表
+	var sd := Soldier.new()
+	sd.setup(false)
+	sd.position = m.open_point(spot + Vector2(-150, 40))
+	m.add_child(sd)
+	sd.process_mode = Node.PROCESS_MODE_DISABLED
+	await tree.create_timer(0.7).timeout
+	var l1 := r.left
+	await tree.create_timer(0.5).timeout
+	_check(r.hold == "soldiers" and is_equal_approx(r.left, l1) and r.status_text().contains("有兵守着"), "有兵站在废墟旁：倒计时停住（%s）" % r.hold)
+	sd.queue_free()
+	await tree.create_timer(0.7).timeout
+	_check(r.hold == "" and r.left < l1, "兵走了接着倒计时")
+	r.left = Ruins.WARN_AT + 0.2
+	await tree.create_timer(0.6).timeout
+	_check(r._warned and m._hud_msg_label.text.contains("回来占窝"), "还剩 %d 秒：横幅提醒派兵或盖前哨" % int(Ruins.WARN_AT))
+	# 到点：Goo 回来重新占
+	r.left = 0.2
+	await tree.create_timer(0.6).timeout
+	var c2: Camp = null
+	for cc in m.camps:
+		if is_instance_valid(cc) and not cc.is_queued_for_deletion() and cc.position.distance_to(spot) < 4.0:
+			c2 = cc
+	_check(not is_instance_valid(r) and c2 != null and c2.tier == 1 and c2.alive_guards().size() == 3 and c2.spotted and is_equal_approx(c2.loot_mult, 0.5),
+		"没人看着到点：Goo 回来重新占窝，守军刷满")
+	if c2 == null:
+		_unfreeze(frozen)
+		return
+	var lt: Dictionary = c2.loot()
+	_check(int(lt.get("ore", 0)) == 40 and int(lt.get("wood", 0)) == 30, "回来占的窝再拆只缴获一半（%s）" % e.cost_text(lt))
+	for g in c2.alive_guards():
+		g.take_damage(99999.0)
+	await tree.process_frame
+	var ore1 := e.ore
+	c2.take_damage(99999.0)
+	var d1 := e.ore - ore1
+	await tree.create_timer(0.6).timeout
+	var r2 := _ruins_at(spot)
+	_check(is_equal_approx(d1, 40.0) and r2 != null and is_equal_approx(r2.loot_mult, 0.25), "再拆一次缴获 %.0f 矿；再让 Goo 回来就只剩四分之一" % d1)
+	if r2 == null:
+		_unfreeze(frozen)
+		return
+	# 前哨：只能盖在废墟旁
+	var e_far: String = bm.placement_error(m.base.position + Vector2(120, -120), "outpost")
+	_check(e_far.contains("废墟"), "前哨只能盖在据点废墟旁（%s）" % e_far)
+	var op_pos := Vector2.INF
+	for k in 16:
+		var p: Vector2 = spot + Vector2.from_angle(TAU * k / 16.0) * 150.0
+		if bm.placement_error(p, "outpost") == "":
+			op_pos = p
+			break
+	_check(op_pos != Vector2.INF, "废墟旁找得到盖前哨的地方 %s" % op_pos)
+	if op_pos == Vector2.INF:
+		r2.queue_free()
+		_unfreeze(frozen)
+		return
+	e.wood += 200.0
+	e.ore += 200.0
+	var wood0 := e.wood
+	var ore2 := e.ore
+	var res: int = bm.try_place("outpost", op_pos, null)
+	var site := _site_at(op_pos)
+	_check(res == 0 and site != null and is_equal_approx(e.wood, wood0 - 80.0) and is_equal_approx(e.ore, ore2 - 60.0) and is_equal_approx(site.build_time, 10.0),
+		"放前哨：扣 80 木 60 矿，工地敲 10 秒")
+	await tree.create_timer(0.7).timeout
+	var other: Vector2 = spot - (op_pos - spot).normalized() * 60.0
+	_check(r2.hold == "site" and bm.placement_error(other, "outpost").contains("已经在盖"), "前哨施工中：废墟停表，一片废墟只盖一座（%s）" % r2.hold)
+	var op: Building = null
+	if site != null:
+		bm.complete_site(site)
+		await tree.process_frame
+		await tree.process_frame
+		for b in tree.get_nodes_in_group("buildings"):
+			if is_instance_valid(b) and b.kind == "outpost" and b.position == op_pos:
+				op = b
+	_check(op != null and not is_instance_valid(r2), "前哨盖好：废墟清掉，Goo 再也回不来")
+	if op != null:
+		_check(op.has_tower() and op.trains() and is_equal_approx(op.tower_stats().range, Building.OUTPOST_TOWER.range), "前哨：塔上一名弓手（射程 %d）、能造农民" % int(Building.OUTPOST_TOWER.range))
+		m._set_selection([op])
+		var keys := _cmd_keys(false)
+		var ot: String = m._selected_info_text()
+		m._deselect_all()
+		_check(keys.contains("Q=worker") and ot.contains("交货"), "选中前哨：命令卡能造农民，信息栏写着能交货（%s）" % keys)
+		var wk := Worker.new()
+		wk.position = m.open_point(op_pos + Vector2(0, 70))
+		m.add_child(wk)
+		await tree.process_frame
+		_check(wk._store() == op and wk._depot() == op and m._friendly_depot_at(op_pos) == op, "前哨是收货点：旁边的农民就近交货")
+		wk.queue_free()
+		op.queue_free()
+	_unfreeze(frozen)
+	await tree.process_frame
+
+## ---- 战争迷雾：没去过 = 黑；去过没人看着 = 灰（宝箱、敌方房子照样看得见，怪看不见）；没探过的地方不许盖房 ----
+func _fog_tests() -> void:
+	var tree := m.get_tree()
+	var f := Fog.new()
+	m.add_child(f)
+	f.setup(m.W, m.H)
+	_check(f.gw == int(ceil(m.W / Fog.CELL)) and f.gh == int(ceil(m.H / Fog.CELL)) and f.mini_tex != null and f.mini_tex.get_width() == f.gw
+		and is_equal_approx(Fog.sight_of(m.base), Fog.SIGHT.base), "迷雾 32px 一格铺满地图，小地图那层每格一像素")
+	_check(not f.explored_at(m.base.position) and not f.visible_at(m.base.position), "刚铺上：哪儿都没去过")
+	f.reveal(Vector2(640, 360), 100.0)
+	_check(f.explored_at(Vector2(640, 360)) and not f.explored_at(Vector2(640, 520)) and not f.visible_at(Vector2(640, 360)), "开局揭开的地方算去过，但不算看得见")
+	f.refresh()
+	_check(f.visible_at(m.base.position) and f.explored_at(m.base.position), "己方房子周围看得见，也算去过")
+	# 找一块谁都看不见的地方
+	var hide := Vector2.INF
+	var best := 0.0
+	for y in range(130, int(m.H) - 100, 32):
+		for x in range(80, int(m.W) - 80, 32):
+			var p := Vector2(x, y)
+			var marg := INF
+			for grp in ["player_units", "buildings", "sites"]:
+				for n in tree.get_nodes_in_group(grp):
+					if not is_instance_valid(n) or (grp == "buildings" and n.team != 0):
+						continue
+					marg = minf(marg, n.position.distance_to(p) - (Fog.SIGHT.site if grp == "sites" else Fog.sight_of(n)))
+			if marg > best:
+				best = marg
+				hide = p
+	_check(best > 48.0, "经典图上有块谁都看不见的地方 %s（离视野边 %.0f）" % [hide, best])
+	if best > 48.0:
+		var g := Goo.make("goo")
+		g.position = hide
+		m.add_child(g)
+		g.process_mode = Node.PROCESS_MODE_DISABLED
+		var tr: Treasure = m.spawn_treasure({"kind": "chest", "loot": {"ore": 5}}, hide + Vector2(24, 0))
+		f.refresh()
+		_check(not g.visible and not tr.visible and m._thing_at(g.position) != g and m._treasure_at(tr.position) == null, "没人看着的地方：怪和宝箱藏在雾里，点不中")
+		f.reveal(hide, 120.0)
+		f.refresh()
+		_check(not g.visible and tr.visible, "去过、现在没人看着：宝箱照样看得见，怪看不见")
+		var hp0: Vector2 = g.position
+		g.position = m.base.position + Vector2(60, 40)
+		f.refresh()
+		var seen := g.visible
+		g.position = hp0
+		f.refresh()
+		_check(seen and not g.visible, "怪走进己方视野就露出来，走开又藏起来")
+		var unexp := Vector2.INF
+		for y in range(130, int(m.H) - 100, 32):
+			for x in range(80, int(m.W) - 80, 32):
+				if not f.explored_at(Vector2(x, y)):
+					unexp = Vector2(x, y)
+		m.fog = f
+		var pe: String = m._build_mgr.placement_error(unexp, "warehouse") if unexp != Vector2.INF else ""
+		var pe2: String = m._build_mgr.placement_error(m.base.position + Vector2(0, -150), "warehouse")
+		var fv: bool = m.fog_visible(m.base.position) and not m.fog_explored(unexp)
+		m.fog = null
+		_check(pe.contains("探") and not pe2.contains("探") and fv, "没探过的地方不许盖房（%s），探过的照常判断" % pe)
+		f.set_enabled(false)
+		_check(g.visible and tr.visible and f.visible_at(hide) and m.hive.visible, "关掉迷雾：全都看得见")
+		g.queue_free()
+		tr.queue_free()
+	f.set_enabled(false)
+	f.queue_free()
+	await tree.process_frame
 
 func _check(cond: bool, msg: String) -> void:
 	if cond:
