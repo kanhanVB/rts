@@ -25,6 +25,7 @@ var _patrol_b := Vector2.ZERO
 const PIN_RANGE := 115.0     # 防区半径：站位点这个圈里冒出没被钉住的怪，就迎上去
 const POST_LEASH := 200.0    # 追出去超过离站位点这么远：松口先回位（不追到天涯）
 const POST_BACK := 18.0      # 回到站位点这么近算站好
+const ARCHER_BACK := 58.0    # 弓手的站位再往后方（朝基地）退这么远：剑士挡前面，弓手在后面射
 const REPATH_GAP := 20.0     # 目标挪动超过这么远才重新算路径（每帧 A* 太贵）
 var post_home: Building = null    # 听哪个兵营的集结点
 var post_off := Vector2.ZERO      # 相对集结点的站位偏移（一队人散开站）
@@ -32,6 +33,8 @@ var post_fixed := Vector2.INF     # 兵营没了 / 没设集结点时的落脚�
 var pin_target: Node2D = null     # 正在钉的那只怪（近战 1v1）
 var _hurt_target: Node2D = null   # 刚咬过我的那只：优先还手（去岗位的路上被怪拦住也打）
 var _goal := Vector2.INF          # 当前在走的目的地（防区模式自己算路用）
+var _chase_goal := Vector2.INF    # 追击时上次寻路的目标位置（挪动超过 24px 才重算）
+var _manual := false              # 玩家手令接管了：走自由那套，直到按 S 停止 / 回位才回防区
 
 ## 兵营给的岗位：从这座兵营的集结点散开站（off = 相对集结点的偏移，集结点改了兵自动跟过去）
 func set_post(b: Building, off: Vector2) -> void:
@@ -53,6 +56,10 @@ func set_post(b: Building, off: Vector2) -> void:
 ## 有没有岗位：有的走 KR 式防区，没有的走老的自由索敌
 func has_post() -> bool:
 	return post_home != null or post_fixed != Vector2.INF
+
+## 现在是不是听玩家手令（手令接管后就不自己回防区了）
+func is_manual() -> bool:
+	return _manual
 
 ## 站位点（集结点 + 自己的偏移；没设集结点就在兵营门口）
 func post_pos() -> Vector2:
@@ -214,17 +221,23 @@ func _pick_pin() -> Node2D:
 	return best
 
 ## 这只怪能不能被我钉：近战 1v1 独占（弓手只输出、不占位）
+## 钉子会过期：持有者早就不管这只了（换了目标 / 被手令派走 / 腾出手去打别的），
+## 就该让出来给旁边没活干的兵，否则一只怪能被一个路过的兵"占"一辈子
 func _can_pin(e: Node2D) -> bool:
 	if is_ranged:
 		return true
 	var holder = e.get("pinned_by")
-	return holder == null or holder == self or not is_instance_valid(holder)
+	if holder == null or holder == self or not is_instance_valid(holder):
+		return true
+	return holder.get("pin_target") != e
 
 func _pin(e: Node2D) -> void:
+	if pin_target != e:
+		_unpin()        # 换目标：先把上一只身上的钉子松开，别让别的兵以为它还有人管
 	pin_target = e
 	attack_target = e
 	_auto_target = e
-	if not is_ranged:
+	if not is_ranged and is_instance_valid(e) and e is Unit:
 		e.set("pinned_by", self)    # 近战独占；弓手只输出不占位
 
 func _unpin() -> void:
@@ -232,7 +245,9 @@ func _unpin() -> void:
 		pin_target.set("pinned_by", null)
 	pin_target = null
 	_hurt_target = null
-	if attack_target != null and not (attack_target is Building):
+	# 先查 is_instance_valid：对已经释放的对象做 `is Building` 会抛错，
+	# 一抛错整个 _step 就断在这儿，attack_target 永远清不掉，兵会对着空气站着
+	if attack_target != null and (not is_instance_valid(attack_target) or not (attack_target is Building)):
 		attack_target = null
 
 ## 防区里走得动就行：目标挪了才重算路（每帧 A* 会把帧数吃光）
@@ -251,15 +266,31 @@ func command_recall() -> void:
 	_amove_dest = Vector2.ZERO
 	patrol = false
 	hold = false
+	_ignore_aggro = false
+	_engaged = false
 	_goal = Vector2.INF
 	move_target = position
+	_manual = false          # 交还控制权：下一帧就走回防区站好
+	_chase_goal = Vector2.INF
 
 func _step(delta: float) -> void:
 	_cd = max(0.0, _cd - delta)
 	_scan_t -= delta
 	_medic(delta)
-	# 有防区岗位：走 KR 式（只拦不追），别的一概不管
-	if has_post():
+	# 引用先按 is_instance_valid 清一遍，别用 `!= null` 判断：
+	# 已释放对象在 GDScript 里不一定等于 null，僵尸钉子会一直挂着，
+	# _can_yield / _acquire_target 全都跟着抽风（兵对着空气站桩）
+	if not is_instance_valid(pin_target):
+		pin_target = null
+	if not is_instance_valid(attack_target):
+		attack_target = null
+	if not is_instance_valid(_auto_target):
+		_auto_target = null
+	if not is_instance_valid(_hurt_target):
+		_hurt_target = null
+	# 有防区岗位、也没被玩家手令接管：走 KR 式（只拦不追），别的不管。
+	# 玩家一给令（右键 / A / D / F）就换成自由那套，兵随便动；按 S 或「回位」再回防区。
+	if has_post() and not _manual:
 		_step_post(delta)
 		return
 	# 帝国式移动：普通右键移动途中不被沿路敌人勾走（撤退/转进才撤得下来），
@@ -269,6 +300,9 @@ func _step(delta: float) -> void:
 		t = _acquire_target()
 	if t:
 		_engaged = true
+		# KR 式：咬上了就独占这一只（怪会停下来跟他对砍，别的近战自动去找下一只），
+		# 而不是一堆人围着同一只揍
+		_pin(t)
 		var d := position.distance_to(t.position)
 		var reach := attack_range * _terrain_range_factor()
 		if t is Building:
@@ -290,7 +324,13 @@ func _step(delta: float) -> void:
 				attack_target = null
 			_auto_target = null
 			return
-		move_target = t.position       # 追击
+		# 追击：路劲要跟着目标走。只改 move_target 不作废旧路径的话，
+		# _move_toward 会照着"奔目的地"的旧路径跑，跑到头再折回来追——
+		# A 移动途中来回拉锯，看着像发呆（目标挪 24px 才重算，别每帧 A*）
+		if _chase_goal.distance_to(t.position) > 24.0:
+			_chase_goal = t.position
+			_go(t.position)
+		move_target = t.position
 	elif _engaged:
 		# 刚打完一仗：A 移动就接着赶路（以前会原地站死，A 移动只生效一次）
 		_engaged = false
@@ -319,13 +359,13 @@ func _done_with_order() -> bool:
 
 ## 让路：还得没在打、没在 A 移动；钉着怪的时候绝对不让（让一下就被推走了）
 func _can_yield() -> bool:
-	if pin_target != null:
+	if pin_target != null and is_instance_valid(pin_target):
 		return false
 	return super() and not _engaged and _amove_dest == Vector2.ZERO
 
 ## 闲置军队（"," 键 / 闲置军队按钮）：站岗的兵不算闲着，找的是真没事干的
 func is_idle() -> bool:
-	if has_post():
+	if has_post() and not _manual:
 		return false
 	return _done_with_order() and not patrol and waypoints.is_empty() and not moving
 
@@ -341,11 +381,16 @@ func command_stop() -> void:
 	_ignore_aggro = false
 	_engaged = false
 	patrol = false
+	# S 停止 = 把手令交还出去：有防区的兵走回防区接着站（想彻底脱岗就一直给令）
+	_manual = false
+	_unpin()
+	_goal = Vector2.INF
+	_chase_goal = Vector2.INF
 
-## D 原地驻守（老的自由模式：自己原地不动，只打够得着的）
+## D 原地驻守（自由模式：自己原地不动，只打够得着的）
 func command_hold() -> void:
 	command_stop()
-	_leave_post()
+	_take_over()
 	hold = true
 
 ## F 巡逻：从现在的位置到 pos 来回走，路上遇敌就打
@@ -363,6 +408,8 @@ func _nearest_enemy(dist: float) -> Node2D:
 	for e in _group("enemies"):
 		if not is_instance_valid(e):
 			continue
+		if not _can_pin(e):
+			continue    # 已经有人钉着了：去找下一只（KR 式一个一个拦，别一窝蜂全挤一只）
 		var d := position.distance_to(e.position)
 		if d < best_d:
 			best_d = d
@@ -403,10 +450,11 @@ func _go(pos: Vector2) -> void:
 ## 卡住：A 移动途中被挤住就重新寻路接着走，离终点很近就算到站
 ## 卡住：防区模式下清掉目标点让它重算；自由模式按 A 移动 / 到站处理
 func _on_stuck() -> void:
-	if has_post():
+	if has_post() and not _manual:
 		_goal = Vector2.INF
 		return
 	if _amove_dest != Vector2.ZERO and position.distance_to(_amove_dest) > 60.0:
+		_chase_goal = Vector2.INF
 		_go(_amove_dest)
 		return
 	_amove_dest = Vector2.ZERO
@@ -414,16 +462,16 @@ func _on_stuck() -> void:
 	move_target = position
 
 ## ---------- 指令 ----------
-## 玩家（或老代码）强行给令 = 脱离兵营的防区，回到"自由索敌"那套。
-## UI 层已经不把移动令发给兵了（见 main._command_at），这些入口留给测试 / 特殊单位
-func _leave_post() -> void:
+## 兵可以随便动：玩家一给令就"接管"，换成自由那套（想打哪个打哪个、想去哪去哪）。
+## 岗位还留着——按 S 停止或者命令卡「回位」就回兵营的防区接着守。
+func _take_over() -> void:
 	_unpin()
-	post_home = null
-	post_fixed = Vector2.INF
+	_manual = true
 	_goal = Vector2.INF
+	_chase_goal = Vector2.INF
 
 func command_attack(t: Node2D) -> void:
-	_leave_post()
+	_take_over()
 	attack_target = t
 	_ignore_aggro = false
 	move_target = t.position
@@ -431,7 +479,7 @@ func command_attack(t: Node2D) -> void:
 	_path_idx = 0
 
 func command_move(pos: Vector2) -> void:
-	_leave_post()
+	_take_over()
 	super(pos)
 	attack_target = null
 	_auto_target = null
@@ -440,7 +488,7 @@ func command_move(pos: Vector2) -> void:
 
 ## A 移动：走向目的地，路上索敌圈内遇敌自动开打，打完继续赶路
 func command_attack_move(pos: Vector2) -> void:
-	_leave_post()
+	_take_over()
 	super(pos)
 	attack_target = null
 	_auto_target = null

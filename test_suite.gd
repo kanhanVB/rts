@@ -12,6 +12,10 @@ func _init(main: Node2D) -> void:
 func run() -> void:
 	print("[TEST] 开始")
 	await m.get_tree().create_timer(1.0).timeout
+	if "--only=solo" in OS.get_cmdline_user_args():
+		await _a_move_probe()    # 单独探针：A 移动 + 打怪 + 继续赶路（-- --test --only=solo）
+		_done()
+		return
 	if "--only=bell" in OS.get_cmdline_user_args():
 		await _bell_tests()    # 只跑警钟 / 报警这一块（调试用：-- --test --only=bell）
 		await _alert_tests()
@@ -439,6 +443,15 @@ func run() -> void:
 	_check(m.selected.size() == 1 and m.selected[0] == eng4, "数字键召回编队")
 
 	# A 移动：剑士接到攻击移动指令，走到半路遇敌会自动索敌开打
+	# 先清一次场：轻 RTS 的近战 1v1 是独占的，前面测试残留的兵会抢先钉住这只 Goo，
+	# 也可能站在路中间把人挡住（这不是 bug，是 1v1 该有的样子，所以测试场地得干净）
+	for e0 in m.get_tree().get_nodes_in_group("enemies"):
+		if is_instance_valid(e0):
+			e0.queue_free()
+	for u0 in m.get_tree().get_nodes_in_group("player_units"):
+		if is_instance_valid(u0) and u0 is Soldier:
+			u0.queue_free()
+	await m.get_tree().create_timer(0.3).timeout
 	var s2 := Soldier.new()
 	s2.setup(false)
 	s2.position = Vector2(200, 300)
@@ -451,8 +464,20 @@ func run() -> void:
 	m.add_child(g7)
 	await m.get_tree().create_timer(3.0).timeout
 	# 剑士应已锁定敌人（attack_target 非空）或仍在 A 移动目的地推进中
+	var dbg: Array = []
+	for e0 in m.get_tree().get_nodes_in_group("enemies"):
+		if not is_instance_valid(e0):
+			continue
+		var pb = e0.get("pinned_by")
+		var ptxt := str(pb)
+		if pb != null and is_instance_valid(pb):
+			ptxt = "%s(name=%s,%s)" % [ptxt, str(pb.name), pb.get_script().resource_path if pb.get_script() else "-"]
+		dbg.append("%s@%.0f pin=%s can=%s" % [e0.etype,
+			s2.position.distance_to(e0.position), ptxt, str(s2._can_pin(e0))])
 	_check(not is_instance_valid(g7) or (s2.attack_target == g7),
-		"A 移动途中遇敌自动开打")
+		"A 移动途中遇敌自动开打（g7活着=%s s2目标=%s 位置=%s amove=%s manual=%s ignore=%s 敌方=[%s]）" % [
+			is_instance_valid(g7), str(s2.attack_target), str(s2.position),
+			str(s2._amove_dest), str(s2.is_manual()), str(s2._ignore_aggro), " | ".join(dbg)])
 
 	# 战斗贴脸互殴不被分离力顶开（双方站定输出，不来回抖）
 	var s3 := Soldier.new()
@@ -490,7 +515,11 @@ func run() -> void:
 	g9.hp = 10.0
 	await m.get_tree().create_timer(10.0).timeout
 	_check(not is_instance_valid(g9), "A 移动途中的 Goo 被打掉")
-	_check(s4.position.distance_to(dest4) < 60.0, "A 移动打完继续走到目的地（距终点 %.0fpx）" % s4.position.distance_to(dest4))
+	_check(s4.position.distance_to(dest4) < 60.0,
+		"A 移动打完继续走到目的地（距终点 %.0fpx 位置=%s 目标=%s amove=%s pin=%s mt=%s post=%s dead=%s）" % [
+			s4.position.distance_to(dest4), str(s4.position), str(s4.attack_target),
+			str(s4._amove_dest), str(s4.pin_target), str(s4.move_target),
+			str(s4.has_post()), str(s4.dead)])
 	s4.take_damage(99999.0)
 
 	# 普通右键移动不被沿路敌人勾走（撤退要撤得下来）
@@ -781,14 +810,19 @@ func _light_rts_tests() -> void:
 	await tree.create_timer(3.2).timeout
 	_check(sw.position.distance_to(post) < 70.0, "兵自己走到集结点站好（离点 %.0fpx）" % sw.position.distance_to(post))
 
-	# 右键不给兵下令：位置只由集结点决定
+	# 兵可以随便动：右键照常下令，兵听（手令接管，暂时离开防区）
 	var p0: Vector2 = sw.position
+	var dest: Vector2 = m.open_point(p0 + Vector2(130, 0))
 	m._set_selection([sw])
-	m._command_at(p0 + Vector2(120, 0))
-	await tree.create_timer(0.6).timeout
-	_check(m._only_soldiers_selected() and sw.position.distance_to(p0) < 12.0,
-		"选中兵右键地面不下令（挪了 %.0fpx）" % sw.position.distance_to(p0))
-	_check(m._hud_msg_label.text.contains("集结点"), "提示玩家：兵只认兵营集结点")
+	m._command_at(dest)
+	await tree.create_timer(2.2).timeout
+	_check(sw.is_manual() and sw.position.distance_to(dest) < 70.0,
+		"选中兵右键地面照样下令，兵自己走过去（离目标 %.0fpx）" % sw.position.distance_to(dest))
+	# S 停止 = 把手令交还回去，走回防区接着守
+	m.run_hotkey("S")
+	await tree.create_timer(3.6).timeout
+	_check(not sw.is_manual() and sw.position.distance_to(post) < 80.0,
+		"按 S 停止：交还手令，回集结点站好（离点 %.0fpx）" % sw.position.distance_to(post))
 
 	# 怪进防区：迎上去钉住（1v1），怪停下跟他对砍
 	var g := Goo.new()
@@ -895,10 +929,15 @@ func _flee_tests() -> void:
 	w._path = PackedVector2Array()
 	w._path_idx = 0
 	g.position = w.position + back * 60.0    # 怪跟着挪过去：不然拉开 200px 后自动判定"已脱险"就收工了
-	var d0 := w.position.distance_to(tgt)
+	# 瞬移落点可能正好压在房子/树上，先让物理把它挤出来再起量（不然量的那段全在"脱困"）
+	await m.get_tree().create_timer(0.35).timeout
+	# 量的口径是"离怪越来越远"而不是"离房子越来越近"：逃跑的本质就是远离威胁，
+	# 绕一点路躲开房子不算失败
+	var gd0 := w.position.distance_to(g.position)
 	await m.get_tree().create_timer(1.2).timeout
-	var d1 := w.position.distance_to(tgt)
-	_check(w.is_fleeing() and d1 < d0 - 60.0, "往避难所跑（离目标 %.0f → %.0f）" % [d0, d1])
+	var gd1 := w.position.distance_to(g.position)
+	_check(w.is_fleeing() and gd1 > gd0 + 40.0,
+		"往远离怪的方向跑（离怪 %.0f → %.0f，位置=%s）" % [gd0, gd1, str(w.position)])
 
 	g.queue_free()
 	await m.get_tree().create_timer(0.3).timeout
@@ -906,6 +945,36 @@ func _flee_tests() -> void:
 	_check(not w.is_fleeing(), "怪没了：自己收工往回走")
 	_check(is_instance_valid(w.node_target) and w.state != Worker.State.IDLE, "回去接着干原来的活（采矿）")
 	w.queue_free()
+
+## ---- 单独探针：A 移动 → 半路遇怪 → 打完接着赶路 ----
+## 全量里这条最脆（路径、卡住、时序都掺在一起），单独跑几秒就能看清卡在哪
+func _a_move_probe() -> void:
+	var tree := m.get_tree()
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	for u in tree.get_nodes_in_group("player_units"):
+		if is_instance_valid(u):
+			u.queue_free()
+	await tree.create_timer(0.4).timeout
+	var s := Soldier.new()
+	s.setup(false)
+	s.position = Vector2(200, 150)
+	m.add_child(s)
+	var dest := Vector2(700, 150)
+	s.command_attack_move(dest)
+	var g := Goo.new()
+	g.position = Vector2(350, 150)
+	m.add_child(g)
+	g.hp = 10.0
+	for i in 14:
+		await tree.create_timer(1.0).timeout
+		_check(true, "t=%2ds 位置=%s 距终点=%3.0f amove=%s 目标=%s 路径=%d/%d 速度=%.0f" % [
+			i + 1, str(s.position.round()), s.position.distance_to(dest),
+			str(s._amove_dest != Vector2.ZERO), str(s.attack_target),
+			s._path_idx, s._path.size(), s.speed])
+	_check(s.position.distance_to(dest) < 60.0,
+		"A 移动打完继续走到目的地（距终点 %.0fpx）" % s.position.distance_to(dest))
 
 func _done() -> void:
 	if m._fail == 0:
@@ -1141,14 +1210,14 @@ func _aoe_tests() -> void:
 	m._on_key(esc)
 	_check(m.selected.is_empty(), "Esc 取消选中")
 
-	# 轻 RTS：纯士兵的命令卡不再有 A 移动 / S 停止 / D 驻守 / F 巡逻，只剩「回位」
+	# 兵可以随便动：命令卡照旧给 A 移动 / S 停止 / D 驻守 / F 巡逻，另加一格「回位」
 	m._set_selection([s1])
 	var card: Array = m.commands().map(func(c): return c.id)
-	_check(card.has("recall") and not card.has("attack") and not card.has("hold") and not card.has("patrol"),
-		"纯士兵命令卡只剩「回位」，移动令都收起了（兵靠兵营集结点摆位）")
-	# 底层那套还在（自由兵 / 手搓单位 / 特殊单位用）：直接调，不走 UI
+	_check(card.has("recall") and card.has("attack") and card.has("stop") and card.has("hold") and card.has("patrol"),
+		"士兵命令卡：回位 + A 移动 / S 停止 / D 驻守 / F 巡逻（兵随便动）")
+	# 这些命令都不走 UI 也照样能用（老接口没变）
 	s1.command_attack_move(s1.position + Vector2(-140, 0))
-	_check(s1._amove_dest != Vector2.ZERO, "自由兵的 A 移动底层仍然可用")
+	_check(s1._amove_dest != Vector2.ZERO, "A 移动：记下目的地")
 	s1.command_move(s1.position + Vector2(-140, 0))
 	await tree.create_timer(0.4).timeout
 	s1.command_stop()

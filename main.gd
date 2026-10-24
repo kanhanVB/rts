@@ -134,6 +134,9 @@ func _ready() -> void:
 		_wave_mgr.wave_timer = 999.0    # 测试期间不来波次，保证断言确定性
 		train_scale = 0.0               # 老断言按"点了就出"写的；读条另有专门的测试
 		_run_test()
+	elif "--showcase" in OS.get_cmdline_user_args():
+		showcase = true
+		_run_showcase()
 
 ## 建造系统完工回调：按 kind 归档（基建加设施种类时在这里加分支）
 func _on_building_built(b: Building) -> void:
@@ -597,8 +600,12 @@ func _check_worker_safety() -> void:
 		if not is_instance_valid(w) or w.dead or w.is_garrisoned():
 			continue
 		if w.is_fleeing():
-			# 没怪了 / 怪走远了 / 躲够时间：回去接着干
-			if not has_enemy or w.flee_time() > Worker.FLEE_MAX_T or _nearest_enemy_dist(w.position) > Worker.FLEE_SAFE_R:
+			# 没怪了 / 怪走远了 / 躲够时间而且怪确实不贴身了：回去接着干。
+			# 最后那个条件要连距离一起看：怪还贴着就收工的话，农民会朝矿堆走两步、正好迎着怪，
+			# 下一秒又被吓得往回跑，在原地来回抖（9 秒超时本来是防"怪卡在房子后面看不见"的死锁）
+			var ed := _nearest_enemy_dist(w.position)
+			if not has_enemy or ed > Worker.FLEE_SAFE_R \
+					or (w.flee_time() > Worker.FLEE_MAX_T and ed > Worker.FLEE_R):
 				w.end_flee()
 		elif has_enemy and _nearest_enemy_dist(w.position) < Worker.FLEE_R:
 			w.start_flee()
@@ -865,18 +872,8 @@ func _has_units_selected() -> bool:
 func _sel_units() -> Array:
 	return selected.filter(func(u): return u is Unit and is_instance_valid(u))
 
-## 选中的全是兵（没有农民/工程师要干活）：这种时候右键不下令
-func _only_soldiers_selected() -> bool:
-	var us := _sel_units()
-	return not us.is_empty() and us.all(func(u): return u is Soldier)
-
 ## 左/右键在世界里点了一下：按当前模式下指令
 func _command_at(world: Vector2, shift := false) -> void:
-	# 轻 RTS：兵只听兵营的集结点，右键不给兵下令——否则又变回"纯 RTS 拖队形"
-	if _only_soldiers_selected():
-		_target_mode = ""
-		_hud_msg("兵只认兵营的集结点：选中兵营、右键地面设防区；要挪位置就改集结点")
-		return
 	var pos := _pick_at(world, true)
 	# 选着农民点到门口守线的工人：算点他的加工厂（工位就在门口，人正好挡着房子，
 	# 以前点人身上 = 走到那人脚下，招工/送料全落空）
@@ -1138,9 +1135,14 @@ func commands() -> Array:
 			out.append(_cmd_entry("hold", 7, "驻守", "hold", {}, "原地不动：敌人进射程就打，不追"))
 			out.append(_cmd_entry("patrol", 8, "巡逻", "patrol", {}, "在这里和目标点之间来回走，遇敌就打"))
 		else:
-			# 轻 RTS：兵只有一个能自己决定的动作——回位。位置本身由兵营集结点说了算
+			# 兵可以随便动（右键照用）；「回位」是唯一轻 RTS 专属的一格——
+			# 把手令交还给兵营，走回集结点给的站位点接着守
 			out.append(_cmd_entry("recall", 0, "回位", "stop", {},
-				"松口走回兵营给的站位点（怪走了也会自己回）。要换防区：选中兵营、右键地面改集结点"))
+				"放弃手上的目标，走回兵营集结点给的站位点接着守（按 S 停止也一样）"))
+			out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌一个一个拦着打"))
+			out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事之后回兵营的防区站好"))
+			out.append(_cmd_entry("hold", 7, "驻守", "hold", {}, "原地不动：敌人进射程就打，不追"))
+			out.append(_cmd_entry("patrol", 8, "巡逻", "patrol", {}, "在这里和目标点之间来回走，遇敌就打"))
 	if not us.any(func(u): return u is Engineer):
 		out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "删除选中的单位", "Del"))
 	return out
@@ -1925,7 +1927,12 @@ func on_trained(b: Building, kind: String) -> void:
 	_rally_i += 1
 	# 轻 RTS：兵不靠玩家拖，领一个"兵营集结点 + 自己的偏移"当防区站位，自己走过去站好
 	var at := b.rally_point()
-	var spot := open_point(_spread_pos(_rally_i % 24, at))
+	var off := _spread_pos(_rally_i % 24, at) - at
+	# 弓手站后排：沿着"朝基地"的方向再退一步。剑士挡在前面挨咬，弓手在后面射
+	# （弓手只有 45 血，跟 Goo 一样脆，站前排必死）
+	if kind == "archer":
+		off += (base.position - at).normalized() * Soldier.ARCHER_BACK
+	var spot := open_point(at + off)
 	s.set_post(b, spot - at)
 	if b.rally != Vector2.INF:
 		_hud_msg("%s去%s的集结点站好（改集结点整队跟着挪）" % [s.display_name, b.display_name])
@@ -2116,7 +2123,7 @@ func _selected_info_text() -> String:
 				if sl != "":
 					txt += "\n" + sl
 				elif t.kind == "barracks":
-					txt += "\n兵只听集结点：周围 %.0f 内自动迎上去 1v1 钉住（右键地面改防区）" % Soldier.PIN_RANGE
+					txt += "\n兵默认守在集结点：周围 %.0f 内一个一个迎上去钉住（右键可以随便调，S 停止回防区）" % Soldier.PIN_RANGE
 				else:
 					txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
 				if t.waiting_pop:
@@ -2191,6 +2198,8 @@ func _selected_info_text() -> String:
 				line += " · 钉住%s（1v1，别人不抢）" % s.pin_target.get("display_name")
 			elif s.is_ranged:
 				line += " · 弓手只输出、不挡路"
+			if s.is_manual():
+				line += " · 听你的手令（S 停止 / 回位 才回防区）"
 		return line
 	var counts := {}
 	for u in list:
@@ -2457,6 +2466,89 @@ func _draw_flag(p: Vector2) -> void:
 ## 放置预览用：和 BuildManager.try_place 同一套规则（只判断，不提示）
 func _placement_ok(kind: String, pos: Vector2) -> bool:
 	return _build_mgr.placement_error(pos, kind) == "" and economy.can_afford(BuildManager.COST_TABLE.get(kind, {}))
+
+## ================================ 演示（录屏用） ================================
+## --showcase：在离主城 340 的那段路上摆一道防线（兵营 + 4 个兵），从路的上游放怪过来撞，
+## 演完三轮再把集结点往前提一段，演示"整队跟着搬"。全程不用动手，镜头架在防区上。
+var showcase := false
+
+func _run_showcase() -> void:
+	# 给录屏留出接上的时间（录屏脚本等窗口出现后 4.5 秒开机，这里再等 6 秒才开演）
+	await get_tree().create_timer(6.0).timeout
+	_wave_mgr.wave_timer = 1.0e9      # 关掉自动波次，怪全由这里的脚本放
+	economy.ore = 4000.0
+	economy.wood = 4000.0
+	economy.ingot = 4000.0
+	economy.plank = 4000.0
+	# 1) 挑一段路：取第一个巢穴的主路，找离主城 340 左右的那个点当"路口"
+	var rd: Array = road_for(hives[0]) if not hives.is_empty() else []
+	if rd.size() < 12:
+		push_warning("showcase：这张图的路太短，演不出来")
+		return
+	var gi := 0
+	var best := INF
+	for i in rd.size():
+		var d := absf((rd[i] as Vector2).distance_to(base.position) - 340.0)
+		if d < best:
+			best = d
+			gi = i
+	var gate: Vector2 = rd[gi]
+	var tan: Vector2 = ((rd[mini(gi + 1, rd.size() - 1)] as Vector2) - (rd[maxi(gi - 1, 0)] as Vector2)).normalized()
+	# 2) 兵营盖在路边（沿路的法线方向偏 130，避开路面），集结点就设在路口
+	var bp: Vector2 = open_point(gate + tan.orthogonal() * 130.0)
+	var b: Building = _build_mgr.add_building("barracks", bp, 0)
+	barracks_list.append(b)
+	b.rally = gate
+	_hud_msg("轻 RTS：兵营的集结点（蓝旗）就是防区 —— 兵领了站位，自己走过去站好")
+	# 3) 出 6 个兵（4 剑士在前排挡路、2 弓手在后排射），等他们站定
+	for i in 6:
+		on_trained(b, "archer" if i % 3 == 2 else "sword")
+	# 4) 镜头架在防区上（不跟玩家输入，全程钉在这）
+	cam.position = gate
+	cam.zoom = Vector2(0.95, 0.95)
+	await get_tree().create_timer(2.8).timeout
+	# 5) 三轮怪，一只一只来撞防线
+	for r in 3:
+		for k in 2:
+			_showcase_goo(rd, gi, "goo")
+			await get_tree().create_timer(2.2).timeout
+		await get_tree().create_timer(5.8).timeout
+	# 6) 集结点往路的下一段挪：整队跟着搬，不用重新选兵下命令
+	var gi2 := mini(gi + 8, rd.size() - 1)
+	var gate2: Vector2 = rd[gi2]
+	set_rally(b, gate2)
+	cam.position = gate2
+	await get_tree().create_timer(3.6).timeout
+	for k in 3:
+		_showcase_goo(rd, gi2, "goo")
+		await get_tree().create_timer(2.0).timeout
+	# 7) 兵随便动：选中一个兵派走，再「回位」叫回来（操作还是纯帝国式）
+	var pick: Soldier = null
+	for u in get_tree().get_nodes_in_group("player_units"):
+		if u is Soldier and is_instance_valid(u) and not u.dead:
+			pick = u
+			break
+	if pick != null:
+		_set_selection([pick])
+		var away: Vector2 = open_point(pick.position + Vector2(-200, 130))
+		_hud_msg("兵随便动：选中右键就能派走（框选 / 右键 / A S D F 全都能用）")
+		pick.command_move(away)
+		await get_tree().create_timer(3.2).timeout
+		_hud_msg("「回位」或 S 停止 = 把手令交还，走回防区接着守")
+		pick.command_recall()
+		await get_tree().create_timer(3.2).timeout
+	# 演完了：控制台报一行，方便 headless 自检（`--showcase` 跑完不退出，录屏用）
+	await get_tree().create_timer(2.0).timeout
+	print("showcase done: 击杀=%d 阵亡=%d 训练=%d 路口=%s 新路口=%s 兵营=%s(离路口 %.0f)" % [
+		stats.kills, stats.lost, stats.trained, gate, gate2, bp, bp.distance_to(gate)])
+
+## 从路的上游放一只怪：起点取路口前面 9 个路点，让它在镜头里沿路走过来
+func _showcase_goo(rd: Array, gi: int, t: String) -> void:
+	var hi := maxi(gi - 9, 0)
+	var goo := Goo.make(t)
+	goo.position = (rd[hi] as Vector2) + Vector2(randf_range(-24.0, 24.0), randf_range(-24.0, 24.0))
+	add_child(goo)
+	goo.start_lane(rd.slice(hi))
 
 ## ================================ 自测 ================================
 ## 套件本体已拆到 test_suite.gd。入口和用法不变：
