@@ -2228,7 +2228,11 @@ func _update_labels() -> void:
 	if game_state != "play":
 		wave_label.text = ""
 	elif _wave_mgr.wave == 0:
-		wave_label.text = "敌情：第一波还有 %d 秒 · %s" % [int(_wave_mgr.wave_timer), WaveManager.wave_text(1)]
+		# 演示模式（--showcase）把波次计时器推得很远，别在顶栏印一串 9
+		if _wave_mgr.wave_timer > 3600.0:
+			wave_label.text = "敌情：演示暂停出怪 · 怪由脚本放"
+		else:
+			wave_label.text = "敌情：第一波还有 %d 秒 · %s" % [int(_wave_mgr.wave_timer), WaveManager.wave_text(1)]
 	elif _wave_mgr.wave >= WaveManager.MAX_WAVES:
 		wave_label.text = "最后一波已出，清完即胜"
 	else:
@@ -2476,6 +2480,7 @@ func _run_showcase() -> void:
 	# 给录屏留出接上的时间（录屏脚本等窗口出现后 4.5 秒开机，这里再等 6 秒才开演）
 	await get_tree().create_timer(6.0).timeout
 	_wave_mgr.wave_timer = 1.0e9      # 关掉自动波次，怪全由这里的脚本放
+	_panel_on = false                 # 产能面板挡右下角，录屏时关掉
 	economy.ore = 4000.0
 	economy.wood = 4000.0
 	economy.ingot = 4000.0
@@ -2500,19 +2505,20 @@ func _run_showcase() -> void:
 	barracks_list.append(b)
 	b.rally = gate
 	_hud_msg("轻 RTS：兵营的集结点（蓝旗）就是防区 —— 兵领了站位，自己走过去站好")
-	# 3) 出 6 个兵（4 剑士在前排挡路、2 弓手在后排射），等他们站定
-	for i in 6:
+	# 3) 出 8 个兵（5 剑士在前排挡路、3 弓手在后排射），等他们站定
+	for i in 8:
 		on_trained(b, "archer" if i % 3 == 2 else "sword")
-	# 4) 镜头架在防区上（不跟玩家输入，全程钉在这）
+	# 4) 镜头架在防区上（不跟玩家输入，全程钉在这）。推得近一点，
+	# 才看得清"哪个兵钉住了哪只怪"——这是这段演示唯一要说的事
 	cam.position = gate
-	cam.zoom = Vector2(0.95, 0.95)
+	cam.zoom = Vector2(1.75, 1.75)
 	await get_tree().create_timer(2.8).timeout
-	# 5) 三轮怪，一只一只来撞防线
+	# 5) 三轮怪，每轮两只一起上：画面里能同时看到两组"兵钉怪"的一对一
 	for r in 3:
 		for k in 2:
 			_showcase_goo(rd, gi, "goo")
-			await get_tree().create_timer(2.2).timeout
-		await get_tree().create_timer(5.8).timeout
+			await get_tree().create_timer(1.5).timeout
+		await get_tree().create_timer(6.0).timeout
 	# 6) 集结点往路的下一段挪：整队跟着搬，不用重新选兵下命令
 	var gi2 := mini(gi + 8, rd.size() - 1)
 	var gate2: Vector2 = rd[gi2]
