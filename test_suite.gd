@@ -12,6 +12,11 @@ func _init(main: Node2D) -> void:
 func run() -> void:
 	print("[TEST] 开始")
 	await m.get_tree().create_timer(1.0).timeout
+	if "--only=bell" in OS.get_cmdline_user_args():
+		await _bell_tests()    # 只跑警钟 / 报警这一块（调试用：-- --test --only=bell）
+		await _alert_tests()
+		_done()
+		return
 	_check(is_instance_valid(m.base) and m.base.kind == "base", "基地存在")
 	_check(is_instance_valid(m.hive) and m.hive.kind == "hive", "巢穴存在")
 	_check(m._player_workers().size() == 3, "开局 3 农民自动上岗")
@@ -660,12 +665,16 @@ func run() -> void:
 	await _camp_tests()
 	await _tech_tests()
 	await _explore_tests()
+	await _bell_tests()
+	await _alert_tests()
 
 	# 拆巢穴触发胜利
 	m.hive.take_damage(99999.0)
 	await m.get_tree().create_timer(0.5).timeout
 	_check(m.game_state == "win", "拆巢穴触发胜利")
+	_done()
 
+func _done() -> void:
 	if m._fail == 0:
 		print("TEST PASS")
 		m.get_tree().quit(0)
@@ -1957,6 +1966,323 @@ func _fog_tests() -> void:
 		tr.queue_free()
 	f.set_enabled(false)
 	f.queue_free()
+	await tree.process_frame
+
+## ---- 警钟：敲钟农民就近进屋躲（满了换一处）、躲进会射箭的房子每人每轮多射一箭、怪打不着选不中；再敲解除，各回各的活 ----
+func _new_worker(p: Vector2) -> Worker:
+	var w := Worker.new()
+	w.position = m.open_point(p)
+	m.add_child(w)
+	return w
+
+## 最多等 secs 秒，cond 一成立就返回 true
+func _wait_for(cond: Callable, secs: float) -> bool:
+	var tree := m.get_tree()
+	var t := 0.0
+	while t < secs:
+		if cond.call():
+			return true
+		await tree.create_timer(0.2).timeout
+		t += 0.2
+	return cond.call()
+
+func _bell_tests() -> void:
+	var tree := m.get_tree()
+	var bm: BuildManager = m._build_mgr
+	var e: Economy = m.economy
+	if m.alarm_on:
+		m.all_clear()
+	m._deselect_all()
+	# 干净的场子：原有的农民各有各的差事（会搅乱位子和账），先清掉；基地附近的怪也清掉（别混进放箭的账）
+	for w in m._player_workers():
+		w._leave_work()
+		w.queue_free()
+	for en in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(en) and not en.is_guard() and en.position.distance_to(m.base.position) < 1000.0:
+			en.queue_free()
+	await tree.process_frame
+	var bp: Vector2 = m.base.position
+	var spot := _open_spot(bp + Vector2(330, -150), 0.0, 80.0)
+	if spot == Vector2.INF:
+		spot = _open_spot(bp, 260.0, 460.0)
+	var sp2 := _open_spot(bp + Vector2(-10, -190), 0.0, 80.0)
+	_check(spot != Vector2.INF and sp2 != Vector2.INF, "找到摆箭塔 / 熔炉的空地")
+	if spot == Vector2.INF or sp2 == Vector2.INF:
+		return
+	var tw: Building = bm.add_building("tower", spot, 0)
+	var sm: Building = bm.add_building("smelter", sp2, 0)
+	bm.building_built.emit(sm)
+	await tree.process_frame
+	tw.level = 2
+	var cap2 := tw.shelter_cap()
+	tw.level = 1
+	_check(tw.shelter_cap() == 3 and cap2 == 4 and m.base.shelter_cap() == 10 and sm.shelter_cap() == 0 and not m.hive.can_shelter(),
+		"能躲的人数：箭塔 3（二级 4）、基地 10；熔炉、巢穴躲不了")
+
+	# 箭塔边 5 个闲人（最后一个正往别处走）、基地门口一个扛着矿回来的、一个去采矿的、一个熔炉的工人
+	var by_tw: Array = []
+	for i in 5:
+		by_tw.append(_new_worker(spot + Vector2(-40.0 + 20.0 * i, 46.0)))
+	var wc := _new_worker(bp + Vector2(20, m.base.size * 0.5 + 22.0))
+	var wg := _new_worker(bp + Vector2(-60, 70))
+	var wo := _new_worker(sp2 + Vector2(40, 50))
+	await tree.process_frame
+	var ng: ResNode = wg._nearest_node("ore")
+	if ng == null:
+		ng = wg._nearest_node("wood")
+	wg.command_gather(ng)
+	var op_ok := wo.command_operate(sm)
+	wc.carry_kind = "ore"
+	wc.carry_amount = 8.0
+	wc._back_to_base()
+	var mv: Vector2 = m.open_point(spot + Vector2(-180, 110))
+	by_tw[4].command_move(mv)
+	m._set_selection(by_tw)
+	m._save_control_group(7)
+	var all8: Array = by_tw.duplicate()
+	all8.append_array([wc, wg, wo])
+	var ore0 := e.ore
+	m.ring_bell()
+	var to_tw: Array = by_tw.filter(func(w): return w.shelter_at == tw)
+	var away: Array = by_tw.filter(func(w): return is_instance_valid(w.shelter_at) and w.shelter_at != tw)
+	_check(m.alarm_on and Building.alarm_on and m.sfx.last == "bell" and m._hud_msg_label.text.contains("敲响警钟"),
+		"敲警钟：钟响、横幅提示（%s）" % m._hud_msg_label.text)
+	_check(all8.all(func(w): return w.state == Worker.State.SHELTER), "敲钟后农民全都放下手上的活去躲")
+	_check(to_tw.size() == 3 and away.size() == 2 and tw.shelter_free() == 0,
+		"箭塔边 5 个农民：3 个占了箭塔的位子、2 个改去别处（%d / %d）" % [to_tw.size(), away.size()])
+	_check(op_ok and wo.work_at == null and not sm.operators.has(wo) and wo._resume.get("work_at") == sm, "熔炉的工人让出工位，记着回来接着干")
+	_check(ng != null and wg._resume.get("node") == ng and by_tw[4]._resume.has("move") and wc._resume.get("kind") == "ore",
+		"采矿的记着矿点、走路的记着要去哪、交货的记着采什么")
+	_check(wo.job_text().contains("躲"), "信息栏写着去哪躲（%s）" % wo.job_text())
+
+	var in_all: bool = await _wait_for(func(): return all8.all(func(w): return w.is_garrisoned()), 16.0)
+	_check(in_all, "农民全都进屋躲好（%d/%d）" % [all8.filter(func(w): return w.is_garrisoned()).size(), all8.size()])
+	_check(tw.sheltered.size() == 3 and to_tw.all(func(w): return w.shelter_in == tw), "箭塔里躲着占了位子的那 3 个")
+	_check(all8.all(func(w): return not w.visible and w.process_mode == Node.PROCESS_MODE_DISABLED and not w.is_in_group("player_units") and not w.is_in_group("units")),
+		"躲着的农民：藏起来、不动、不在单位组里")
+	_check(e.ore - ore0 >= 7.99 and is_zero_approx(wc.carry_amount) and is_instance_valid(wc.shelter_in) and wc.shelter_in.kind != "tower",
+		"扛着货躲进收货的房子：顺手交掉（矿 +%.0f）" % (e.ore - ore0))
+	_check(m.selected.is_empty(), "躲进屋的农民从选择里拿掉")
+	m._recall_control_group(7)
+	_check(m.selected.is_empty() and m.control_groups[7].size() == 5, "编队召回：躲着的选不上，编队里还记着")
+	var hw: Worker = to_tw[0] if not to_tw.is_empty() else wc
+	_check(m._unit_at(hw.position) == null, "点躲着的位置点不到人")
+	m._box_select(Rect2(spot - Vector2(80, 80), Vector2(160, 160)))
+	_check(not m.selected.any(func(u): return u is Worker and u.is_garrisoned()), "框选也框不到躲着的人")
+	m._deselect_all()
+	# 怪打不着躲着的人；追着的怪丢掉目标
+	var g := Goo.make("goo")
+	g.position = m.open_point(spot + Vector2(100, 40))
+	m.add_child(g)
+	g.process_mode = Node.PROCESS_MODE_DISABLED
+	var hp_w: float = hw.hp
+	var n_al: int = m.alerts.size()
+	hw.take_damage(30.0, g)
+	g.attack_target = hw
+	var got = g._acquire_target()
+	_check(is_equal_approx(hw.hp, hp_w) and m.alerts.size() == n_al and got != hw and g.attack_target == null,
+		"躲着的人怪打不着：伤害不吃、不报警，追着的怪丢掉这个目标")
+	# 躲进会射箭的房子：每人跟着第一名弓手每轮多射一支
+	g.max_hp = 9999.0
+	g.hp = 9999.0
+	var st: Dictionary = tw.tower_stats()
+	var per: float = maxf(st.dmg - g.armor, 1.0)
+	tw._arch_cd = [0.0, 0.0]
+	var hp1: float = g.hp
+	var tgt = tw._tower_target(st.range)
+	tw._tower(0.01)
+	_check(tgt == g and is_equal_approx(hp1 - g.hp, per * (int(st.archers) + 3)),
+		"箭塔里躲着 3 个：一轮 %d + 3 支箭（%.0f 伤害）" % [int(st.archers), hp1 - g.hp])
+	var nb: int = m.base.sheltered.size()
+	g.position = m.open_point(bp + Vector2(110, 60))
+	var stb: Dictionary = m.base.tower_stats()
+	var perb: float = maxf(stb.dmg - g.armor, 1.0)
+	m.base._arch_cd = [0.0, 0.5]
+	var hp2: float = g.hp
+	var tgb = m.base._tower_target(stb.range)
+	m.base._tower(0.01)
+	_check(nb >= 1 and tgb == g and is_equal_approx(hp2 - g.hp, perb * (1 + nb)), "基地里躲着 %d 个：一轮 1 + %d 支箭" % [nb, nb])
+	g.queue_free()
+	# 人口照算；顶栏按钮、提示栏、信息栏、命令卡
+	m.hud.refresh()
+	_check(m._player_workers().is_empty() and m.worker_count_hidden() == 8 and m.worker_count() == 8 and m.hud._worker_val.text.begins_with("8/"),
+		"躲着的人口照算：顶栏农民 %s" % m.hud._worker_val.text)
+	_check(m.hud._bell_btn.text == "解除警报" and m._bottleneck().contains("警钟响着"), "顶栏按钮变成「解除警报」、提示栏说警钟响着")
+	m._set_selection([tw])
+	var ti: String = m._selected_info_text()
+	_check(ti.contains("警钟：躲着 3/3 个农民") and ti.contains("多射一支箭"), "点箭塔：躲着 3/3 个、每人多射一箭（%s）" % ti.get_slice("\n", ti.count("\n")))
+	m._set_selection([m.base])
+	var bi: String = m._selected_info_text()
+	var bc: Array = m.commands().filter(func(c): return c.slot == 14)
+	_check(bi.contains("警钟：躲着 %d/10" % nb) and bc.size() == 1 and bc[0].id == "all_clear" and bc[0].key == "B",
+		"点基地：信息栏写躲了几个，命令卡 B = 解除")
+
+	# 命令卡「解除」：屋里的出来，各回各的活
+	m.run_hotkey("B")
+	_check(not m.alarm_on and not Building.alarm_on and m.sfx.last == "clear" and m._hud_msg_label.text.contains("警报解除"),
+		"命令卡「解除」：警报解除（%s）" % m._hud_msg_label.text)
+	_check(all8.all(func(w): return not w.is_garrisoned() and w.visible and w.is_in_group("player_units") and w.process_mode == Node.PROCESS_MODE_INHERIT and w.state != Worker.State.SHELTER),
+		"屋里的农民全出来了")
+	_check(tw.sheltered.is_empty() and m.base.sheltered.is_empty() and tw.shelter_free() == 3, "房子都空了")
+	_check(wo.state == Worker.State.OPERATE and wo.work_at == sm and sm.operators.has(wo), "熔炉的工人回去守线")
+	_check(wg.node_target == ng and (wg.state == Worker.State.TO_NODE or wg.state == Worker.State.GATHERING), "采矿的回原来那处矿")
+	_check(is_instance_valid(wc.node_target) and wc.node_target.kind == "ore" and wc.state == Worker.State.TO_NODE, "交完货的接着去采矿")
+	_check(by_tw[4].move_target.distance_to(mv) < 2.0 and by_tw.slice(0, 4).all(func(w): return w.state == Worker.State.IDLE),
+		"走路的接着往原来要去的地方走、闲着的出来站着")
+	m._recall_control_group(7)
+	_check(m.selected.size() == 5, "出来以后编队召回又选得上（%d）" % m.selected.size())
+	m._set_selection([m.base])
+	var bc2: Array = m.commands().filter(func(c): return c.slot == 14)
+	m._deselect_all()
+	m.hud.refresh()
+	_check(m.hud._bell_btn.text == "警钟" and bc2.size() == 1 and bc2[0].id == "bell", "顶栏按钮、命令卡变回「警钟」")
+
+	# 再敲：躲着的箭塔塌了，里面的人跑出来去别处躲
+	m.ring_bell()
+	var full_tw: bool = await _wait_for(func(): return tw.sheltered.size() == 3, 10.0)
+	var ej: Array = tw.sheltered.duplicate()
+	tw.take_damage(99999.0)
+	_check(full_tw and ej.size() == 3 and ej.all(func(w): return not w.is_garrisoned() and w.visible and w.state == Worker.State.SHELTER and is_instance_valid(w.shelter_at) and w.shelter_at != tw),
+		"躲着的箭塔塌了：里面的人跑出来，警钟还响着就去别处躲")
+	var re_in: bool = await _wait_for(func(): return ej.all(func(w): return w.is_garrisoned()), 14.0)
+	_check(re_in and ej.all(func(w): return is_instance_valid(w.shelter_in) and w.shelter_in.kind != "tower"), "换了一处躲好")
+
+	# 警钟响着时造出来的农民：第一份差事记下，先进屋躲
+	m.base.rally = Vector2.INF
+	m.base.rally_node = null
+	e.ore += 200.0
+	e.wood += 200.0
+	var known: Array = m._player_workers()
+	for w in tree.get_nodes_in_group("garrisoned"):
+		known.append(w)
+	m._set_selection([m.base])
+	m._on_worker_pressed()
+	var nw: Array = m._player_workers().filter(func(w): return not known.has(w))
+	_check(nw.size() == 1 and nw[0].state == Worker.State.SHELTER and nw[0]._resume.has("node") and is_instance_valid(nw[0].shelter_at),
+		"警钟响着时造出的农民：差事记下，先进屋躲着")
+	m._deselect_all()
+
+	# 警钟响着时选农民右键仓库 = 指定躲那儿；另外下令 = 不躲了
+	var whp := _open_spot(bp + Vector2(280, 70), 0.0, 120.0)
+	if whp == Vector2.INF:
+		whp = _open_spot(bp, 220.0, 460.0)
+	var wh: Building = bm.add_building("warehouse", whp, 0)
+	bm.building_built.emit(wh)
+	var wm1 := _new_worker(bp + Vector2(70, -90))
+	var wm2 := _new_worker(bp + Vector2(100, -90))
+	await tree.process_frame
+	var bf0: int = m.base.shelter_free()
+	m._set_selection([wm1, wm2])
+	m._issue_command(wh.position)
+	_check(wh.shelter_cap() == 8 and wm1.shelter_at == wh and wm2.shelter_at == wh and wh.shelter_free() == 6 and m.base.shelter_free() == bf0
+		and m._hud_msg_label.text.contains("2 个农民去%s躲（2/8）" % wh.display_name),
+		"警钟响着时右键仓库：指定躲进这座（%s）" % m._hud_msg_label.text)
+	wm2.command_move(wm2.position + Vector2(-60, 0))
+	_check(wm2.state == Worker.State.IDLE and wm2.shelter_at == null and wh.shelter_free() == 7, "警钟响着时另外下令：不躲了，听玩家的（位子让出来）")
+	m._deselect_all()
+
+	# B 键：解除（路上的掉头）/ 再敲 / 再解除；M 键静音
+	var kb := InputEventKey.new()
+	kb.keycode = KEY_B
+	kb.pressed = true
+	m._on_key(kb)
+	_check(not m.alarm_on and wm1.state != Worker.State.SHELTER and wm1.shelter_at == null and wh.shelter_free() == 8, "按 B 解除：路上的掉头不躲了")
+	_check(tree.get_nodes_in_group("garrisoned").is_empty() and not m._player_workers().any(func(w): return w.state == Worker.State.SHELTER), "解除后没人还躲着")
+	m._on_key(kb)
+	var on2: bool = m.alarm_on
+	m._on_key(kb)
+	_check(on2 and not m.alarm_on, "再按 B 又敲响、再按解除")
+	kb.keycode = KEY_M
+	m._on_key(kb)
+	var mute_ok: bool = Sfx.muted and m._hud_msg_label.text.contains("音效：关")
+	m.sfx.play("bell")
+	var last_ok: bool = m.sfx.last == "bell"
+	m._on_key(kb)
+	_check(mute_ok and last_ok and not Sfx.muted, "M 静音、再按打开")
+	var lens: Array = []
+	for k in ["bell", "clear", "alert"]:
+		var s := Sfx.stream(k)
+		lens.append(s.get_length() if s != null else 0.0)
+	_check(lens[0] > 2.0 and lens[1] > 1.0 and lens[2] > 0.5, "音效文件都在：警钟 %.1f 秒、解除 %.1f 秒、报警 %.1f 秒" % lens)
+
+	for w in all8 + nw + [wm1, wm2]:
+		if is_instance_valid(w):
+			w._leave_work()
+			w.queue_free()
+	for b in [sm, wh]:
+		if is_instance_valid(b):
+			b.queue_free()
+	await tree.process_frame
+
+## ---- 挨打报警：基地 / 前哨 / 农民被怪打 → 小地图那儿闪红圈 + 号角；同一片接着挨打只续不吹；兵挨打、没来源的伤害不报 ----
+func _alert_tests() -> void:
+	var tree := m.get_tree()
+	var bm: BuildManager = m._build_mgr
+	var bp: Vector2 = m.base.position
+	m.alerts.clear()
+	m._alert_sfx_t = -999.0
+	var n0: int = int(m.sfx.played.get("alert", 0))
+	var g := Goo.make("goo")
+	g.position = Vector2(-600, -600)    # 场外冻住：只当"谁打的"
+	m.add_child(g)
+	g.process_mode = Node.PROCESS_MODE_DISABLED
+	var hp0: float = m.base.hp
+	m.base.take_damage(1.0, g)
+	_check(m.alerts.size() == 1 and m.alerts[0].what == "base" and int(m.sfx.played.get("alert", 0)) == n0 + 1 and m.sfx.last == "alert",
+		"基地挨怪打：报警 + 号角")
+	var act: Array = m.active_alerts()
+	_check(act.size() == 1 and act[0].pos.distance_to(bp) < 1.0 and m.alert_text(act[0].what) == "基地遭到攻击！", "小地图在基地那儿闪：基地遭到攻击！")
+	await tree.create_timer(0.3).timeout
+	m.base.take_damage(1.0, g)
+	_check(m.alerts.size() == 1 and int(m.sfx.played.get("alert", 0)) == n0 + 1 and float(m.alerts[0].last) > float(m.alerts[0].t0),
+		"同一处接着挨打：只续红圈，不再吹号")
+	var fp := _open_spot(bp, m.ALERT_R + 80.0, m.ALERT_R + 320.0)
+	var wf := _new_worker(fp if fp != Vector2.INF else bp + Vector2(m.ALERT_R + 100.0, -100.0))
+	wf.process_mode = Node.PROCESS_MODE_DISABLED
+	wf.take_damage(1.0, g)
+	_check(m.alerts.size() == 2 and m.alerts[1].what == "worker" and int(m.sfx.played.get("alert", 0)) == n0 + 1,
+		"远处农民挨咬：另一处报警，但离上一声号角不到 %d 秒不吹" % int(m.ALERT_SFX_GAP))
+	# 消停了：ALERT_HOLD 秒没再挨打，这处清掉
+	for a in m.alerts:
+		a.last = float(a.last) - m.ALERT_HOLD - 1.0
+	_check(m.active_alerts().is_empty() and m.alerts.is_empty(), "%d 秒没再挨打：红圈消掉" % int(m.ALERT_HOLD))
+	# 没来源的伤害、兵挨打、自己人误伤：不报
+	var sd := Soldier.new()
+	sd.setup(false)
+	sd.position = m.open_point(bp + Vector2(0, 120))
+	m.add_child(sd)
+	sd.process_mode = Node.PROCESS_MODE_DISABLED
+	m.base.take_damage(1.0)
+	sd.take_damage(1.0, g)
+	wf.take_damage(1.0, sd)
+	_check(m.alerts.is_empty(), "没来源的伤害、兵挨打、自己人碰的：不报警")
+	# 前哨挨打：报「前哨遭到攻击」，离上一声号角够久了再吹
+	var opp := _open_spot(bp, 300.0, 520.0)
+	var op: Building = bm.add_building("outpost", opp if opp != Vector2.INF else bp + Vector2(400, 0), 0)
+	await tree.process_frame
+	m._alert_sfx_t = m.game_time - m.ALERT_SFX_GAP - 0.1
+	op.take_damage(1.0, g)
+	_check(m.alerts.size() == 1 and m.alerts[0].what == "outpost" and m.alert_text("outpost") == "前哨遭到攻击！" and int(m.sfx.played.get("alert", 0)) == n0 + 2,
+		"前哨挨打：报警 + 号角（前哨遭到攻击！）")
+	op.queue_free()
+	sd.queue_free()
+	wf.queue_free()
+	g.queue_free()
+	m.base.hp = hp0
+	# 真打：野地里落单的农民被 Goo 咬
+	m.alerts.clear()
+	var lone := _far_spot(250.0)
+	var wl := _new_worker(lone)
+	var gb := Goo.make("goo")
+	gb.position = m.open_point(lone + Vector2(40, 0))
+	m.add_child(gb)
+	var bit: bool = await _wait_for(func(): return m.alerts.any(func(a): return a.what == "worker"), 6.0)
+	_check(bit and wl.hp < wl.max_hp and m.alerts.any(func(a): return a.pos.distance_to(wl.position) < 120.0), "野地里的农民被 Goo 咬：在那儿报警")
+	if is_instance_valid(gb):
+		gb.queue_free()
+	if is_instance_valid(wl):
+		wl.queue_free()
+	m.alerts.clear()
 	await tree.process_frame
 
 func _check(cond: bool, msg: String) -> void:

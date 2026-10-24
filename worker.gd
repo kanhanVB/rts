@@ -3,8 +3,9 @@ class_name Worker
 ## 工人：可操控的"供应链"。采资源 -> 物理扛回基地，资源不会凭空入账。
 ## 也能进熔炉/木工台当工人：守线读条、把成品扛回仓库、顺路从仓库扛原料（State.OPERATE）。
 ## 还能去野地捡宝箱 / 遗物（State.FETCH）：走过去弯腰扛起来，扛回基地 / 仓库 / 前哨才算到手；半路被打死就掉在原地。
+## 警钟（State.SHELTER）：放下手上的活，跑进最近有空位的基地 / 仓库 / 前哨 / 箭塔躲着；解除后接着干原来的活。
 
-enum State { IDLE, TO_NODE, GATHERING, TO_BASE, OPERATE, FETCH }
+enum State { IDLE, TO_NODE, GATHERING, TO_BASE, OPERATE, FETCH, SHELTER }
 
 const CARRY_CAP := 10.0
 const GATHER_RATE := 4.0     # 每秒采集量
@@ -38,6 +39,12 @@ var fetch_target: Treasure = null
 var treasure := {}
 var _pick_t := 0.0
 var _claim_t := 0.0
+## 警钟：占了位子正往那儿跑的房子 / 躲在哪座房子里（躲着时节点藏起来、停处理、不在 units 组）
+var shelter_at: Building = null
+var shelter_in: Building = null
+var _shelter_wait: Building = null    # 哪儿都满了：在这座门口等空位
+var _shelter_t := 0.0
+var _resume := {}                     # 躲之前在干什么（警报解除后接着干）
 
 func _ready() -> void:
 	super()
@@ -146,6 +153,8 @@ func _step(delta: float) -> void:
 			_step_operate(delta)
 		State.FETCH:
 			_step_fetch(delta)
+		State.SHELTER:
+			_step_shelter(delta)
 		_:
 			# 空闲：执行玩家的移动指令（没有就原地站着）
 			_move_toward(move_target, delta)
@@ -170,6 +179,7 @@ func _floater(n: float, k: String) -> void:
 func command_operate(b: Building) -> bool:
 	if b == null or not is_instance_valid(b) or not b.is_processor():
 		return false
+	_drop_shelter()
 	if work_at == b and state == State.OPERATE:
 		return true
 	_leave_work()
@@ -312,6 +322,10 @@ func _store() -> Building:
 
 ## 当前干的活（信息栏用）
 func job_text() -> String:
+	if state == State.SHELTER:
+		if is_instance_valid(shelter_at):
+			return "警钟：跑去%s躲着" % shelter_at.display_name
+		return "警钟：能躲的地方都满了，在门口等空位"
 	if not treasure.is_empty():
 		return "扛着%s回去" % ("遗物 · " + Relic.relic_name(treasure.get("relic", "")) if treasure.get("kind", "") == "relic" else "宝箱")
 	if state == State.FETCH and is_instance_valid(fetch_target):
@@ -330,6 +344,7 @@ func job_text() -> String:
 func command_fetch(t: Treasure) -> bool:
 	if t == null or not is_instance_valid(t) or t.is_queued_for_deletion():
 		return false
+	_drop_shelter()
 	_leave_work()
 	if not treasure.is_empty():
 		_back_to_base()    # 一次只扛得动一件：先把手上这件送回去
@@ -384,8 +399,227 @@ func _death_fx() -> void:
 func _terrain_speed_factor() -> float:
 	return super() * Relic.speed_mult()
 
+## ---------- 警钟：进屋躲着 ----------
+func is_garrisoned() -> bool:
+	return is_in_group("garrisoned")
+
+## 敲警钟：放下手上的活跑去躲（手上的货、扛的宝贝带着走，进了收货点顺手交掉）
+func seek_shelter() -> void:
+	if dead or is_garrisoned():
+		return
+	if state != State.SHELTER:
+		# 记下在干什么：解除警报后接着干（闲着的记着原来要走去哪）
+		match state:
+			State.TO_NODE, State.GATHERING, State.TO_BASE:
+				_resume = {"node": node_target, "kind": _want_kind if _want_kind != "" else carry_kind}
+			State.OPERATE:
+				_resume = {"work_at": work_at}
+			State.FETCH:
+				_resume = {"fetch": fetch_target}
+			_:
+				_resume = {"move": move_target} if position.distance_to(move_target) > 20.0 else {}
+		_leave_work()    # 加工线的工位先让出来（回来再上岗）
+		waypoints.clear()
+		fetch_target = null
+		_pick_t = 0.0
+		state = State.SHELTER
+	_pick_shelter()
+
+## 警钟响着时右键基地 / 仓库 / 前哨 / 箭塔：指定躲进这座（满了返回 false，照旧自己找）
+func shelter_into(b: Building) -> bool:
+	if b == null or not is_instance_valid(b) or not b.can_shelter() or b.shelter_free(self) <= 0:
+		return false
+	if state != State.SHELTER:
+		seek_shelter()
+	if is_instance_valid(shelter_at) and shelter_at != b:
+		shelter_at.unreserve_shelter(self)
+	_go_shelter(b)
+	return true
+
+## 挑离自己最近、还有空位的避难所；全满了就去最近那座门口等着（隔一秒看一眼有没有空出来）
+func _pick_shelter() -> void:
+	var best: Building = null
+	var best_d := INF
+	var near: Building = null
+	var near_d := INF
+	for b in _group("buildings"):
+		if not is_instance_valid(b) or not b.can_shelter():
+			continue
+		var d := position.distance_to(b.position)
+		if d < near_d:
+			near_d = d
+			near = b
+		if d < best_d and b.shelter_free(self) > 0:
+			best_d = d
+			best = b
+	if is_instance_valid(shelter_at) and shelter_at != best:
+		shelter_at.unreserve_shelter(self)
+	if best != null:
+		_go_shelter(best)
+		return
+	shelter_at = null
+	_shelter_wait = near
+	_shelter_t = 1.0
+	_path = _find_path(near.position) if near != null else PackedVector2Array()
+	_path_idx = 0
+	move_target = near.position if near != null else position
+
+func _go_shelter(b: Building) -> void:
+	shelter_at = b
+	_shelter_wait = null
+	b.reserve_shelter(self)
+	_path = _find_path(b.position)
+	_path_idx = 0
+	move_target = b.position
+
+func _step_shelter(delta: float) -> void:
+	var b := shelter_at
+	if b != null and (not is_instance_valid(b) or not b.can_shelter()):
+		shelter_at = null
+		_pick_shelter()    # 要去的房子塌了：换一处
+		b = shelter_at
+	if b == null:
+		_shelter_t -= delta
+		if _shelter_t <= 0.0:
+			_pick_shelter()
+			if shelter_at != null:
+				return
+		var wt := _shelter_wait
+		if is_instance_valid(wt) and position.distance_to(wt.position) > wt.size * 0.5 + 34.0:
+			_move_toward(wt.position, delta)
+		return
+	_move_toward(b.position, delta)
+	if position.distance_to(b.position) < b.size * 0.5 + 26.0:
+		_enter_shelter(b)
+
+## 进门：收货点顺手把货卸了（入账）、宝贝到手；箭塔不收货，攥在手里带进去
+func _enter_shelter(b: Building) -> void:
+	if not b.admit(self):
+		shelter_at = null
+		_pick_shelter()
+		return
+	var game := get_tree().get_first_node_in_group("game")
+	if b.kind != "tower" and game != null:
+		if carry_amount >= 0.5:
+			game.economy.add(carry_kind, carry_amount)
+			_floater(carry_amount, carry_kind)
+		carry_amount = 0.0
+		if not treasure.is_empty():
+			_claim(b)
+	shelter_at = null
+	_shelter_wait = null
+	shelter_in = b
+	selected = false
+	if game != null:
+		game.selected.erase(self)
+	moving = false
+	_path = PackedVector2Array()
+	_path_idx = 0
+	position = b.position
+	move_target = position
+	visible = false
+	remove_from_group("units")
+	remove_from_group("player_units")
+	add_to_group("garrisoned")
+	process_mode = Node.PROCESS_MODE_DISABLED
+
+## 出门（警报解除 / 房子塌了）：从门口冒出来；警钟还响着就去别处躲，否则接着干原来的活
+func leave_shelter() -> void:
+	if not is_garrisoned():
+		return
+	var b := shelter_in
+	shelter_in = null
+	var door := position + Vector2(randf_range(-14.0, 14.0), 40.0)
+	if is_instance_valid(b):
+		b.sheltered.erase(self)
+		b.queue_redraw()    # 房顶人数牌跟着变
+		door = b.position + Vector2(randf_range(-0.3, 0.3) * b.size, b.size * 0.5 + 12.0)
+	var game := get_tree().get_first_node_in_group("game")
+	if game != null:
+		door = game.open_point(door)
+	position = door
+	move_target = door
+	_stuck_pos = door
+	_stuck_t = 0.0
+	remove_from_group("garrisoned")
+	add_to_group("units")
+	add_to_group("player_units")
+	visible = true
+	process_mode = Node.PROCESS_MODE_INHERIT
+	if game != null and game.alarm_on:
+		state = State.SHELTER
+		_pick_shelter()
+	else:
+		_resume_work()
+
+## 警报解除：屋里的出来、路上的掉头，各回各的活
+func end_alarm() -> void:
+	if is_garrisoned():
+		leave_shelter()
+	elif state == State.SHELTER:
+		if is_instance_valid(shelter_at):
+			shelter_at.unreserve_shelter(self)
+		shelter_at = null
+		_shelter_wait = null
+		_resume_work()
+
+## 接着干躲之前的活：加工线 > 捡宝 > 手上还有货先交（交完照原来的活接着干）> 采原来那处 / 同类最近的一处 > 原来要走去哪
+func _resume_work() -> void:
+	var r := _resume
+	_resume = {}
+	state = State.IDLE
+	move_target = position
+	_path = PackedVector2Array()
+	_path_idx = 0
+	var wa = r.get("work_at")
+	if is_instance_valid(wa) and wa is Building and not wa.is_queued_for_deletion() and command_operate(wa):
+		return
+	var f = r.get("fetch")
+	if is_instance_valid(f) and f is Treasure and not f.is_queued_for_deletion() and treasure.is_empty() and command_fetch(f):
+		return
+	var n = r.get("node")
+	if not (is_instance_valid(n) and n is ResNode and not n.is_queued_for_deletion() and n.amount > 0.001):
+		n = null
+	var kind: String = r.get("kind", "")
+	if carry_amount >= 0.5 or not treasure.is_empty():
+		node_target = n
+		if kind != "":
+			_want_kind = kind
+		_back_to_base()
+		return
+	if n != null:
+		command_gather(n)
+	elif kind == "ore" or kind == "wood":
+		var alt := _nearest_node(kind)
+		if alt != null:
+			command_gather(alt)
+	elif r.has("move"):
+		command_move(r.move)
+
+## 玩家亲自下令（右键 / 停止 / 招工…）：不躲了，听玩家的；躲之前的活也不记了
+func _drop_shelter() -> void:
+	if is_instance_valid(shelter_at):
+		shelter_at.unreserve_shelter(self)
+	shelter_at = null
+	_shelter_wait = null
+	if state == State.SHELTER:
+		state = State.IDLE
+		move_target = position
+	_resume = {}
+
+## 被怪打：报警（小地图闪 + 号角，main 节流）；躲在屋里的打不着
+func take_damage(amount: float, from: Node2D = null) -> void:
+	if is_garrisoned():
+		return
+	if not dead and team == 0 and from != null and is_instance_valid(from) and from.get("team") == 1:
+		var game := get_tree().get_first_node_in_group("game")
+		if game != null and game.has_method("alert_attack"):
+			game.alert_attack(position, "worker")
+	super(amount, from)
+
 ## ---------- 指令 ----------
 func command_gather(node: ResNode) -> void:
+	_drop_shelter()
 	_leave_work()
 	# 点了树林正中间够不着的树：改派离它最近、外圈够得着的那棵
 	if not node.reachable():
@@ -412,6 +646,7 @@ func command_gather(node: ResNode) -> void:
 	_path_idx = 0
 
 func command_move(pos: Vector2) -> void:
+	_drop_shelter()
 	_leave_work()
 	super(pos)            # 先走过去
 	state = State.IDLE    # 手动移动会打断采集
@@ -419,6 +654,7 @@ func command_move(pos: Vector2) -> void:
 	fetch_target = null
 
 func command_stop() -> void:
+	_drop_shelter()
 	_leave_work()
 	super()
 	state = State.IDLE
@@ -442,6 +678,8 @@ func is_idle() -> bool:
 ## 手动指派交货点：右键己方收货建筑（基地/仓库/熔炉/木工台）。
 ## 手上有货就立刻掉头去交；正在采集的话采完这一趟再按新地址走。
 func set_deliver_to(b: Building) -> void:
+	if b != null:
+		_drop_shelter()    # 玩家点名送货：不躲了
 	if b != null and work_at != null:
 		_leave_work()    # 加工线工人被改派送货：先离岗
 	deliver_to = b
@@ -514,6 +752,14 @@ func _on_stuck() -> void:
 		State.FETCH:
 			if is_instance_valid(fetch_target):
 				_path = _find_path(fetch_target.position)
+				_path_idx = 0
+		State.SHELTER:
+			var sb: Building = shelter_at if is_instance_valid(shelter_at) else _shelter_wait
+			if is_instance_valid(sb):
+				if sb == shelter_at and position.distance_to(sb.position) < sb.size * 0.5 + 48.0:
+					_enter_shelter(sb)    # 门口挤满了人：就地算进门
+					return
+				_path = _find_path(sb.position)
 				_path_idx = 0
 		State.OPERATE:
 			if not is_instance_valid(work_at):
@@ -623,6 +869,8 @@ func _face_x() -> float:
 	return NAN
 
 func _art_extra(feet: Vector2, h: float) -> void:
+	if state == State.SHELTER:
+		Art.text(self, feet - Vector2(0, h + 7.0) + _head_off, "!", 15, Color(1.0, 0.42, 0.3))    # 警钟响着、还在外面跑
 	if is_instance_valid(deliver_to):
 		# 脚下亮蓝点 = 玩家手动指派过交货点
 		Art.ellipse(self, feet + Vector2(0, 1), 4.0, Color(0.2, 0.15, 0.1))

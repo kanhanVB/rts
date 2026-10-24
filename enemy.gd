@@ -262,7 +262,7 @@ func _step(delta: float) -> void:
 			move_target = position
 			if _cd <= 0.0:
 				_cd = attack_cooldown
-				t.take_damage(attack_damage * (siege if (t is Building or t is ConstructionSite) else 1.0))
+				t.take_damage(attack_damage * (siege if (t is Building or t is ConstructionSite) else 1.0), self)    # 带上自己：玩家那边据此报警
 				attack_fx_to(t.position)
 			return
 		# 目标挪动明显（>24px）且冷却到了才重算路径（绕开悬崖/深水）。
@@ -307,15 +307,19 @@ func _follow_lane(delta: float) -> void:
 ## 都把全部玩家单位 + 建筑 + 工地扫一遍，是混战掉帧的第二大来源
 func _acquire_target() -> Node2D:
 	if attack_target != null:
-		if is_instance_valid(attack_target):
+		if is_instance_valid(attack_target) and not _hid(attack_target):
 			return attack_target
 		attack_target = null
 	_scan_t -= get_process_delta_time()
-	if _scan_t > 0.0 and _cached_target != null and is_instance_valid(_cached_target):
+	if _scan_t > 0.0 and _cached_target != null and is_instance_valid(_cached_target) and not _hid(_cached_target):
 		return _cached_target
 	_scan_t = 0.15
 	_cached_target = _scan_target()
 	return _cached_target
+
+## 追着的农民躲进屋了（警钟）：换目标
+static func _hid(t: Node2D) -> bool:
+	return t is Worker and t.is_garrisoned()
 
 func _scan_target() -> Node2D:
 	if is_guard():

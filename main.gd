@@ -80,12 +80,20 @@ var _panel_on := true
 var hud: Hud                 # 王国保卫战风格 HUD（hud.gd）
 var _decor: Array = []       # 地图装饰：[{key, pos, flip}]（纯视觉）
 var _markers: Array = []
+## 警钟（B）：农民进屋躲着；挨打报警（小地图闪 + 号角）
+var alarm_on := false
+var sfx: Sfx
+var alerts: Array = []             # [{pos, what, t0, last}]：哪儿挨打、什么挨打、第一下 / 最近一下的时间
+var _alert_sfx_t := -999.0
 var _rally_i := 0            # 新兵在兵营前排队的序号     # 右键落点圈：[{pos, t0, attack}]
 
 func _ready() -> void:
 	add_to_group("game")
 	Tech.reset()    # 科技是全局静态的：开新局清空
 	Relic.reset()   # 遗物也是
+	Building.alarm_on = false
+	sfx = Sfx.new()
+	add_child(sfx)
 	randomize()
 	var args := OS.get_cmdline_user_args()
 	classic = "--test" in args or "--classic" in args
@@ -496,6 +504,7 @@ func _process(delta: float) -> void:
 		if _power_t <= 0.0:
 			_power_t = 0.5
 			_update_power()
+			_check_garrison()
 		_check_end()
 	_update_labels()
 	_update_panel()
@@ -710,6 +719,10 @@ func _on_key(event: InputEventKey) -> void:
 		select_base()
 	elif k == KEY_N:
 		call_wave_early()
+	elif k == KEY_B:
+		ring_bell()
+	elif k == KEY_M:
+		toggle_mute()
 	elif k == KEY_PERIOD:
 		select_next_idle(true)
 	elif k == KEY_COMMA:
@@ -970,6 +983,10 @@ func commands() -> Array:
 				"升二级箭塔：2 名弓手、射程 %d、每箭 %d（护甲高的岩壳也扛不住），血 +%d" % [int(t2.range), int(t2.dmg + Tech.arrow_bonus()), int(Building.TOWER_UP_HP)]))
 		if b.kind != "base":
 			out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "拆掉这座建筑（不退资源）", "Del"))
+		elif alarm_on:
+			out.append(_cmd_entry("all_clear", 14, "解除", "all_clear", {}, "警报解除（B）：躲着的农民出来，回去接着干原来的活"))
+		else:
+			out.append(_cmd_entry("bell", 14, "警钟", "bell", {}, bell_tip()))
 		return out
 	var us := _sel_units()
 	if us.is_empty():
@@ -1023,6 +1040,10 @@ func run_command(id: String) -> void:
 		research(id)
 		return
 	match id:
+		"bell":
+			sound_alarm()
+		"all_clear":
+			all_clear()
 		"worker":
 			_on_worker_pressed()
 		"sword":
@@ -1195,6 +1216,7 @@ func _issue_command(pos: Vector2) -> void:
 	if selected.is_empty():
 		return
 	var target := _thing_at(pos)
+	var click := pos    # 原始落点：房子占的格子不能站人，open_point 会把点挪到墙外
 	if target == null:
 		pos = open_point(pos)    # 点进树林里 = 走到林子边上
 	var depot := _friendly_depot_at(pos)     # 选农民右键己方收货建筑 = 指派交货点
@@ -1207,10 +1229,20 @@ func _issue_command(pos: Vector2) -> void:
 	if target is Treasure:
 		_order_fetch(target)
 		return
+	var shelter: Building = _shelter_at(click) if alarm_on and target == null else null
+	var n_sh := 0
+	var n_sh_full := 0
 	for u in selected:
 		if not (u is Unit) or not is_instance_valid(u):
 			continue    # 选中的是建筑（基地/兵营）：建筑不会走路，跳过
 		u.cancel_orders()    # 新指令覆盖排队路点 / 巡逻 / 原地坚守
+		if shelter != null and u is Worker:
+			if u.shelter_into(shelter):
+				n_sh += 1
+			else:
+				n_sh_full += 1
+				u.seek_shelter()    # 满了：照旧自己找最近有空位的
+			continue
 		if target is ResNode and u is Worker:
 			u.command_gather(target)
 		elif proc != null and u is Worker and not u.feeds(proc.recipe().in):
@@ -1246,6 +1278,10 @@ func _issue_command(pos: Vector2) -> void:
 			move_idx += 1
 	if _a_move_next:
 		_a_move_next = false
+	if n_sh + n_sh_full > 0:
+		_hud_msg("%d 个农民去%s躲（%d/%d）%s" % [n_sh, shelter.display_name, shelter.cap_used(), shelter.shelter_cap(),
+			"，%d 个没位子，自己找别处" % n_sh_full if n_sh_full > 0 else ""])
+		return
 	if target is ResNode and target.rich and target.guarded() and not _selected_workers().is_empty():
 		_hud_msg("这片富矿还有 Goo 据点的守军看着：农民过去会挨咬，先带兵清掉")
 	# 指派必须看得见反馈：说清楚这批货进去以后变成什么
@@ -1302,6 +1338,136 @@ func _depot_result(b: Building) -> String:
 			return "原样入库，攒着造农民"
 	return "原样入库"
 
+## ---------- 警钟（帝国式 Town Bell）：B / 顶栏「警钟」/ 基地命令卡 ----------
+## 敲钟：外面的农民放下活，就近躲进有空位的基地 / 仓库 / 前哨 / 箭塔（躲进会射箭的房子每人每轮多射一支箭）；
+## 再敲一次 = 警报解除，屋里的出来、路上的掉头，各回各的活。躲着的人口照算，怪打不着、选不中
+func ring_bell() -> void:
+	if game_state != "play":
+		return
+	if alarm_on:
+		all_clear()
+	else:
+		sound_alarm()
+
+func sound_alarm() -> void:
+	if game_state != "play" or alarm_on:
+		return
+	alarm_on = true
+	Building.alarm_on = true
+	var ws := _player_workers()
+	# 离避难所近的先挑位子：近处的空位别被远处跑来的人占了
+	var dist := {}
+	for w in ws:
+		dist[w] = _nearest_shelter_d(w.position)
+	ws.sort_custom(func(a, b): return dist[a] < dist[b])
+	var none := 0
+	for w in ws:
+		w.seek_shelter()
+		if w.shelter_at == null:
+			none += 1
+	sfx.play("bell")
+	if ws.is_empty():
+		_hud_msg("敲响警钟！外面没有农民要躲（再按 B 解除）")
+	elif none > 0:
+		_hud_msg("敲响警钟！%d 个农民跑去躲，%d 个没地方躲（能躲的房子都满了，在门口等）——再按 B 解除" % [ws.size() - none, none])
+	else:
+		_hud_msg("敲响警钟！%d 个农民跑去基地 / 仓库 / 前哨 / 箭塔躲着——再按 B 解除" % ws.size())
+
+func all_clear() -> void:
+	if not alarm_on:
+		return
+	alarm_on = false
+	Building.alarm_on = false
+	var n := 0
+	for w in get_tree().get_nodes_in_group("garrisoned"):
+		if is_instance_valid(w):
+			w.end_alarm()
+			n += 1
+	for w in _player_workers():
+		if w.state == Worker.State.SHELTER:
+			w.end_alarm()
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if is_instance_valid(b) and b.can_shelter():
+			b.queue_redraw()    # 基地顶上的钟收起来、人数牌撤掉
+	sfx.play("clear")
+	_hud_msg("警报解除：%d 个农民出来，回去接着干活" % n if n > 0 else "警报解除：农民回去接着干活")
+
+## 离 p 最近的避难所多远（敲钟时排先后）
+func _nearest_shelter_d(p: Vector2) -> float:
+	var best := INF
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if is_instance_valid(b) and b.can_shelter():
+			best = minf(best, p.distance_to(b.position))
+	return best
+
+func bell_tip() -> String:
+	var c: Dictionary = Building.SHELTER_CAP
+	return "敲警钟（B）：外面的农民放下手上的活，就近躲进有空位的基地（%d 人）/ 仓库（%d）/ 前哨（%d）/ 箭塔（%d，二级 %d）；\n躲进基地 / 前哨 / 箭塔的每人每轮多射一支箭，怪打不着躲着的人。警钟响着时选农民右键能躲的房子 = 指定躲那儿。\n再按一次解除警报，各回各的活" % [
+		int(c.base), int(c.warehouse), int(c.outpost), int(c.tower), Building.SHELTER_CAP_TOWER2]
+
+## 躲在屋里的农民（不在 player_units 组里），人口照算
+func worker_count_hidden() -> int:
+	return get_tree().get_nodes_in_group("garrisoned").size()
+
+func worker_count() -> int:
+	return _player_workers().size() + worker_count_hidden()
+
+func unit_count() -> int:
+	return get_tree().get_nodes_in_group("player_units").size() + worker_count_hidden()
+
+## 保险：躲着的房子没了（别的路子删掉的）还挂在屋里的，放出来
+func _check_garrison() -> void:
+	for w in get_tree().get_nodes_in_group("garrisoned"):
+		if is_instance_valid(w) and (not is_instance_valid(w.shelter_in) or w.shelter_in.is_queued_for_deletion()):
+			w.leave_shelter()
+
+## 警钟响着时右键的是不是能躲的房子
+func _shelter_at(pos: Vector2) -> Building:
+	var best: Building = null
+	var best_d := INF
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if not is_instance_valid(b) or not b.can_shelter():
+			continue
+		var d := pos.distance_to(b.position)
+		if d < b.size * 0.75 and d < best_d:
+			best_d = d
+			best = b
+	return best
+
+## ---------- 挨打报警：基地 / 前哨 / 农民被怪打 → 小地图那儿闪红圈 + 号角 ----------
+## 同一片地方（ALERT_R 以内）接着挨打只续红圈、不再吹号；两声号角至少隔 ALERT_SFX_GAP 秒
+const ALERT_R := 360.0
+const ALERT_HOLD := 12.0     # 这么久没再挨打，这处才算消停（之后再挨打重新报警）
+const ALERT_SHOW := 4.0      # 小地图红圈从最后一下挨打起闪这么久
+const ALERT_SFX_GAP := 3.0
+
+func alert_attack(pos: Vector2, what: String) -> void:
+	if game_state != "play":
+		return
+	for a in alerts:
+		if a.pos.distance_to(pos) < ALERT_R and game_time - float(a.last) < ALERT_HOLD:
+			a.last = game_time
+			if what == "base":
+				a.what = "base"    # 一处里有基地挨打就说基地
+			return
+	alerts.append({"pos": pos, "what": what, "t0": game_time, "last": game_time})
+	if game_time - _alert_sfx_t >= ALERT_SFX_GAP:
+		_alert_sfx_t = game_time
+		sfx.play("alert")
+
+## 小地图上还在闪的报警点（顺手把消停了的清掉）
+func active_alerts() -> Array:
+	alerts = alerts.filter(func(a): return game_time - float(a.last) < ALERT_HOLD)
+	return alerts.filter(func(a): return game_time - float(a.last) < ALERT_SHOW)
+
+func alert_text(what: String) -> String:
+	return {"base": "基地遭到攻击！", "outpost": "前哨遭到攻击！"}.get(what, "农民遭到攻击！")
+
+## M：音效开关
+func toggle_mute() -> void:
+	Sfx.muted = not Sfx.muted
+	_hud_msg("音效：关（M 打开）" if Sfx.muted else "音效：开（M 关掉）")
+
 ## ---------- 加工线：招工 / 放人 ----------
 ## 招工：先挑最近的闲农民，没有闲的就从采集的里调最近的（加工线上的工人不动）
 func hire_operator(b: Building) -> Worker:
@@ -1311,7 +1477,7 @@ func hire_operator(b: Building) -> Worker:
 	var best: Worker = null
 	var best_d := INF
 	for w in _player_workers():
-		if w.state == Worker.State.OPERATE:
+		if w.state == Worker.State.OPERATE or w.state == Worker.State.SHELTER:
 			continue
 		# 站着没事的 > 走在路上的闲人（玩家刚派走的，别抢）> 采集中的；给这条线送料的最后动
 		var d: float = w.position.distance_to(b.position)
@@ -1393,6 +1559,8 @@ func _recall_control_group(idx: int, add := false) -> void:
 	for u in grp:
 		if is_instance_valid(u):
 			alive.append(u)
+			if u is Worker and u.is_garrisoned():
+				continue    # 躲在屋里的农民：还在编队里，出来了再选得上
 			if not selected.has(u):
 				u.selected = true
 				selected.append(u)
@@ -1556,9 +1724,9 @@ func queued_count(kind := "") -> int:
 func pop_blocked(kind: String) -> bool:
 	if Tech.is_tech(kind):
 		return false
-	if get_tree().get_nodes_in_group("player_units").size() >= UNIT_CAP:
+	if unit_count() >= UNIT_CAP:
 		return true
-	return kind == "worker" and _player_workers().size() >= WORKER_CAP
+	return kind == "worker" and worker_count() >= WORKER_CAP
 
 ## 点基地 → 造农民（排进基地的生产队列）
 func _on_worker_pressed() -> void:
@@ -1568,14 +1736,14 @@ func _on_worker_pressed() -> void:
 	if home == null or not (home.kind in ["base", "outpost"]):
 		_hud_msg("先点基地（或前哨）才能造农民")
 		return
-	if _player_workers().size() + queued_count("worker") >= WORKER_CAP:
+	if worker_count() + queued_count("worker") >= WORKER_CAP:
 		_hud_msg("农民已到上限（%d），够用就好" % WORKER_CAP)
 		return
 	_enqueue(home, "worker")
 
 ## 排队：检查人口 / 队列 / 钱 → 先扣钱再排（帝国式，取消全额退）
 func _enqueue(b: Building, kind: String) -> bool:
-	if get_tree().get_nodes_in_group("player_units").size() + queued_count() >= UNIT_CAP:
+	if unit_count() + queued_count() >= UNIT_CAP:
 		_hud_msg("全军已到上限（%d）" % UNIT_CAP)
 		return false
 	if b.queue.size() >= Building.QUEUE_MAX:
@@ -1614,26 +1782,9 @@ func on_trained(b: Building, kind: String) -> void:
 		var w := Worker.new()
 		w.position = open_point(b.position + Vector2(60, 40))
 		add_child(w)
-		if is_instance_valid(b.rally_node) and b.rally_node is ResNode:
-			w.command_gather(b.rally_node)
-			return
-		# 集结点设在熔炉/木工台上：出来直接进厂干活（人满了就在门口等）
-		if is_instance_valid(b.rally_node) and b.rally_node is Building and b.rally_node.is_processor():
-			if w.command_operate(b.rally_node):
-				return
-		if b.rally != Vector2.INF:
-			w.command_move(open_point(b.rally))
-			return
-		# 新农民自动上岗：哪种资源干活的人少就去哪（玩家随时可以右键改派）
-		var n_ore := 0
-		var n_wood := 0
-		for o in _player_workers():
-			if o != w and is_instance_valid(o.node_target):
-				if o.node_target.kind == "ore":
-					n_ore += 1
-				else:
-					n_wood += 1
-		w.auto_assign("wood" if n_wood < n_ore else "ore")
+		_first_job(b, w)
+		if alarm_on:
+			w.seek_shelter()    # 警钟响着时出来的：差事记下，先进屋躲着
 		return
 	var s := Soldier.new()
 	s.setup(kind == "archer")
@@ -1642,6 +1793,29 @@ func on_trained(b: Building, kind: String) -> void:
 	_rally_i += 1
 	var at := b.rally if b.rally != Vector2.INF else b.position + Vector2(0, 86)
 	s.command_move(open_point(_spread_pos(_rally_i % 24, at)))
+
+## 新农民的第一份差事：集结点（矿/树 → 去采；加工厂 → 进厂；地面 → 走过去）> 哪种资源人少去哪
+func _first_job(b: Building, w: Worker) -> void:
+	if is_instance_valid(b.rally_node) and b.rally_node is ResNode:
+		w.command_gather(b.rally_node)
+		return
+	# 集结点设在熔炉/木工台上：出来直接进厂干活（人满了就在门口等）
+	if is_instance_valid(b.rally_node) and b.rally_node is Building and b.rally_node.is_processor():
+		if w.command_operate(b.rally_node):
+			return
+	if b.rally != Vector2.INF:
+		w.command_move(open_point(b.rally))
+		return
+	# 新农民自动上岗：哪种资源干活的人少就去哪（玩家随时可以右键改派）
+	var n_ore := 0
+	var n_wood := 0
+	for o in _player_workers():
+		if o != w and is_instance_valid(o.node_target):
+			if o.node_target.kind == "ore":
+				n_ore += 1
+			else:
+				n_wood += 1
+	w.auto_assign("wood" if n_wood < n_ore else "ore")
 
 ## ---------- 科技研究（tech.gd）：和训练共用建筑的生产队列（占格子、先扣钱、点图标取消全额退），不占人口 ----------
 func tech_queued(id: String) -> bool:
@@ -1788,17 +1962,26 @@ func _selected_info_text() -> String:
 				var st: Dictionary = t.tower_stats()
 				extra = " · 箭塔 %.0f 伤害 / %.1f 秒 · 射程 %.0f" % [st.dmg, st.cd, st.range]
 			var txt := "%s   血量 %.0f/%.0f · 建筑%s" % [t.display_name, t.hp, t.max_hp, extra]
+			var sl := ""    # 警钟响着 / 屋里有人：躲了几个
+			if t.shelter_cap() > 0 and (alarm_on or not t.sheltered.is_empty()):
+				sl = "警钟：躲着 %d/%d 个农民%s" % [t.sheltered.size(), t.shelter_cap(), "，每人每轮多射一支箭" if t.has_tower() else ""]
 			if t.kind == "tower":
 				var st: Dictionary = t.tower_stats()
 				txt = "%s   血量 %.0f/%.0f · 弓手 %d · 每箭 %.0f（%.1f 秒/箭）· 射程 %.0f\n先打跑在最前面的 · 击杀 %d" % [
 					t.display_name, t.hp, t.max_hp, int(st.archers), st.dmg, st.cd, st.range, t.kills]
 				txt += " · Q 升级（%s）" % economy.cost_text(Economy.COST_TOWER_UP) if t.can_upgrade() else " · 已满级"
 			if t.trains():
-				txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
+				# 底下还有一排生产队列、放不下更多行：警钟这行顶掉集结点 / 研究提示那行
+				if sl != "":
+					txt += "\n" + sl
+				else:
+					txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
 				if t.waiting_pop:
 					txt += " · 人口满了，等空位"
 				var dn := Tech.done_names(t.kind)
-				if not dn.is_empty():
+				if sl != "":
+					pass
+				elif not dn.is_empty():
 					txt += " · 已研究：%s" % "、".join(dn)
 				elif not Tech.ids_at(t.kind).is_empty():
 					txt += " · 第二排 A S D F 研究升级"
@@ -1833,6 +2016,8 @@ func _selected_info_text() -> String:
 				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %s 秒%s\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,
 					r.n, Economy.KIND_NAME[r.in], r.n, Economy.KIND_NAME[r.out], Building.fmt_secs(t.batch_time()),
 					"（水车带动 快 30%）" if t.powered() else "", t.status_text(), "开" if t.self_fetch else "关"]
+			if sl != "" and not t.trains():
+				txt += "\n" + sl
 			return txt
 		var u: Unit = t
 		var atk_txt := "—" if u.atk <= 0.0 else "%.0f（%.1f秒/下）" % [u.atk, u.atk_cd]
@@ -1877,7 +2062,7 @@ func _update_labels() -> void:
 		res_txt += "    铁 %d" % int(economy.ingot)
 	if economy.plank > 0.0:
 		res_txt += "    板 %d" % int(economy.plank)
-	res_label.text = "%s    农民 %d/%d    %s" % [res_txt, _player_workers().size(), WORKER_CAP, eng_txt]
+	res_label.text = "%s    农民 %d/%d    %s" % [res_txt, worker_count(), WORKER_CAP, eng_txt]
 	if game_state != "play":
 		wave_label.text = ""
 	elif _wave_mgr.wave == 0:
@@ -1905,11 +2090,13 @@ func _update_panel() -> void:
 func _bottleneck() -> String:
 	if game_state != "play":
 		return ""
+	if alarm_on:
+		return "警钟响着：农民在屋里躲着，按 B 解除"
 	var ore_r := economy.rate("ore")
 	var wood_r := economy.rate("wood")
 	if ore_r < 0.02 and wood_r < 0.02:
 		return "没人交货，派人去采矿/伐木"
-	var w := _player_workers().size()
+	var w := worker_count()
 	# 攒不出农民是最要命的卡点，比其他提示优先
 	if economy.wood < Economy.COST_WORKER["wood"] and w < WORKER_CAP:
 		return "木材不足，造不了农民（要%d木）" % int(Economy.COST_WORKER["wood"])

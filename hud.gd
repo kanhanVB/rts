@@ -44,6 +44,7 @@ var _clock_val: Label
 var _wave_bar: ProgressBar
 var _wave_box: HBoxContainer
 var _call_btn: Button    # 提前叫波（N）
+var _bell_btn: Button    # 警钟 / 解除警报（B）
 var _help: PanelContainer
 var _top: PanelContainer
 var _bottom: PanelContainer
@@ -222,6 +223,9 @@ func _build_top_bar() -> void:
 	wv.add_child(_wave_bar)
 	_call_btn = _small_btn(_wave_box, "叫波", "")
 	_call_btn.pressed.connect(func(): main.call_wave_early())
+	_bell_btn = _small_btn(hb, "警钟", "")
+	_bell_btn.custom_minimum_size.x = 64
+	_bell_btn.pressed.connect(func(): main.ring_bell())
 	_clock_val = Label.new()
 	_clock_val.add_theme_font_size_override("font_size", 18)
 	_clock_val.tooltip_text = "游戏时间"
@@ -369,7 +373,7 @@ func _draw_cmd(slot: int) -> void:
 		return
 	var c: Dictionary = _cmd_at[slot]
 	var id: String = c.id
-	if id in ["attack", "stop", "hold", "patrol", "delete"]:
+	if id in ["attack", "stop", "hold", "patrol", "delete", "bell", "all_clear"]:
 		_glyph(b, id, Vector2(28, 17))
 	else:
 		var t := icon(c.icon)
@@ -453,6 +457,36 @@ func _glyph(ci: CanvasItem, id: String, c: Vector2) -> void:
 			for s in [-1.0, 1.0]:
 				ci.draw_line(c + Vector2(-8, -8 * s), c + Vector2(8, 8 * s), ink, 6.0)
 				ci.draw_line(c + Vector2(-8, -8 * s), c + Vector2(8, 8 * s), Color(0.95, 0.3, 0.2), 3.0)
+		"bell":      # 金钟 + 两边的声纹
+			bell_glyph(ci, c + Vector2(0, 1), 0.82, 0.0)
+			for sx in [-1.0, 1.0]:
+				for i in 2:
+					var r := 4.0 + i * 3.5
+					var a0 := (0.0 if sx > 0.0 else PI) - 0.7
+					ci.draw_arc(c + Vector2(sx * 11.0, -2.0), r, a0, a0 + 1.4, 6, ink, 2.6)
+					ci.draw_arc(c + Vector2(sx * 11.0, -2.0), r, a0, a0 + 1.4, 6, Color(1.0, 0.9, 0.55), 1.2)
+		"all_clear": # 金钟 + 绿勾
+			bell_glyph(ci, c + Vector2(-3, 1), 0.82, 0.0)
+			var ck := PackedVector2Array([c + Vector2(4, 4), c + Vector2(8, 9), c + Vector2(15, -2)])
+			ci.draw_polyline(ck, ink, 5.5)
+			ci.draw_polyline(ck, Color(0.45, 0.85, 0.35), 2.8)
+
+## 钟（警钟按钮 / 基地顶上）：c = 钟身中心，k = 缩放，rot = 摆角（绕顶上的挂环摆）
+static func bell_glyph(ci: CanvasItem, c: Vector2, k := 1.0, rot := 0.0) -> void:
+	var ink := INK
+	ci.draw_set_transform(c + Vector2(0, -12.0) * k, rot, Vector2(k, k))
+	var body := PackedVector2Array([Vector2(-3, 1.5), Vector2(3, 1.5), Vector2(6.5, 4), Vector2(8, 10), Vector2(9, 16),
+		Vector2(12.5, 20.5), Vector2(-12.5, 20.5), Vector2(-9, 16), Vector2(-8, 10), Vector2(-6.5, 4)])
+	ci.draw_circle(Vector2(0, 23.0), 3.8, ink)                       # 钟舌
+	ci.draw_circle(Vector2(0, 23.0), 2.5, Color(0.6, 0.42, 0.2))
+	ci.draw_colored_polygon(body, Color(0.95, 0.75, 0.33))
+	var ol := body.duplicate()
+	ol.append(body[0])
+	ci.draw_polyline(ol, ink, 2.0)
+	ci.draw_line(Vector2(-10.0, 17.0), Vector2(10.0, 17.0), Color(0.72, 0.5, 0.2), 1.5)    # 腰线
+	ci.draw_line(Vector2(-4.0, 5.5), Vector2(-5.5, 14.0), Color(1.0, 0.95, 0.78), 1.6)     # 高光
+	ci.draw_arc(Vector2(0, -0.8), 2.6, 0.0, TAU, 12, ink, 2.0)                             # 挂环
+	ci.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 ## 命令卡内容跟着选中对象换（只在变了时重建提示文字）
 func _sync_commands() -> void:
@@ -530,6 +564,8 @@ Ctrl+数字：编队 · 数字：选队（连按两下跳过去）· Shift+数�
 底栏生产队列：点图标取消（全额退钱）· 人口满了排头会等空位
 升级：选中基地 / 兵营，第二排 A S D F 研究（排进生产队列读条，取消全额退；一次研究、全军生效）
 塔防：工程师 T 盖箭塔（盖在土路边，选中看射程圈）· 选中箭塔 Q 升级（木板 + 铁锭）· N / 顶栏"叫波"：提前叫下一波，剩几秒奖励多少矿木
+B / 顶栏"警钟"：农民全躲进最近有空位的基地 / 仓库 / 前哨 / 箭塔，躲进会射箭的房子每人每轮多射一箭；再按一次解除，各回各的活
+基地 / 前哨 / 农民挨打：小地图那儿闪红圈 + 号角（M 静音）
 敌人：Goo 啃路边房子 · 窜窜跑得快、直冲基地 · 岩壳又厚又带甲、专拆箭塔（派剑士顶）
 C：产能面板 · F1：本说明"""
 	_help.add_child(l)
@@ -593,6 +629,8 @@ func refresh() -> void:
 	var workers: Array = main._player_workers()
 	for w in workers:
 		var k := ""
+		if w.state == Worker.State.SHELTER:
+			continue
 		if w.state == Worker.State.TO_BASE:
 			k = w.carry_kind
 		elif w.state != Worker.State.IDLE and is_instance_valid(w.node_target):
@@ -601,8 +639,8 @@ func refresh() -> void:
 			on[k] += 1
 	for k in _res_sub:
 		_res_sub[k].text = "(%d)" % on[k]
-	_worker_val.text = "%d/%d" % [workers.size(), main.WORKER_CAP]
-	var pop: int = main.get_tree().get_nodes_in_group("player_units").size() + main.queued_count()
+	_worker_val.text = "%d/%d" % [main.worker_count(), main.WORKER_CAP]
+	var pop: int = main.unit_count() + main.queued_count()
 	_pop_val.text = "%d/%d" % [pop, main.UNIT_CAP]
 	if pop >= main.UNIT_CAP:
 		_pop_val.add_theme_color_override("font_color", RED_TEXT)
@@ -626,6 +664,15 @@ func refresh() -> void:
 	_wave_bar.visible = wm.wave < WaveManager.MAX_WAVES
 	_wave_bar.value = 1.0 - clampf(wm.wave_timer / span, 0.0, 1.0)
 	_call_btn.visible = wm.can_call_early()
+	_bell_btn.visible = main.game_state == "play"
+	if main.alarm_on:
+		_bell_btn.text = "解除警报"
+		_bell_btn.add_theme_color_override("font_color", RED_TEXT)
+		_bell_btn.tooltip_text = "警报解除（B）：躲着的 %d 个农民出来，回去接着干原来的活" % main.worker_count_hidden()
+	else:
+		_bell_btn.text = "警钟"
+		_bell_btn.remove_theme_color_override("font_color")
+		_bell_btn.tooltip_text = main.bell_tip()
 	if _call_btn.visible:
 		_call_btn.tooltip_text = "提前叫第 %d 波（N）：%s\n现在叫奖励 %d 矿 + %d 木（越早叫奖励越多）" % [
 			wm.wave + 1, WaveManager.wave_text(wm.wave + 1), wm.early_bonus(), wm.early_bonus()]
@@ -986,6 +1033,22 @@ class Minimap extends Control:
 		for u in tree.get_nodes_in_group("units"):
 			if u.visible:
 				draw_circle(u.position * k, 2.0, Color(0.55, 0.85, 1.0) if u.team == 0 else Color(1.0, 0.35, 0.25))
+		# 挨打报警：那儿一圈圈往外扩的红圈（一闪一闪），最新那条在底下写一行字
+		var now: float = main.game_time
+		var newest: Dictionary = {}
+		for a in main.active_alerts():
+			var age: float = now - float(a.t0)
+			var p: Vector2 = a.pos * k
+			for j in 2:
+				var ph := fmod(age * 1.2 + j * 0.5, 1.0)
+				draw_arc(p, 3.0 + ph * 13.0, 0.0, TAU, 20, Color(1.0, 0.25, 0.15, 1.0 - ph), 2.0)
+			if fmod(age, 0.5) < 0.3:
+				draw_circle(p, 3.6, Hud.INK)
+				draw_circle(p, 2.6, Color(1.0, 0.3, 0.2))
+			if newest.is_empty() or float(a.last) > float(newest.last):
+				newest = a
+		if not newest.is_empty() and now - float(newest.t0) < 4.0:
+			Art.text(self, Vector2(size.x * 0.5, size.y - 5.0), main.alert_text(newest.what), 13, Color(1.0, 0.55, 0.42))
 		# 视野框
 		var cam: Camera2D = main.cam
 		if cam != null:

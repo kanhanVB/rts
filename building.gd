@@ -90,9 +90,15 @@ func _exit_tree() -> void:
 		Terrain.current.occupy(_fp, -1)
 		_fp = []
 
-func take_damage(amount: float, _from: Node2D = null) -> void:
+func take_damage(amount: float, from: Node2D = null) -> void:
 	if is_queued_for_deletion():
 		return
+	# 基地 / 前哨被怪打：小地图在这儿闪 + 报警号角（main 按地点和时间节流）
+	if team == 0 and (kind == "base" or kind == "outpost") and from != null and is_instance_valid(from) and from.get("team") == 1:
+		if _game_ref == null or not is_instance_valid(_game_ref):
+			_game_ref = get_tree().get_first_node_in_group("game")
+		if _game_ref != null and _game_ref.has_method("alert_attack"):
+			_game_ref.alert_attack(position, kind)
 	hp -= amount
 	_hurt_until = Time.get_ticks_msec() + 160
 	queue_redraw()
@@ -100,6 +106,7 @@ func take_damage(amount: float, _from: Node2D = null) -> void:
 		if not is_queued_for_deletion():
 			Fx.spawn(get_parent(), "dust", position + Vector2(0, size * 0.2), {"size": size * 1.6, "life": 0.8})
 		queue_free()
+		release_garrison()    # 房子塌了：躲着的人跑出来（警钟还响着就去别处躲）
 
 ## 城堡自带箭塔（王国保卫战式）：开局没兵也能顶住零星几只 Goo，但挡不住大波
 const TOWER_RANGE := 170.0
@@ -127,6 +134,102 @@ var _game_ref: Node = null
 
 func has_tower() -> bool:
 	return team == 0 and (kind == "base" or kind == "tower" or kind == "outpost")
+
+## ---------- 警钟：农民进屋躲着（帝国式 Town Bell）----------
+## 基地 / 仓库 / 前哨 / 箭塔能躲人；躲进会射箭的房子（基地、前哨、箭塔）每人每轮多射一支箭。
+## 躲着的农民：藏起来、停止处理、不在 units / player_units 组里（怪打不着、选不中），人口照算
+const SHELTER_CAP := {"base": 10, "warehouse": 8, "outpost": 5, "tower": 3}
+const SHELTER_CAP_TOWER2 := 4
+static var alarm_on := false        # 警钟响着（main 设）：基地顶上挂口钟晃
+var sheltered: Array = []          # 躲在里面的农民
+var _shelter_res: Array = []        # 正往这儿跑、已经占了位子的农民
+
+func shelter_cap() -> int:
+	if team != 0:
+		return 0
+	if kind == "tower" and level >= 2:
+		return SHELTER_CAP_TOWER2
+	return int(SHELTER_CAP.get(kind, 0))
+
+func can_shelter() -> bool:
+	return shelter_cap() > 0 and hp > 0.0 and not is_queued_for_deletion()
+
+## 还空几个位子（except = 问的人自己已经占的那个不算）
+func shelter_free(except = null) -> int:
+	_shelter_res = _shelter_res.filter(func(w): return is_instance_valid(w) and w.shelter_at == self)
+	var n := sheltered.size() + _shelter_res.size()
+	if except != null and _shelter_res.has(except):
+		n -= 1
+	return shelter_cap() - n
+
+## 已占的位子（屋里的 + 路上的）
+func cap_used() -> int:
+	return shelter_cap() - shelter_free()
+
+func reserve_shelter(w) -> void:
+	if not _shelter_res.has(w):
+		_shelter_res.append(w)
+
+func unreserve_shelter(w) -> void:
+	_shelter_res.erase(w)
+
+## 进门：满了返回 false
+func admit(w) -> bool:
+	_shelter_res.erase(w)
+	if sheltered.has(w):
+		return true
+	if sheltered.size() >= shelter_cap():
+		return false
+	sheltered.append(w)
+	queue_redraw()
+	return true
+
+## 全放出来（警报解除 / 房子塌了）
+func release_garrison() -> void:
+	var list := sheltered.duplicate()
+	sheltered.clear()
+	for w in list:
+		if is_instance_valid(w):
+			w.leave_shelter()
+	queue_redraw()
+
+## 躲在里面的农民从窗口 / 垛口往外射：每人跟着第一名弓手每轮多射一支，同样先打跑在最前面的
+func _garrison_volley(st: Dictionary) -> void:
+	var n := sheltered.size()
+	for k in n:
+		var t := _tower_target(st.range)
+		if t == null:
+			return
+		t.take_damage(st.dmg, self)
+		if t.get("dead") == true:
+			kills += 1
+		var to: Vector2 = t.position + Vector2(randf_range(-4.0, 4.0), -9.0 + randf_range(-3.0, 3.0))
+		Fx.spawn(get_parent(), "arrow", position + _loophole(k, n), {"to": to, "life": 0.3})
+
+## 第 k 个躲着的人从哪儿放箭（本地坐标）：箭塔 / 前哨在垛口一排，基地在墙上的窗口一排
+func _loophole(k: int, n: int) -> Vector2:
+	var fx := (float(k) + 0.5) / float(n) - 0.5
+	var up := float(k % 2)
+	if kind == "tower" or kind == "outpost":
+		var af := _archer_feet(0)
+		return Vector2((af.x if kind == "outpost" else 0.0) + fx * size * 0.8, af.y - 4.0 - 5.0 * up)
+	return Vector2(fx * size * 0.9, -size * (0.62 + 0.14 * up))
+
+## 屋顶上的小牌子：农民头像 + 躲着几个 / 能躲几个
+func _shelter_badge(at: Vector2) -> void:
+	var txt := "%d/%d" % [sheltered.size(), shelter_cap()]
+	var f := Art.font()
+	var tw := f.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
+	var w := tw + 24.0
+	var r := Rect2(at + Vector2(-w * 0.5, -15.0), Vector2(w, 15.0))
+	for c in [Vector2(r.position.x, r.get_center().y), Vector2(r.end.x, r.get_center().y)]:
+		draw_circle(c, 8.5, OUTLINE)
+		draw_circle(c, 7.5, Color(0.36, 0.24, 0.13))
+	draw_rect(r.grow_individual(0, 1, 0, 1), OUTLINE)
+	draw_rect(r, Color(0.36, 0.24, 0.13))
+	if Art.has("units/worker_idle"):
+		Art.draw(self, "units/worker_idle", Vector2(r.position.x + 7.0, r.end.y + 1.0), 16.0)
+	Art.text(self, Vector2(r.position.x + 17.0 + tw * 0.5, r.end.y - 3.0), txt, 12, Color(1.0, 0.86, 0.35))
 
 ## 前哨塔上的一名弓手（比箭塔射得远一点点，单发和城堡一样）
 const OUTPOST_TOWER := {"range": 190.0, "dmg": 8.0, "cd": 1.3, "archers": 1}
@@ -216,6 +319,8 @@ func _tower(delta: float) -> void:
 		if t.get("dead") == true:
 			kills += 1
 		Fx.spawn(get_parent(), "arrow", from, {"to": t.position + Vector2(0, -9), "life": 0.3})
+		if i == 0 and not sheltered.is_empty():
+			_garrison_volley(st)    # 躲着的农民跟着第一名弓手一起放
 
 ## 箭塔贴图：塔身（含垛口）→ 塔上的弓手（朝目标、放箭时拉弓）→ 挑檐（挡住弓手的脚）
 func _draw_tower_art(foot: Vector2, mod: Color, shake: float) -> float:
@@ -279,7 +384,7 @@ func _process(delta: float) -> void:
 		_run_line(delta)
 		queue_redraw()    # 读条 / 炉火 / 烟每帧在动
 		return
-	if Time.get_ticks_msec() < _hurt_until + 40 or selected != _was_selected:
+	if Time.get_ticks_msec() < _hurt_until + 40 or selected != _was_selected or (alarm_on and kind == "base"):
 		_was_selected = selected
 		queue_redraw()
 
@@ -328,6 +433,13 @@ func _art_draw() -> bool:
 		h = Art.draw_w(self, key, foot + Vector2(shake, 0), w, mod)
 	if hp < max_hp or selected:
 		Art.hp_bar(self, foot - Vector2(0, h + 6.0), size * 0.7, hp / max_hp, team == 0, 4.0)
+	var top := foot - Vector2(0, h + (12.0 if hp < max_hp or selected else 4.0))
+	if not sheltered.is_empty():
+		_shelter_badge(top)
+		top.y -= 18.0
+	if alarm_on and kind == "base":
+		# 警钟响着：基地顶上挂口钟来回晃
+		Hud.bell_glyph(self, top + Vector2(0, -12.0), 0.9, sin(Time.get_ticks_msec() * 0.012) * 0.45)
 	if is_processor():
 		_proc_draw(foot, h)
 	return true
