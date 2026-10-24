@@ -388,7 +388,7 @@ func _draw_cmd(slot: int) -> void:
 		return
 	var c: Dictionary = _cmd_at[slot]
 	var id: String = c.id
-	if id in ["attack", "stop", "hold", "patrol", "delete", "bell", "all_clear"]:
+	if id in ["attack", "stop", "hold", "patrol", "retreat", "delete", "bell", "all_clear"]:
 		_glyph(b, id, Vector2(28, 17))
 	else:
 		var t := icon(c.icon)
@@ -468,6 +468,20 @@ func _glyph(ci: CanvasItem, id: String, c: Vector2) -> void:
 				ci.draw_line(a, e, ink, 4.5)
 				ci.draw_line(a, e, Color(1.0, 0.85, 0.35), 2.0)
 				ci.draw_colored_polygon(PackedVector2Array([e + Vector2(3.0 * s, 0), e + Vector2(-4.0 * s, -4), e + Vector2(-4.0 * s, 4)]), Color(1.0, 0.85, 0.35))
+		"retreat":   # 后撤：一支朝后（左下）的箭头，右上两道速度线
+			var a := c + Vector2(10, -10)
+			var e := c + Vector2(-6, 6)
+			ci.draw_line(a, e, ink, 5.5)
+			ci.draw_line(a, e, Color(0.55, 0.85, 0.95), 2.6)
+			var d := (e - a).normalized()
+			var n := d.orthogonal()
+			var head := PackedVector2Array([e + d * 8.0, e + n * 6.0, e - n * 6.0])
+			ci.draw_colored_polygon(head, Color(0.7, 0.9, 0.97))
+			head.append(head[0])
+			ci.draw_polyline(head, ink, 2.0)
+			for s in [0.0, 1.0]:
+				var o := c + Vector2(12.0 - s * 6.0, -14.0 + s * 6.0)
+				ci.draw_line(o + Vector2(-6, -6) * 0.35, o + Vector2(3, -3), Color(0.7, 0.9, 0.97, 0.75), 2.0)
 		"delete":    # 红叉
 			for s in [-1.0, 1.0]:
 				ci.draw_line(c + Vector2(-8, -8 * s), c + Vector2(8, 8 * s), ink, 6.0)
@@ -576,6 +590,13 @@ func _build_help() -> void:
 轻 RTS（打起来像王国保卫战，但兵听你的）：兵默认守在兵营集结点周围 115 内，怪进来自动一个一个迎上去钉住
   （近战 1v1 独占，别的兵去找下一只，不会一窝蜂围一只）· 右键 / A / D / F 随便给兵下令，给了就听你的
   「回位」或 S 停止 = 把手令交还回去，走回防区接着守 · 想整队挪防线：选中兵营、右键地面改集结点
+「撤退」W = 跟回位反方向：脱战退到最近的基地 / 前哨门口待命，到了站住、不会自己跑回防区
+  路上不接新敌，只还手贴到身上的（弓手边走边射、近战站定把这一只打掉再走）· 想回岗位再按 Q 回位
+选中兵营会画一圈虚线 = 拦截圈：怪一进这个圈，守军就自动迎上去拦；圈外路过的一概不管
+  圈上写着里面站了几个兵 · 圈是以集结点为圆心的，挪集结点圈就跟着挪
+  箭塔的射程圈是实心圆，别混：实心（攻击范围，怪在圈里就挨射）／虚线（拦截范围，怪在圈里才有人去拦）
+想拆巢穴：框选兵 → 右键点巢穴，他们一路走过去硬拆。路上挨咬也不管（命令优先），拆完按 Q 回位叫回来（要保命就按 W 撤退）
+  点名的怪不受 1v1 限制——右键点同一只，选中的兵全都会去打它（集火）
 H：选基地 · .：闲置农民 · ,：闲置军队 · 空格：镜头回到选中 · Del：删除 · Esc：取消
 Ctrl+数字：编队 · 数字：选队（连按两下跳过去）· Shift+数字：加进当前选择
 滚轮：缩放 · 鼠标贴边 / 方向键 / 中键拖动：移动镜头 · 小地图：左键跳转、右键下指令

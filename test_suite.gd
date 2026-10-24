@@ -876,6 +876,61 @@ func _light_rts_tests() -> void:
 	bk.rally = post2
 	await tree.create_timer(3.6).timeout
 	_check(sw.position.distance_to(post2) < 80.0, "改集结点：兵跟着搬过去（离新点 %.0fpx）" % sw.position.distance_to(post2))
+
+	# 撤退：往后方跑，到了站住待命，**不会自己走回防区**
+	# （跟「回位」反着：回位是回集结点接着守，撤退是退到后方把人保住）
+	for e in m.get_tree().get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	await tree.create_timer(0.3).timeout
+	# 撤退点：自己找一个确实可走、且离兵够远的空地。
+	# 不能直接交给 open_point——它会把落进树林的点挪到最近的空地，
+	# 而这个"最近"按森林格子走，经常一挪就挪回兵脚边（测不出"走过去"）
+	var back_pt := Vector2.INF
+	for i in 8:
+		var cand: Vector2 = sw.position + Vector2.from_angle(TAU * i / 8.0) * 220.0
+		if not m.area_blocked(cand, 24.0):
+			back_pt = cand
+			break
+	if back_pt == Vector2.INF:
+		back_pt = m.open_point(sw.position + Vector2(0, 210))
+	sw.command_retreat(back_pt)
+	_check(sw.is_retreating(), "按撤退：进入撤退状态")
+	_check(sw.is_manual(), "撤退期间听手令，不自己跑回防区")
+	var rt := 0.0
+	while rt < 6.0 and sw.is_retreating():
+		await tree.create_timer(0.2).timeout
+		rt += 0.2
+	_check(not sw.is_retreating(), "撤到点了（离撤退点 %.0fpx，用了 %.1f 秒）" % [sw.position.distance_to(back_pt), rt])
+	await tree.create_timer(1.8).timeout
+	_check(sw.position.distance_to(back_pt) < 60.0, "撤退到了就站住（离撤退点 %.0fpx）" % sw.position.distance_to(back_pt))
+	_check(sw.position.distance_to(post2) > 90.0, "撤退后不会自己走回防区（离集结点还有 %.0fpx）" % sw.position.distance_to(post2))
+	sw.command_recall()
+	await tree.create_timer(0.3).timeout
+	_check(not sw.is_manual(), "按回位：把手令交还出去（下一帧自己回防区）")
+	await tree.create_timer(3.0).timeout
+	_check(sw.position.distance_to(post2) < 90.0, "回位之后走回防区（离集结点 %.0fpx）" % sw.position.distance_to(post2))
+	# 撤退途中被咬：站定还手（背身跑只会被砍死）——这是"且战且退"和"闷头跑"的区别
+	var back2 := Vector2.INF
+	for i in 8:
+		var cand2: Vector2 = sw.position + Vector2.from_angle(TAU * i / 8.0) * 200.0
+		if not m.area_blocked(cand2, 24.0):
+			back2 = cand2
+			break
+	if back2 == Vector2.INF:
+		back2 = sw.position + Vector2(150, 0)
+	sw.command_retreat(back2)
+	await tree.create_timer(0.25).timeout
+	var biter := Goo.new()
+	biter.position = sw.position + Vector2(0, 26)
+	m.add_child(biter)
+	var hp0: float = biter.hp
+	await tree.create_timer(2.0).timeout
+	_check(is_instance_valid(sw) and not sw.dead, "撤退途中被咬：兵还活着")
+	var hp1 := 0.0
+	if is_instance_valid(biter):
+		hp1 = biter.hp
+	_check(hp1 < hp0, "撤退途中被咬：站定还手打它（%.0f → %.0f）" % [hp0, hp1])
 	bk.queue_free()
 	if is_instance_valid(sw):
 		sw.queue_free()
@@ -921,23 +976,28 @@ func _flee_tests() -> void:
 	_check(near_b != null and w.flee_to.distance_to(near_b.position) <= near_b.size * 0.5 + 40.0,
 		"逃跑目标是最近的己方房子墙边（%s，%.0fpx）" % [near_b.kind if near_b else "无", nd])
 
-	# 拉远 200px 再量"能不能跑到"：上面那栋仓库就在脚边，贴着量不出速度
-	var tgt: Vector2 = w.flee_to
-	var back: Vector2 = (tgt - w.position)
-	back = back.normalized() if back.length() > 0.001 else Vector2(1, 0)
-	w.position = tgt + back * 200.0
-	w._path = PackedVector2Array()
-	w._path_idx = 0
-	g.position = w.position + back * 60.0    # 怪跟着挪过去：不然拉开 200px 后自动判定"已脱险"就收工了
-	# 瞬移落点可能正好压在房子/树上，先让物理把它挤出来再起量（不然量的那段全在"脱困"）
+	# 别再瞬移农民了：瞬移落点经常正好压在房子/树上，1.2 秒全花在"脱困"，
+	# 量出来就是"没跑"。改成只把怪挪到它旁边，量"腿到底动没动、方向是不是背对怪"
+	g.position = w.position + Vector2(55, 0)
 	await m.get_tree().create_timer(0.35).timeout
-	# 量的口径是"离怪越来越远"而不是"离房子越来越近"：逃跑的本质就是远离威胁，
-	# 绕一点路躲开房子不算失败
-	var gd0 := w.position.distance_to(g.position)
+	var p0 := w.position
+	var away := (p0 - g.position).normalized()
+	var shelter := w.flee_to
+	# 一开始就已经贴到墙根了（全量里前面测试盖的仓库可能正好挨着农民）：
+	# 没地方可跑，原地躲着才是对的，不该要求"腿动了 40px"
+	var at_wall := shelter.distance_to(p0) < 60.0
 	await m.get_tree().create_timer(1.2).timeout
-	var gd1 := w.position.distance_to(g.position)
-	_check(w.is_fleeing() and gd1 > gd0 + 40.0,
-		"往远离怪的方向跑（离怪 %.0f → %.0f，位置=%s）" % [gd0, gd1, str(w.position)])
+	var moved := w.position - p0
+	var dot := 0.0
+	if moved.length() > 0.001:
+		dot = moved.normalized().dot(away)
+	if at_wall:
+		_check(w.is_fleeing() and w.position.distance_to(shelter) < 80.0,
+			"本来就贴着墙根：原地躲着不动（离安全点 %.0fpx）" % w.position.distance_to(shelter))
+	else:
+		# away 是"远离怪"的方向；点积越大越朝着远离怪的方向跑（允许绕路躲房子，不用接近 1）
+		_check(w.is_fleeing() and moved.length() > 40.0 and dot > 0.3,
+			"往远离怪的方向跑（走了 %.0fpx，朝向点积 %.2f，位置=%s）" % [moved.length(), dot, str(w.position)])
 
 	g.queue_free()
 	await m.get_tree().create_timer(0.3).timeout

@@ -27,6 +27,7 @@ const POST_LEASH := 200.0    # 追出去超过离站位点这么远：松口先�
 const POST_BACK := 18.0      # 回到站位点这么近算站好
 const ARCHER_BACK := 58.0    # 弓手的站位再往后方（朝基地）退这么远：剑士挡前面，弓手在后面射
 const REPATH_GAP := 20.0     # 目标挪动超过这么远才重新算路径（每帧 A* 太贵）
+const RETREAT_DONE := 45.0   # 撤退：离撤退点这么近算撤到了（到了就原地待命）
 var post_home: Building = null    # 听哪个兵营的集结点
 var post_off := Vector2.ZERO      # 相对集结点的站位偏移（一队人散开站）
 var post_fixed := Vector2.INF     # 兵营没了 / 没设集结点时的落脚点
@@ -35,6 +36,8 @@ var _hurt_target: Node2D = null   # 刚咬过我的那只：优先还手（去�
 var _goal := Vector2.INF          # 当前在走的目的地（防区模式自己算路用）
 var _chase_goal := Vector2.INF    # 追击时上次寻路的目标位置（挪动超过 24px 才重算）
 var _manual := false              # 玩家手令接管了：走自由那套，直到按 S 停止 / 回位才回防区
+var _retreat_to := Vector2.INF    # 撤退点（撤到这儿就站住待命）
+var _retreating := false          # 正在撤退：不接新敌、不追、不自动回防区
 
 ## 兵营给的岗位：从这座兵营的集结点散开站（off = 相对集结点的偏移，集结点改了兵自动跟过去）
 func set_post(b: Building, off: Vector2) -> void:
@@ -259,6 +262,84 @@ func _walk(p: Vector2, delta: float) -> void:
 	move_target = p
 	_move_toward(p, delta)
 
+## ---------- 撤退：脱战退到后方，而不是回岗位 ----------
+## 和「回位」是一对反方向的指令：
+##   回位 = 松开钉子走回防区站位点（往**前线**去，接着守）
+##   撤退 = 松开钉子往最近的基地/前哨跑，到了站住待命（往**后方**去，保住人）
+## 关键一条：撤退到了之后**不交还手令**——交还的话下一帧就自己走回防区，等于白撤。
+## 想回去得按 Q 回位（或者 S 停止）。
+## 路上不接新敌：只还手贴到射程里的（弓手边走边射，近战被贴上就站定打掉再走），
+## 也不追——不然撤退会变成"一路追着怪跑出去"。
+func command_retreat(to: Vector2) -> void:
+	_take_over()              # 手令接管：撤退期间不回防区；顺手松开钉子
+	cancel_orders()           # 清掉 A 移动 / 巡逻 / 驻守
+	attack_target = null
+	_auto_target = null
+	_hurt_target = null
+	_amove_dest = Vector2.ZERO
+	_ignore_aggro = true      # 不主动索敌
+	_retreat_to = to
+	_retreating = true
+	_goal = Vector2.INF
+	_chase_goal = Vector2.INF
+	move_target = to
+	_go(to)
+
+func is_retreating() -> bool:
+	return _retreating
+
+## 撤退点（命令卡撤到哪算到）
+func retreat_point() -> Vector2:
+	return _retreat_to
+
+func _step_retreat(delta: float) -> void:
+	if _retreat_to == Vector2.INF:
+		_retreating = false
+		return
+	# 撤到了：站住待命。_manual 保持 true，所以不会自己走回防区
+	if position.distance_to(_retreat_to) <= RETREAT_DONE:
+		_retreating = false
+		_retreat_to = Vector2.INF
+		hold = true
+		_ignore_aggro = true
+		move_target = position
+		_path = PackedVector2Array()
+		_path_idx = 0
+		return
+	var reach := attack_range * _terrain_range_factor()
+	var b := _blocker(reach)
+	if b != null:
+		_calm_t = 0.0
+		if _cd <= 0.0:
+			_cd = attack_cooldown
+			attack_anim = 1.0
+			b.take_damage(attack_damage, self)
+			attack_fx_to(b.position)
+		# 近战被贴上：站定把这一只打掉再走，背身跑只会被砍死
+		if not is_ranged:
+			move_target = position
+			return
+	# 弓手在上面已经把箭射出去了，脚不用停（边走边射）；近战没被贴就接着跑
+	_walk(_retreat_to, delta)
+
+## 撤退路上挡道的怪：刚咬我的那只优先，其次射程内最近的。
+## **只找怪，不找建筑**——撤退途中路过巢穴不该停下来拆它
+func _blocker(reach: float) -> Node2D:
+	var hb := _hurt_target
+	if hb != null and is_instance_valid(hb) and hb.get("dead") != true \
+			and position.distance_to(hb.position) <= reach:
+		return hb
+	var best: Node2D = null
+	var best_d := reach
+	for e in _group("enemies"):
+		if not is_instance_valid(e) or e.get("dead") == true:
+			continue
+		var d := position.distance_to(e.position)
+		if d < best_d:
+			best_d = d
+			best = e
+	return best
+
 ## 命令卡「回位」：放弃手上的目标，走回兵营给的站位点（岗位本身不变）
 func command_recall() -> void:
 	_unpin()
@@ -272,6 +353,8 @@ func command_recall() -> void:
 	move_target = position
 	_manual = false          # 交还控制权：下一帧就走回防区站好
 	_chase_goal = Vector2.INF
+	_retreating = false      # 回位取消撤退待命
+	_retreat_to = Vector2.INF
 
 func _step(delta: float) -> void:
 	_cd = max(0.0, _cd - delta)
@@ -288,6 +371,10 @@ func _step(delta: float) -> void:
 		_auto_target = null
 	if not is_instance_valid(_hurt_target):
 		_hurt_target = null
+	# 撤退中：先于一切（连防区都不看）——这是"保住人"的指令
+	if _retreating:
+		_step_retreat(delta)
+		return
 	# 有防区岗位、也没被玩家手令接管：走 KR 式（只拦不追），别的不管。
 	# 玩家一给令（右键 / A / D / F）就换成自由那套，兵随便动；按 S 或「回位」再回防区。
 	if has_post() and not _manual:
@@ -386,6 +473,8 @@ func command_stop() -> void:
 	_unpin()
 	_goal = Vector2.INF
 	_chase_goal = Vector2.INF
+	_retreating = false
+	_retreat_to = Vector2.INF
 
 ## D 原地驻守（自由模式：自己原地不动，只打够得着的）
 func command_hold() -> void:
@@ -450,6 +539,9 @@ func _go(pos: Vector2) -> void:
 ## 卡住：A 移动途中被挤住就重新寻路接着走，离终点很近就算到站
 ## 卡住：防区模式下清掉目标点让它重算；自由模式按 A 移动 / 到站处理
 func _on_stuck() -> void:
+	if _retreating:
+		_goal = Vector2.INF    # 撤退路上被挤住：重算路接着撤
+		return
 	if has_post() and not _manual:
 		_goal = Vector2.INF
 		return
@@ -469,6 +561,8 @@ func _take_over() -> void:
 	_manual = true
 	_goal = Vector2.INF
 	_chase_goal = Vector2.INF
+	_retreating = false       # 任何手令都打断撤退（command_retreat 自己随后再置回 true）
+	_retreat_to = Vector2.INF
 
 func command_attack(t: Node2D) -> void:
 	_take_over()

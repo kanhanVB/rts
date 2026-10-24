@@ -1139,6 +1139,8 @@ func commands() -> Array:
 			# 把手令交还给兵营，走回集结点给的站位点接着守
 			out.append(_cmd_entry("recall", 0, "回位", "stop", {},
 				"放弃手上的目标，走回兵营集结点给的站位点接着守（按 S 停止也一样）"))
+			out.append(_cmd_entry("retreat", 1, "撤退", "retreat", {},
+				"脱战退到最近的基地 / 前哨门口待命：路上不接新敌、只还手贴上来的，到了就站住——不会自己跑回防区。要回岗位按 Q 回位"))
 			out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌一个一个拦着打"))
 			out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事之后回兵营的防区站好"))
 			out.append(_cmd_entry("hold", 7, "驻守", "hold", {}, "原地不动：敌人进射程就打，不追"))
@@ -1198,6 +1200,16 @@ func run_command(id: String) -> void:
 					u.command_recall()
 					n += 1
 			_hud_msg("%d 个兵松口回位（防区没变，集结点在哪儿回哪儿）" % n if n > 0 else "这几个兵没有防区可回")
+		"retreat":
+			var n := 0
+			for u in _sel_units():
+				if u is Soldier:
+					u.command_retreat(_retreat_point(u))
+					n += 1
+			if n > 0:
+				_hud_msg("%d 个兵撤退到后方待命：路上不接新敌、只还手贴上来的；到了站住不动（不会自己跑回防区，要回就按 Q 回位）" % n)
+			else:
+				_hud_msg("先选中的兵，才能撤退")
 		"hold":
 			for u in _sel_units():
 				if u is Soldier:
@@ -1234,6 +1246,28 @@ func run_command(id: String) -> void:
 				_hud_msg("%s自取已%s" % [b.display_name, ("打开：料不够时工人去仓库扛%s（留底 %d）" % [raw, int(Building.FETCH_RESERVE)]) if b.self_fetch else "关掉：只用送货农民送来的料"])
 		"delete":
 			_delete_selected()
+
+## 撤退点：离这个兵最近的自家基地 / 前哨门口外侧（都没有就往原地退，命令本身不会出错）
+## 撤退和「回位」方向相反：回位是回兵营集结点（前线岗位），撤退是退到城里（后方）
+func _retreat_point(u: Node2D) -> Vector2:
+	var best: Node2D = null
+	var best_d := INF
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if not is_instance_valid(b) or b.team != 0:
+			continue
+		if b.kind != "base" and b.kind != "outpost":
+			continue
+		var d: float = u.position.distance_to(b.position)
+		if d < best_d:
+			best_d = d
+			best = b
+	if best == null:
+		return u.position
+	var dir: Vector2 = u.position - best.position
+	if dir.length() < 1.0:
+		dir = Vector2(0, 1)
+	# 退到门口外侧一点，别挤进建筑里
+	return open_point(best.position + dir.normalized() * (best.size * 0.5 + 34.0))
 
 ## 屏幕坐标 → 世界坐标（考虑镜头缩放和位移）
 func _to_world(screen: Vector2) -> Vector2:
@@ -2123,7 +2157,7 @@ func _selected_info_text() -> String:
 				if sl != "":
 					txt += "\n" + sl
 				elif t.kind == "barracks":
-					txt += "\n兵默认守在集结点：周围 %.0f 内一个一个迎上去钉住（右键可以随便调，S 停止回防区）" % Soldier.PIN_RANGE
+					txt += "\n兵默认守在集结点：周围 %.0f 内一个一个迎上去钉住（右键可以随便调，S 停止回防区）\n选中这座兵营会画出虚线圈 = 怪进这个圈就自动被拦；实心圆是箭塔的射程" % Soldier.PIN_RANGE
 				else:
 					txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
 				if t.waiting_pop:
@@ -2198,7 +2232,9 @@ func _selected_info_text() -> String:
 				line += " · 钉住%s（1v1，别人不抢）" % s.pin_target.get("display_name")
 			elif s.is_ranged:
 				line += " · 弓手只输出、不挡路"
-			if s.is_manual():
+			if s.is_retreating():
+				line += " · 撤退中（不接新敌，只还手贴上来的）"
+			elif s.is_manual():
 				line += " · 听你的手令（S 停止 / 回位 才回防区）"
 		return line
 	var counts := {}
@@ -2373,6 +2409,10 @@ func _draw() -> void:
 	for s in selected:
 		if s is Building and is_instance_valid(s) and s.has_tower():
 			_range_ring(s.position, s.tower_stats().range)
+		# 兵营：防区圈。跟塔的射程圈用两种画法区分开——
+		# 实心圆 + 描边 = 我打得到哪；虚线圆 = 我的兵敢跑到哪
+		if s is Building and is_instance_valid(s) and s.kind == "barracks" and s.team == 0:
+			_defense_ring(s)
 		# 水车：带动范围 + 连着它带的线；加工线：连到带它的水车
 		if s is Building and is_instance_valid(s) and s.kind == "waterwheel":
 			_wheel_ring(s.position)
@@ -2448,6 +2488,27 @@ func _range_ring(c: Vector2, r: float, ok := true) -> void:
 	var col := Color(0.55, 0.85, 1.0) if ok else Color(1.0, 0.45, 0.4)
 	draw_circle(c, r, Color(col, 0.08))
 	draw_arc(c, r, 0, TAU, 72, Color(col, 0.65), 2.0 / cam.zoom.x)
+
+## 兵营防区圈：怪一进这个圈，守军就自动迎上去拦；圈外路过的不管。
+## 画成**虚线**、不填充——跟箭塔的实心射程圈一眼分开：
+## 实心圆 = 我打得到哪（箭塔的射程）；虚线圆 = 怪进这个范围就自动被拦（兵的拦截触发圈）
+func _defense_ring(b: Building) -> void:
+	var c := b.rally_point()
+	var col := Color(0.5, 0.95, 0.55)
+	var w := 2.0 / cam.zoom.x
+	var seg := 48
+	for i in seg:
+		if i % 2 == 0:
+			continue
+		var a0 := TAU * float(i) / float(seg)
+		var a1 := TAU * float(i + 1) / float(seg)
+		draw_arc(c, Soldier.PIN_RANGE, a0, a1, 5, Color(col, 0.6), w)
+	# 圈里站了几个兵：框兵去拆巢穴之前，得知道自己手里还剩几个能派的
+	var n := 0
+	for u in get_tree().get_nodes_in_group("player_units"):
+		if u is Soldier and is_instance_valid(u) and not u.dead and u.post_home == b:
+			n += 1
+	Art.text(self, c + Vector2(0, -Soldier.PIN_RANGE - 8.0), "入圈自动拦 · 守 %d" % n, 13, col)
 
 ## 虚线（集结点、路点）：每段 14px，线宽不随缩放变粗
 func _dashed(a: Vector2, b: Vector2, c: Color) -> void:
