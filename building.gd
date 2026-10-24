@@ -344,6 +344,10 @@ var rally := Vector2.INF           # 集结点（INF = 没设：农民自动上�
 var rally_node: Node2D = null      # 集结点设在矿/树上：新农民出来直接去采
 var waiting_pop := false           # 排头读满了但人口已满，卡着等
 
+## 集结点实际坐标（没设 = 门口）。轻 RTS：兵把这里当防区中心，集结点一改全队跟着挪
+func rally_point() -> Vector2:
+	return rally if rally != Vector2.INF else position + Vector2(0, size * 0.62 + 16.0)
+
 func trains() -> bool:
 	return team == 0 and (kind == "base" or kind == "barracks" or kind == "outpost")
 

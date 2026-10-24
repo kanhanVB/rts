@@ -20,6 +20,7 @@ func run() -> void:
 	if "--only=new" in OS.get_cmdline_user_args():
 		await _time_tests()    # 只跑暂停/倍速、结算统计、农民自保（-- --test --only=new，迭代用）
 		await _stats_tests()
+		await _light_rts_tests()
 		await _flee_tests()
 		_done()
 		return
@@ -675,6 +676,7 @@ func run() -> void:
 	await _alert_tests()
 	await _time_tests()
 	await _stats_tests()
+	await _light_rts_tests()
 	await _flee_tests()
 
 	# 拆巢穴触发胜利
@@ -742,12 +744,119 @@ func _stats_tests() -> void:
 	var txt: String = m.stats_text()
 	_check(txt.contains("用时") and txt.contains("击杀") and txt.contains("峰值库存"), "结算文字有用时 / 击杀 / 峰值")
 
+## ---- 轻 RTS：兵听兵营集结点、近战 1v1 钉住、不自动补员 ----
+func _light_rts_tests() -> void:
+	var tree := m.get_tree()
+	# 清场：别的测试留下的怪和兵会干扰"谁钉谁"
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	for u in tree.get_nodes_in_group("player_units"):
+		if is_instance_valid(u):
+			u.queue_free()      # 农民也清掉：下面只看兵
+	await tree.create_timer(0.3).timeout
+
+	var bk: Building = m._build_mgr.add_building("barracks", m.base.position + Vector2(-40, 250), 0)
+	await tree.create_timer(0.1).timeout
+	bk.queue.clear()
+	var post: Vector2 = m.open_point(bk.position + Vector2(230, 0))
+	bk.rally = post
+	bk.rally_node = null
+	m.economy.ore += 500.0
+	m.economy.ingot += 200.0
+	m._set_selection([bk])
+	m.run_hotkey("Q")        # 兵营第一格 = 剑士
+	await tree.create_timer(0.15).timeout
+	m.run_hotkey("Q")
+	await tree.create_timer(0.3).timeout
+	var sws: Array = []
+	for u in tree.get_nodes_in_group("player_units"):
+		if u is Soldier and not u.is_ranged:
+			sws.append(u)
+	_check(sws.size() >= 2, "兵营出了 2 个剑士（%d）" % sws.size())
+	var sw: Soldier = sws[0]
+	_check(sw.has_post() and sw.post_home == bk, "兵出厂就领了防区（听这座兵营的集结点）")
+	_check(sw.post_pos().distance_to(post) < 60.0, "站位点就在集结点上（%.0fpx）" % sw.post_pos().distance_to(post))
+	_check(not sw.is_idle(), "站岗的兵不算闲置（`.` 不会一直选中它）")
+	await tree.create_timer(3.2).timeout
+	_check(sw.position.distance_to(post) < 70.0, "兵自己走到集结点站好（离点 %.0fpx）" % sw.position.distance_to(post))
+
+	# 右键不给兵下令：位置只由集结点决定
+	var p0: Vector2 = sw.position
+	m._set_selection([sw])
+	m._command_at(p0 + Vector2(120, 0))
+	await tree.create_timer(0.6).timeout
+	_check(m._only_soldiers_selected() and sw.position.distance_to(p0) < 12.0,
+		"选中兵右键地面不下令（挪了 %.0fpx）" % sw.position.distance_to(p0))
+	_check(m._hud_msg_label.text.contains("集结点"), "提示玩家：兵只认兵营集结点")
+
+	# 怪进防区：迎上去钉住（1v1），怪停下跟他对砍
+	var g := Goo.new()
+	g.position = post + Vector2(90, 0)
+	m.add_child(g)
+	await tree.create_timer(0.3).timeout
+	_check(sw.pin_target == g and g.pinned_by == sw, "怪进防区：剑士认领并钉住（怪身上记着是他）")
+	var g_hp0: float = g.hp
+	await tree.create_timer(1.6).timeout
+	_check(sw.position.distance_to(g.position) < sw.attack_range + 40.0,
+		"迎上去贴脸（%.0fpx）" % sw.position.distance_to(g.position))
+	_check(g.hp < g_hp0, "钉住就开打（怪 %.0f → %.0f）" % [g_hp0, g.hp])
+
+	# 第二只怪：同一个兵不抢（一个兵只钉一只）
+	var g2 := Goo.new()
+	g2.position = post + Vector2(-90, 0)
+	m.add_child(g2)
+	await tree.create_timer(0.5).timeout
+	_check(g2.pinned_by != sw, "第二只怪不会被同一个兵抢（1v1 独占）")
+
+	# 清怪：兵自己回位
+	if is_instance_valid(g):
+		g.queue_free()
+	if is_instance_valid(g2):
+		g2.queue_free()
+	await tree.create_timer(3.0).timeout
+	_check(sw.pin_target == null and sw.position.distance_to(post) < 80.0,
+		"怪清完：松口回站位点（离点 %.0fpx）" % sw.position.distance_to(post))
+
+	# 兵死了：钉子松开，而且不会自动补
+	var n0: int = sws.size()
+	var victim: Soldier = sws[1]
+	var gk := Goo.new()
+	gk.position = victim.position + Vector2(40, 0)
+	m.add_child(gk)
+	await tree.create_timer(0.3).timeout
+	victim.take_damage(99999.0)
+	await tree.create_timer(0.4).timeout
+	_check(not is_instance_valid(victim), "兵死了就是死了")
+	var n1 := 0
+	for u in tree.get_nodes_in_group("player_units"):
+		if u is Soldier:
+			n1 += 1
+	_check(n1 == n0 - 1, "兵死了不会自动补（%d → %d）" % [n0, n1])
+	if is_instance_valid(gk):
+		gk.queue_free()
+	await tree.create_timer(0.4).timeout
+
+	# 改集结点：全队跟着挪（这就是轻 RTS 的"调防"）
+	var post2: Vector2 = m.open_point(post + Vector2(0, 190))
+	bk.rally = post2
+	await tree.create_timer(3.6).timeout
+	_check(sw.position.distance_to(post2) < 80.0, "改集结点：兵跟着搬过去（离新点 %.0fpx）" % sw.position.distance_to(post2))
+	bk.queue_free()
+	if is_instance_valid(sw):
+		sw.queue_free()
+	await tree.create_timer(0.2).timeout
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
-	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定
+	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；
+	# 兵也一起清（轻 RTS 的兵会主动钉怪，留着会把测试放出来的 Goo 抢走打死）
 	for e in m.get_tree().get_nodes_in_group("enemies"):
 		if is_instance_valid(e):
 			e.queue_free()
+	for s in m.get_tree().get_nodes_in_group("player_units"):
+		if is_instance_valid(s) and s is Soldier:
+			s.queue_free()
 	await m.get_tree().create_timer(0.3).timeout
 	m._check_worker_safety()
 
@@ -1032,18 +1141,20 @@ func _aoe_tests() -> void:
 	m._on_key(esc)
 	_check(m.selected.is_empty(), "Esc 取消选中")
 
-	# 命令卡热键：A 攻击移动 / S 停止 / D 驻守 / F 巡逻；Shift+右键排路点
+	# 轻 RTS：纯士兵的命令卡不再有 A 移动 / S 停止 / D 驻守 / F 巡逻，只剩「回位」
 	m._set_selection([s1])
-	m.run_hotkey("A")
-	_check(m._target_mode == "attack", "A = 进入攻击移动模式")
-	m._on_key(esc)
-	_check(m._target_mode == "" and m.selected.size() == 1, "Esc 取消 A 模式，选中还在")
+	var card: Array = m.commands().map(func(c): return c.id)
+	_check(card.has("recall") and not card.has("attack") and not card.has("hold") and not card.has("patrol"),
+		"纯士兵命令卡只剩「回位」，移动令都收起了（兵靠兵营集结点摆位）")
+	# 底层那套还在（自由兵 / 手搓单位 / 特殊单位用）：直接调，不走 UI
+	s1.command_attack_move(s1.position + Vector2(-140, 0))
+	_check(s1._amove_dest != Vector2.ZERO, "自由兵的 A 移动底层仍然可用")
 	s1.command_move(s1.position + Vector2(-140, 0))
 	await tree.create_timer(0.4).timeout
-	m.run_hotkey("S")
+	s1.command_stop()
 	var p_stop := s1.position
 	await tree.create_timer(0.8).timeout
-	_check(s1.position.distance_to(p_stop) < 6.0, "S 停止：原地站住（挪了 %.1fpx）" % s1.position.distance_to(p_stop))
+	_check(s1.position.distance_to(p_stop) < 6.0, "停止：原地站住（挪了 %.1fpx）" % s1.position.distance_to(p_stop))
 	s1.position = Vector2(420, 600)
 	var p1 := Vector2(420, 540)
 	var p2 := Vector2(480, 540)
@@ -1052,8 +1163,8 @@ func _aoe_tests() -> void:
 	_check(s1.waypoints.size() == 1, "Shift+右键排了 1 个路点")
 	await tree.create_timer(120.0 / s1.speed + 1.2).timeout
 	_check(s1.position.distance_to(p2) < 30.0 and s1.waypoints.is_empty(), "走完第一段接着走排队的路点（离终点 %.0fpx）" % s1.position.distance_to(p2))
-	m.run_hotkey("D")
-	_check(s1.hold, "D = 原地驻守")
+	s1.command_hold()
+	_check(s1.hold, "驻守（底层）")
 	var hold_p := s1.position
 	var g := Goo.new()
 	g.position = s1.position + Vector2(130, 0)
@@ -1063,15 +1174,13 @@ func _aoe_tests() -> void:
 	_check(s1.position.distance_to(hold_p) < 10.0, "驻守：130px 外的怪不去追（挪了 %.0fpx）" % s1.position.distance_to(hold_p))
 	if is_instance_valid(g):
 		g.take_damage(99999.0)
-	m.run_hotkey("F")
-	_check(m._target_mode == "patrol", "F = 进入巡逻模式")
 	var start := s1.position
-	m._issue_patrol(start + Vector2(0, -80))
-	m._target_mode = ""
+	s1.command_patrol(start + Vector2(0, -80))
 	_check(s1.patrol and not s1.hold, "巡逻开始（驻守自动取消）")
 	await tree.create_timer(80.0 / s1.speed + 0.6).timeout
 	_check(s1._amove_dest.distance_to(start) < 30.0, "巡逻到头自动掉头往回走")
-	m._issue_command(start + Vector2(40, 0))
+	m._set_selection([s1])
+	m._issue_command(start + Vector2(40, 0))    # 内部入口：走完整的"下新指令 → 取消巡逻"
 	_check(not s1.patrol, "下新指令取消巡逻")
 
 	# Del：删选中的单位，基地删不掉

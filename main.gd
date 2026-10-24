@@ -865,8 +865,18 @@ func _has_units_selected() -> bool:
 func _sel_units() -> Array:
 	return selected.filter(func(u): return u is Unit and is_instance_valid(u))
 
+## 选中的全是兵（没有农民/工程师要干活）：这种时候右键不下令
+func _only_soldiers_selected() -> bool:
+	var us := _sel_units()
+	return not us.is_empty() and us.all(func(u): return u is Soldier)
+
 ## 左/右键在世界里点了一下：按当前模式下指令
 func _command_at(world: Vector2, shift := false) -> void:
+	# 轻 RTS：兵只听兵营的集结点，右键不给兵下令——否则又变回"纯 RTS 拖队形"
+	if _only_soldiers_selected():
+		_target_mode = ""
+		_hud_msg("兵只认兵营的集结点：选中兵营、右键地面设防区；要挪位置就改集结点")
+		return
 	var pos := _pick_at(world, true)
 	# 选着农民点到门口守线的工人：算点他的加工厂（工位就在门口，人正好挡着房子，
 	# 以前点人身上 = 走到那人脚下，招工/送料全落空）
@@ -1122,10 +1132,15 @@ func commands() -> Array:
 		out.append(_cmd_entry("auto_deliver", 2, "自动交货", "base", {}, "货送最近的基地/仓库（取消指定的熔炉/木工台）"))
 		out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
 	else:
-		out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌就打"))
-		out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
-		out.append(_cmd_entry("hold", 7, "驻守", "hold", {}, "原地不动：敌人进射程就打，不追"))
-		out.append(_cmd_entry("patrol", 8, "巡逻", "patrol", {}, "在这里和目标点之间来回走，遇敌就打"))
+		if us.any(func(u): return u is Engineer):
+			out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌就打"))
+			out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事，原地站着"))
+			out.append(_cmd_entry("hold", 7, "驻守", "hold", {}, "原地不动：敌人进射程就打，不追"))
+			out.append(_cmd_entry("patrol", 8, "巡逻", "patrol", {}, "在这里和目标点之间来回走，遇敌就打"))
+		else:
+			# 轻 RTS：兵只有一个能自己决定的动作——回位。位置本身由兵营集结点说了算
+			out.append(_cmd_entry("recall", 0, "回位", "stop", {},
+				"松口走回兵营给的站位点（怪走了也会自己回）。要换防区：选中兵营、右键地面改集结点"))
 	if not us.any(func(u): return u is Engineer):
 		out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "删除选中的单位", "Del"))
 	return out
@@ -1174,6 +1189,13 @@ func run_command(id: String) -> void:
 		"stop":
 			for u in _sel_units():
 				u.command_stop()
+		"recall":
+			var n := 0
+			for u in _sel_units():
+				if u is Soldier and u.has_post():
+					u.command_recall()
+					n += 1
+			_hud_msg("%d 个兵松口回位（防区没变，集结点在哪儿回哪儿）" % n if n > 0 else "这几个兵没有防区可回")
 		"hold":
 			for u in _sel_units():
 				if u is Soldier:
@@ -1901,8 +1923,12 @@ func on_trained(b: Building, kind: String) -> void:
 	s.position = b.position + Vector2(0, 60)
 	add_child(s)
 	_rally_i += 1
-	var at := b.rally if b.rally != Vector2.INF else b.position + Vector2(0, 86)
-	s.command_move(open_point(_spread_pos(_rally_i % 24, at)))
+	# 轻 RTS：兵不靠玩家拖，领一个"兵营集结点 + 自己的偏移"当防区站位，自己走过去站好
+	var at := b.rally_point()
+	var spot := open_point(_spread_pos(_rally_i % 24, at))
+	s.set_post(b, spot - at)
+	if b.rally != Vector2.INF:
+		_hud_msg("%s去%s的集结点站好（改集结点整队跟着挪）" % [s.display_name, b.display_name])
 
 ## 新农民的第一份差事：集结点（矿/树 → 去采；加工厂 → 进厂；地面 → 走过去）> 哪种资源人少去哪
 func _first_job(b: Building, w: Worker) -> void:
@@ -1988,7 +2014,12 @@ func set_rally(b: Building, pos: Vector2) -> void:
 		return
 	b.rally_node = t if t is ResNode else null
 	b.rally = t.position if t is ResNode else open_point(pos)
-	_hud_msg("集结点已设到%s" % ("这片%s" % ("矿" if t.kind == "ore" else "树林") if t is ResNode else "这里"))
+	var where := "这片%s" % ("矿" if t.kind == "ore" else "树林") if t is ResNode else "这里"
+	# 轻 RTS：兵营的集结点就是防区中心，改了在场的老兵也会自己搬过去
+	if b.kind == "barracks":
+		_hud_msg("兵的防区挪到%s：周围 %.0f 内的怪会被迎上去钉住（在场的兵也会跟着搬）" % [where, Soldier.PIN_RANGE])
+		return
+	_hud_msg("集结点已设到%s" % where)
 
 ## 点英雄工程师 → 建兵营（帝国式：建造是工程师的活）
 ## 两种设施共用一个放置入口：工程师选中 → 检查成本 → 进入放置模式
@@ -2084,6 +2115,8 @@ func _selected_info_text() -> String:
 				# 底下还有一排生产队列、放不下更多行：警钟这行顶掉集结点 / 研究提示那行
 				if sl != "":
 					txt += "\n" + sl
+				elif t.kind == "barracks":
+					txt += "\n兵只听集结点：周围 %.0f 内自动迎上去 1v1 钉住（右键地面改防区）" % Soldier.PIN_RANGE
 				else:
 					txt += "\n集结点已设（右键改）" if t.rally != Vector2.INF else "\n右键地面/矿/树 = 集结点"
 				if t.waiting_pop:
@@ -2148,6 +2181,16 @@ func _selected_info_text() -> String:
 			if w.carry_amount > 0.5:
 				line += " · 扛着 %d %s" % [int(w.carry_amount),
 					Economy.KIND_NAME.get(w.carry_kind, w.carry_kind)]
+		elif u is Soldier and u.team == 0:
+			# 轻 RTS：兵的位置由兵营集结点说了算，信息栏把"防区 / 钉着谁"讲清楚
+			var s: Soldier = u
+			var ptxt := s.post_text()
+			if ptxt != "":
+				line += "\n" + ptxt
+			if not s.is_ranged and is_instance_valid(s.pin_target):
+				line += " · 钉住%s（1v1，别人不抢）" % s.pin_target.get("display_name")
+			elif s.is_ranged:
+				line += " · 弓手只输出、不挡路"
 		return line
 	var counts := {}
 	for u in list:

@@ -24,6 +24,9 @@ var atk_range := 0.0
 var atk_cd := 0.0
 
 var move_target: Vector2
+## 轻 RTS 的"钉子"：谁把我钉住了（近战兵 1v1 独占）。被钉住的怪按自己的索敌逻辑停下互殴，
+## 这只标记只是让别的兵别来抢同一个目标，以及兵死了/脱岗时好清干净
+var pinned_by: Node2D = null
 var _attack_fx: Array = []        # [{to: Vector2, t: 剩余秒数}]
 var attack_target: Node2D = null  # 战斗单位当前攻击目标（基类声明，子类复用）
 var _path: PackedVector2Array = PackedVector2Array()   # A* 路径（为空 = 无路径）
