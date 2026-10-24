@@ -574,42 +574,75 @@ func _build_panel() -> void:
 
 func _build_help() -> void:
 	_help = PanelContainer.new()
-	_help.add_theme_stylebox_override("panel", _parch_box(0.55, [22.0, 22.0, 22.0, 24.0]))
+	_help.add_theme_stylebox_override("panel", _parch_box(0.55, [24.0, 22.0, 24.0, 46.0]))
 	_help.visible = false
 	_help.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(_help)
+	# 两栏排：左「怎么玩」、右「打起来怎么打」。
+	# 原来 26 行全堆在一个 Label 里，720p 下就是一面字墙，而且是从"Shift+左键加选"
+	# 这种边角操作开头的——新玩家最想知道的"这局要干什么"反而一个字没有。
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 26)
+	_help.add_child(row)
+	row.add_child(_help_col("""怎么玩（帝国式 RTS + 塔防）
+开局三步
+  1. 工程师 E 招农民（上限 16，盖房子加人口）
+  2. 农民右键矿堆采矿、右键树林伐木，自动送回基地
+  3. 工程师 R 盖兵营 → 选中兵营 Q 剑士 / W 弓手
+矿石和木材不能直接造兵
+  工程师 E 盖熔炉（矿→铁锭）、W 盖木工台（木→木板）
+  要点名的农民进厂守炉 / 守锯才有产出
+  选中熔炉：Q 招工、W 放人、E 自取
+怎么赢
+  十波怪沿土路来，打完就赢；造塔、推兵营、研究升级都算数
+  清野拿资源：框选兵右键点 Goo 巢穴拆掉，缴获后面的富矿
+基础操作
+  左键点选 · 拖动框选 · Shift 加减选 · 双击 / Ctrl 选同类
+  右键：移动 / 采集 / 攻击 / 交货 · Shift+右键排路点
+  选中基地或兵营，右键地面 = 设集结点
+  命令卡按位置：Q W E R T / A S D F G / Z X C V B
+镜头与杂项
+  H 选基地 · . 闲置农民 · , 闲置军队 · 空格 回到选中
+  Ctrl+数字 编队 · 数字 选队 · 小地图 左键跳、右键下令
+  滚轮缩放 · 贴边 / 方向键 / 中键拖动 移镜头
+  P 暂停 · + - 快进 · C 产能面板 · Del 删除 · Esc · F1
+  底栏队列点图标取消（全额退钱）· 结算页 R 再来一局"""))
+	row.add_child(_help_col("""兵怎么打（轻 RTS：像王国保卫战，但兵听你的）
+  兵出厂领站位点（兵营集结点），怪进 115 内就一个一个迎上去钉住
+  近战 1v1 独占：咬住一只，别的兵自动找下一只，不会一窝蜂围一只
+  右键 / A / D / F 随便下令；S 停止或 Q 回位 = 交还手令回防区
+  W 撤退 = 反方向：退到最近的基地 / 前哨待命，到了站住不自己回防区
+    路上不接新敌，只还手贴到身上的（弓手边走边射，近战站定打掉再走）
+  选中兵营画绿虚线 = 拦截圈：怪进这个圈才有人拦，圈外路过的不管
+  箭塔的实心圆是射程（怪在圈里就挨射），两种圈别混
+去拆巢穴
+  框选兵 → 右键点巢穴，一路走过去硬拆（路上挨咬不管，命令优先）
+  拆完 Q 回位；打崩了 W 撤退保人
+  点名的怪不受 1v1 限制：右键点同一只，选中的兵全去打它（集火）
+塔防与警报
+  工程师 T 盖箭塔（盖在土路边）· 选中箭塔 Q 升级（木板 + 铁锭）
+  N 或顶栏"叫波"：提前叫下一波，剩几秒奖励多少矿木
+  B 或顶栏"警钟"（要先选中基地）：农民躲进最近房子，房里的多射一箭
+  基地 / 前哨 / 农民挨打：小地图闪红圈 + 号角（M 静音）
+升级
+  选中基地 / 兵营，第二排 A S D F 研究；排队扣钱、取消全退、全军生效
+敌人
+  Goo 啃路边房子 · 窜窜跑得快直冲基地 · 岩壳厚带甲专拆箭塔（派剑士顶）
+  农民自保：怪凑近会自己跑到最近房子墙边躲（头顶红"!"），走远回去接着干"""))
+
+## 帮助面板的一栏：同款羊皮纸字，定宽 + 自动换行（两栏并排，720p 也放得下）
+## 字号 14 是量出来的：15 号 + 这些行数会把面板顶出屏幕底部（720 高装不下）
+func _help_col(txt: String) -> Label:
 	var l := Label.new()
 	l.add_theme_color_override("font_color", INK)
 	l.add_theme_constant_override("outline_size", 0)
 	l.add_theme_font_override("font", Art.body_font())
-	l.add_theme_font_size_override("font_size", 16)
-	l.text = """操作说明（帝国时代式）
-左键：点选 · 拖动：框选 · Shift+左键/拖框：加选减选 · 双击 / Ctrl+左键：选屏幕内同类
-右键：移动 / 采集 / 攻击 / 交货（看点的什么）· 闲农民右键熔炉/木工台 = 进厂干活 · Shift+右键：排路点 · 选中基地/兵营右键 = 集结点
-命令卡热键按位置：Q W E R T / A S D F G / Z X C V B（A 攻击移动 · S 停止 · D 驻守 · F 巡逻）
-轻 RTS（打起来像王国保卫战，但兵听你的）：兵默认守在兵营集结点周围 115 内，怪进来自动一个一个迎上去钉住
-  （近战 1v1 独占，别的兵去找下一只，不会一窝蜂围一只）· 右键 / A / D / F 随便给兵下令，给了就听你的
-  「回位」或 S 停止 = 把手令交还回去，走回防区接着守 · 想整队挪防线：选中兵营、右键地面改集结点
-「撤退」W = 跟回位反方向：脱战退到最近的基地 / 前哨门口待命，到了站住、不会自己跑回防区
-  路上不接新敌，只还手贴到身上的（弓手边走边射、近战站定把这一只打掉再走）· 想回岗位再按 Q 回位
-选中兵营会画一圈虚线 = 拦截圈：怪一进这个圈，守军就自动迎上去拦；圈外路过的一概不管
-  圈上写着里面站了几个兵 · 圈是以集结点为圆心的，挪集结点圈就跟着挪
-  箭塔的射程圈是实心圆，别混：实心（攻击范围，怪在圈里就挨射）／虚线（拦截范围，怪在圈里才有人去拦）
-想拆巢穴：框选兵 → 右键点巢穴，他们一路走过去硬拆。路上挨咬也不管（命令优先），拆完按 Q 回位叫回来（要保命就按 W 撤退）
-  点名的怪不受 1v1 限制——右键点同一只，选中的兵全都会去打它（集火）
-H：选基地 · .：闲置农民 · ,：闲置军队 · 空格：镜头回到选中 · Del：删除 · Esc：取消
-Ctrl+数字：编队 · 数字：选队（连按两下跳过去）· Shift+数字：加进当前选择
-滚轮：缩放 · 鼠标贴边 / 方向键 / 中键拖动：移动镜头 · 小地图：左键跳转、右键下指令
-底栏生产队列：点图标取消（全额退钱）· 人口满了排头会等空位
-升级：选中基地 / 兵营，第二排 A S D F 研究（排进生产队列读条，取消全额退；一次研究、全军生效）
-塔防：工程师 T 盖箭塔（盖在土路边，选中看射程圈）· 选中箭塔 Q 升级（木板 + 铁锭）· N / 顶栏"叫波"：提前叫下一波，剩几秒奖励多少矿木
-B / 顶栏"警钟"：农民全躲进最近有空位的基地 / 仓库 / 前哨 / 箭塔，躲进会射箭的房子每人每轮多射一箭；再按一次解除，各回各的活
-基地 / 前哨 / 农民挨打：小地图那儿闪红圈 + 号角（M 静音）
-敌人：Goo 啃路边房子 · 窜窜跑得快、直冲基地 · 岩壳又厚又带甲、专拆箭塔（派剑士顶）
-农民自保：怪凑到跟前，挨着的那几个自己放下活跑到最近的基地/仓库/前哨/箭塔墙边（头顶红"!"），怪走远了自己回去接着干
-P：暂停（暂停时照样能看地图、改指令）· + / - 或顶栏"1×"：1×/2×/3× 快进 · 结算页 R：再来一局
-C：产能面板 · F1：本说明"""
-	_help.add_child(l)
+	l.add_theme_font_size_override("font_size", 15)
+	l.add_theme_constant_override("line_spacing", -1)
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	l.custom_minimum_size = Vector2(548, 0)
+	l.text = txt
+	return l
 
 func toggle_help() -> void:
 	_help.visible = not _help.visible
@@ -754,7 +787,7 @@ func refresh() -> void:
 	# 产能面板：右侧、底栏上方
 	if main.panel.visible:
 		_fit(main.panel, Vector2(VW - main.panel.size.x - 8.0, VH - BOT_H - main.panel.size.y - 6.0))
-	_fit(_help, Vector2((VW - _help.size.x) * 0.5, TOP_H + 40.0))
+	_fit(_help, Vector2((VW - _help.size.x) * 0.5, TOP_H + 10.0))
 	if main.overlay.visible and _overlay_pic.texture == null:
 		_overlay_pic.texture = icon("ui/icon_victory" if main.game_state == "win" else "ui/icon_defeat")
 		_overlay_pic.visible = _overlay_pic.texture != null

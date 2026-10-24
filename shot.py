@@ -103,6 +103,13 @@ def focus(h):
     time.sleep(0.6)
 
 
+def press_key(vk):
+    """发一次按键（vk = 虚拟键码，F1=112、P=80 之类）。窗口必须已经在前台"""
+    u.keybd_event(vk, 0, 0, 0)
+    time.sleep(0.05)
+    u.keybd_event(vk, 0, 2, 0)
+
+
 def main():
     args = sys.argv[1:]
     wait = float(args[0])
@@ -120,6 +127,9 @@ def main():
             i += 2
         elif a == "--right":
             rclick = [int(v) for v in args[i + 1].split(",")]
+            i += 2
+        elif a == "--key":
+            steps.append(("key", int(args[i + 1])))
             i += 2
         elif a == "--mouse":
             steps.append(("mouse", [int(v) for v in args[i + 1].split(",")]))
@@ -152,6 +162,8 @@ def main():
             elif kind == "mouse":
                 u.SetCursorPos(*to_screen(h, val[0], val[1]))
                 time.sleep(0.3)
+            elif kind == "key":
+                press_key(val)
             elif kind == "wait":
                 time.sleep(val)
             else:
