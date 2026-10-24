@@ -235,9 +235,9 @@ func _build_top_bar() -> void:
 	_clock_val.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_clock_val.custom_minimum_size.x = 56
 	hb.add_child(_clock_val)
-	var bp := _small_btn(hb, "产能", "产能面板（C 键）")
+	var bp := _small_btn(hb, "产能", "产能面板：最近 15 秒的采集 / 加工速度")
 	bp.pressed.connect(func(): main.toggle_panel())
-	_speed_btn = _small_btn(hb, "1×", "游戏速度：点一下加一档（+ 加速 / - 减速 / P 暂停）")
+	_speed_btn = _small_btn(hb, "1×", "游戏速度：点一下加一档（1× / 2× / 3×）")
 	_speed_btn.custom_minimum_size.x = 46
 	_speed_btn.pressed.connect(func(): main.cycle_speed())
 	var bh := _small_btn(hb, "?", "操作说明（F1）")
@@ -350,9 +350,9 @@ func _build_bottom_bar() -> void:
 	iv.add_theme_constant_override("separation", 6)
 	iv.alignment = BoxContainer.ALIGNMENT_CENTER
 	hb.add_child(iv)
-	_idle_w = _idle_btn(iv, "workers", "闲置农民（. 键）：轮流选中没活干的农民")
+	_idle_w = _idle_btn(iv, "workers", "闲置农民：轮流选中没活干的农民")
 	_idle_w.pressed.connect(func(): main.select_next_idle(true))
-	_idle_s = _idle_btn(iv, "sword", "闲置军队（, 键）：轮流选中没命令的士兵")
+	_idle_s = _idle_btn(iv, "sword", "闲置军队：轮流选中没命令的士兵")
 	_idle_s.pressed.connect(func(): main.select_next_idle(false))
 	# 小地图
 	var mp := PanelContainer.new()
@@ -556,7 +556,7 @@ func _build_toast() -> void:
 	root.add_child(l)
 	main._hud_msg_label = l
 
-## 右侧、底栏上方：产能面板（C 键开关）
+## 右侧、底栏上方：产能面板（顶栏"产能"按钮开关）
 func _build_panel() -> void:
 	var p := PanelContainer.new()
 	p.add_theme_stylebox_override("panel", _panel_box(0.3, 2.0))

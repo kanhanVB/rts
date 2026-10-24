@@ -83,7 +83,7 @@ var overlay_label: Label
 var _hud_msg_label: Label
 var _hud_msg_t := 0.0
 var info_label: Label        # 底部信息栏：点选 = 数值，框选 = "已选中 N 个"
-var panel: Control           # 产能面板（C 键开关）
+var panel: Control           # 产能面板（顶栏"产能"按钮开关）
 var panel_label: Label
 var _panel_on := true
 var hud: Hud                 # 王国保卫战风格 HUD（hud.gd）
@@ -819,30 +819,16 @@ func _on_key(event: InputEventKey) -> void:
 			_deselect_all()
 	elif k == KEY_F1:
 		hud.toggle_help()
-	elif k == KEY_F2:
-		toggle_panel()
 	elif k == KEY_P:
 		toggle_pause()
-	elif k == KEY_EQUAL or k == KEY_PLUS or k == KEY_KP_ADD:
-		set_speed(speed_i + 1)          # 加速：1× → 2× → 3× → 1×
-	elif k == KEY_MINUS or k == KEY_UNDERSCORE or k == KEY_KP_SUBTRACT:
-		set_speed(speed_i - 1)          # 减速
 	elif k == KEY_R and game_state != "play":
 		restart()                        # 结算页：R 再来一局
-	elif k == KEY_DELETE:
-		_delete_selected()
-	elif k == KEY_H:
-		select_base()
 	elif k == KEY_N:
 		call_wave_early()
 	elif k == KEY_B:
 		ring_bell()
 	elif k == KEY_M:
 		toggle_mute()
-	elif k == KEY_PERIOD:
-		select_next_idle(true)
-	elif k == KEY_COMMA:
-		select_next_idle(false)
 	elif k == KEY_SPACE:
 		_center_on_selection()
 	elif k >= KEY_1 and k <= KEY_9:
@@ -859,8 +845,8 @@ func _on_key(event: InputEventKey) -> void:
 				_center_on_selection()
 			_last_group = idx
 			_last_group_t = now
-	elif not run_hotkey(OS.get_keycode_string(k)) and k == KEY_C:
-		toggle_panel()
+	else:
+		run_hotkey(OS.get_keycode_string(k))
 
 func toggle_panel() -> void:
 	_panel_on = not _panel_on
@@ -2280,7 +2266,7 @@ func _update_panel() -> void:
 	panel_label.visible = panel.visible
 	if not panel.visible:
 		return
-	var lines := "产能（近 %d 秒 · C 键隐藏）" % int(Economy.RATE_WINDOW)
+	var lines := "产能（近 %d 秒）" % int(Economy.RATE_WINDOW)
 	for k in ["ore", "wood", "ingot", "plank"]:
 		var r := economy.rate(k)
 		var v := "—" if r < 0.02 else "%.1f/秒" % r
