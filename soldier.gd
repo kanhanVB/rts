@@ -24,7 +24,11 @@ var _patrol_b := Vector2.ZERO
 ## ---------- 防区站位（KR 式）----------
 const PIN_RANGE := 115.0     # 防区半径：站位点这个圈里冒出没被钉住的怪，就迎上去
 const POST_LEASH := 200.0    # 追出去超过离站位点这么远：松口先回位（不追到天涯）
-const POST_BACK := 18.0      # 回到站位点这么近算站好
+const POST_BACK := 18.0      # 离站位点超过这么远就开始往回走
+## 走回站位点的停车线。和 POST_BACK 留一段余量（18 起走、12 停）：
+## _move_toward 要精确到脚下 2px 才停，挤在集结点上的一队人谁也走不进去，
+## 就会一直互相顶着原地磨——看着像部队在营门口转圈
+const POST_SETTLE := 12.0
 const ARCHER_BACK := 58.0    # 弓手的站位再往后方（朝基地）退这么远：剑士挡前面，弓手在后面射
 const REPATH_GAP := 20.0     # 目标挪动超过这么远才重新算路径（每帧 A* 太贵）
 const RETREAT_DONE := 45.0   # 撤退：离撤退点这么近算撤到了（到了就原地待命）
@@ -33,6 +37,7 @@ var post_off := Vector2.ZERO      # 相对集结点的站位偏移（一队人�
 var post_fixed := Vector2.INF     # 兵营没了 / 没设集结点时的落脚点
 var pin_target: Node2D = null     # 正在钉的那只怪（近战 1v1）
 var _hurt_target: Node2D = null   # 刚咬过我的那只：优先还手（去岗位的路上被怪拦住也打）
+var _home_back := false           # 正在走回站位点（走到 POST_SETTLE 就算站好，别硬挤到脚下）
 var _goal := Vector2.INF          # 当前在走的目的地（防区模式自己算路用）
 var _chase_goal := Vector2.INF    # 追击时上次寻路的目标位置（挪动超过 24px 才重算）
 var _manual := false              # 玩家手令接管了：走自由那套，直到按 S 停止 / 回位才回防区
@@ -51,6 +56,7 @@ func set_post(b: Building, off: Vector2) -> void:
 	_ignore_aggro = false
 	hold = false
 	patrol = false
+	_home_back = false
 	waypoints.clear()
 	if b != null:
 		position = open_spawn(position)
@@ -171,8 +177,14 @@ func _step_post(delta: float) -> void:
 		_unpin()
 	var t := _pick_pin()
 	if t == null:
-		if position.distance_to(home) > POST_BACK:
-			_walk(home, delta)     # 没仗打：走回站位点站好
+		# 没仗打：走回站位点站好。18px 外起走、12px 内停下
+		var dh := position.distance_to(home)
+		if dh > POST_BACK:
+			_home_back = true
+		elif dh <= POST_SETTLE:
+			_home_back = false
+		if _home_back:
+			_walk(home, delta)
 		else:
 			move_target = position
 		return

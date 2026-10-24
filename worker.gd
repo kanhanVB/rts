@@ -44,6 +44,10 @@ const FLEE_R := 95.0          # 这个圈里有怪 = 放下活开跑
 const FLEE_SAFE_R := 260.0    # 怪退出这个圈 = 安全，回去接着干
 const FLEE_MAX_T := 9.0       # 最多躲这么久（怪卡在房子后面看不见时也能自己回去）
 const FLEE_SPEED := 1.35      # 逃跑时腿快 35%
+## 躲到离墙点这么近就算站稳了。别小步追到 2px：
+## 门口是队友送货的必经之路，被挤开两三像素就回头走一步，
+## 再配上"靠右让路"的偏航，屏幕上就是在门口一直转圈
+const FLEE_ARRIVE := 24.0
 
 var flee_to := Vector2.INF    # INF = 没在逃
 var _flee_t := 0.0
@@ -68,7 +72,11 @@ func start_flee() -> void:
 	_pick_t = 0.0
 	var away := (position - b.position)
 	away = away.normalized() if away.length() > 0.001 else Vector2(0, 1)
-	flee_to = b.position + away * (b.size * 0.5 + 30.0)
+	# 沿墙拉开一点：几个人一起躲别都挤在同一个点上（按自己的车道角选左右）
+	var tangent := Vector2(-away.y, away.x)
+	var side := 1.0 if _lane_off.dot(tangent) >= 0.0 else -1.0
+	var slide := tangent * side * (10.0 + _lane_off.length() * 4.0)
+	flee_to = b.position + away * (b.size * 0.5 + 30.0) + slide
 	_flee_t = 0.0
 	move_target = flee_to
 	_path = _find_path(flee_to)
@@ -79,12 +87,50 @@ func _step_flee(delta: float) -> void:
 	if state == State.SHELTER:
 		flee_to = Vector2.INF    # 玩家敲了警钟：交给屋里那套
 		return
+	# 到墙根了：站着等，别再一步步追那个点（被挤开一点点也接着站）。
+	# 只靠这个死区、不另记"已经站好"：死区是自适应的，万一被挤远了会自己走回来
+	if position.distance_to(flee_to) <= FLEE_ARRIVE:
+		move_target = position
+		_path = PackedVector2Array()
+		_path_idx = 0
+		return
 	_move_toward(flee_to, delta * FLEE_SPEED)
+
+## 收工前的保险：原来那份活还在怪跟前就别回去。
+## 只看"怪离我多远"是不够的——躲到墙根以后离怪自然就远了，于是收工往回走，
+## 走回矿堆又近到 95 以内再跑，位置在矿堆和基地之间无限往返，看着就是在门口打转
+func _resume_point() -> Vector2:
+	var r := _resume
+	var wa = r.get("work_at")
+	if is_instance_valid(wa) and wa is Building:
+		return wa.position
+	var f = r.get("fetch")
+	if is_instance_valid(f) and f is Treasure:
+		return f.position
+	var n = r.get("node")
+	if is_instance_valid(n) and n is ResNode:
+		return n.position
+	var mv = r.get("move")
+	if mv is Vector2 and mv != Vector2.INF:
+		return mv
+	return Vector2.INF
+
+## 干活的地方有没有怪（没有活 = 没有地方，返回 false）
+func _job_unsafe() -> bool:
+	var p := _resume_point()
+	if p == Vector2.INF:
+		return false
+	for e in _group("enemies"):
+		if is_instance_valid(e) and e.get("dead") != true and e.position.distance_to(p) < FLEE_R:
+			return true
+	return false
 
 ## 危险过去了：回去接着干原来的活（采原来那处 / 回加工线 / 先把手上的货交了）
 func end_flee() -> void:
 	if flee_to == Vector2.INF:
 		return
+	if _job_unsafe():
+		return    # 矿堆上还站着怪：在墙根接着等，别出去两秒又被吓回来
 	flee_to = Vector2.INF
 	_flee_t = 0.0
 	_path = PackedVector2Array()

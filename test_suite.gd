@@ -21,6 +21,10 @@ func run() -> void:
 		await _alert_tests()
 		_done()
 		return
+	if "--only=circle" in OS.get_cmdline_user_args():
+		await _circle_probe()    # 单独探针：转圈 / 来回跑（-- --test --only=circle）
+		_done()
+		return
 	if "--only=new" in OS.get_cmdline_user_args():
 		await _time_tests()    # 只跑暂停/倍速、结算统计、农民自保（-- --test --only=new，迭代用）
 		await _stats_tests()
@@ -1005,6 +1009,276 @@ func _flee_tests() -> void:
 	_check(not w.is_fleeing(), "怪没了：自己收工往回走")
 	_check(is_instance_valid(w.node_target) and w.state != Worker.State.IDLE, "回去接着干原来的活（采矿）")
 	w.queue_free()
+
+	# 一群人一起躲到同一面墙：到位就该站住，不能互相挤着原地打转
+	# （用户报的「怪一来农民就在基地门口一直转圈」就是这个：
+	#   到了墙点还小步追点 → 被队友一挤就回头走 → 配上靠右让路偏航，一直转）
+	var crowd: Array = []
+	for i in 4:
+		var c := Worker.new()
+		c.position = m.base.position + Vector2(100, 16 + i * 8)
+		m.add_child(c)
+		crowd.append(c)
+	await m.get_tree().create_timer(0.3).timeout
+	var g3 := Goo.new()
+	g3.position = m.base.position + Vector2(180, 10)
+	m.add_child(g3)
+	g3.speed = 0.0    # 站着不动的怪：只负责"附近有怪"
+	for c in crowd:
+		c.start_flee()
+	await m.get_tree().create_timer(3.0).timeout    # 给 3 秒走到墙根
+	var p1: Array = []
+	for c in crowd:
+		p1.append(c.position)
+	await m.get_tree().create_timer(3.0).timeout
+	var mill := 0.0
+	for i in crowd.size():
+		if is_instance_valid(crowd[i]):
+			mill += p1[i].distance_to(crowd[i].position)
+	mill /= float(crowd.size())
+	_check(mill < 40.0 and crowd.all(func(c): return is_instance_valid(c) and c.is_fleeing()),
+		"一群人躲到同一面墙：站稳之后不再磨（3 秒人均走了 %.0fpx）" % mill)
+	g3.queue_free()
+	for c in crowd:
+		if is_instance_valid(c):
+			c.queue_free()
+	await m.get_tree().create_timer(0.3).timeout
+
+	# 躲好之后：干活的地方还站着怪，就别收工往回走（不然出去两秒又被吓回来，来回跑）
+	var ore2: ResNode = null
+	for n in m.get_tree().get_nodes_in_group("res_nodes"):
+		if n.kind == "ore" and n.reachable() and n.amount > 1.0:
+			ore2 = n
+			break
+	if ore2 != null:
+		var w2 := Worker.new()
+		w2.position = ore2.position + Vector2(0, 60)
+		m.add_child(w2)
+		await m.get_tree().create_timer(0.2).timeout
+		w2.command_gather(ore2)
+		var g4 := Goo.new()
+		g4.position = ore2.position + Vector2(40, 25)
+		m.add_child(g4)
+		g4.speed = 0.0
+		m._check_worker_safety()
+		_check(w2.is_fleeing(), "矿边有怪：农民躲到墙根")
+		await m.get_tree().create_timer(1.5).timeout
+		for i in 3:
+			m._check_worker_safety()    # 多叫几次：超时线不会把它骗回去
+			await m.get_tree().create_timer(0.2).timeout
+		_check(w2.is_fleeing(),
+			"矿上还有怪：不往回走（离怪 %.0fpx）" % w2.position.distance_to(g4.position))
+		g4.queue_free()
+		await m.get_tree().create_timer(0.4).timeout
+		m._check_worker_safety()
+		_check(not w2.is_fleeing(), "怪清掉了：回矿上接着干")
+		w2.queue_free()
+
+## ---- 单独探针：转圈 / 来回跑（-- --test --only=circle）----
+## 用户报的「怪一来农民就在基地门口转圈、部队有时候也转圈」，拆成两件事量：
+##   A 来回跑：逃跑的解除条件只看「怪离我多远」，一走到墙根就够远了 → 收工往回走，
+##     走回矿堆又近到 95 以内 → 再跑。位置在两点之间往返，看着就是在门口打转
+##   B 原地磨：一群人挤向同一个点，分离力推开 + 靠右让路偏航互相喂 → 谁也停不下来
+## 每个场景都量两件事：走过的总路程 vs 净位移（净位移接近 0 而路程很大 = 在磨）
+func _circle_probe() -> void:
+	var tree := m.get_tree()
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	for u in tree.get_nodes_in_group("player_units"):
+		if is_instance_valid(u) and u is Soldier:
+			u.queue_free()
+	await tree.create_timer(0.4).timeout
+
+	# ---------- A：农民逃跑来回震荡 ----------
+	var w := Worker.new()
+	var ore: ResNode = null
+	for n in tree.get_nodes_in_group("res_nodes"):
+		if n.kind == "ore" and n.reachable() and n.amount > 1.0:
+			ore = n
+			break
+	_check(ore != null, "探针：找到一处矿")
+	w.position = ore.position + Vector2(0, 60)
+	m.add_child(w)
+	await tree.create_timer(0.2).timeout
+	w.command_gather(ore)
+	print("  矿在 %s，基地在 %s，相距 %.0fpx" % [str(ore.position.round()),
+		str(m.base.position.round()), ore.position.distance_to(m.base.position)])
+
+	# 站一只不动的怪在矿边（speed=0：不追不打，只负责"矿上有怪"这件事）
+	var g := Goo.new()
+	g.position = ore.position + Vector2(45, 30)
+	m.add_child(g)
+	g.speed = 0.0
+	m._check_worker_safety()
+	_check(w.is_fleeing(), "探针：矿边有怪 → 农民跑")
+	var flips := 1
+	var last_flee := true
+	var travel := 0.0
+	var last_p := w.position
+	for i in 24:
+		await tree.create_timer(0.5).timeout
+		if not is_instance_valid(w):
+			break
+		travel += last_p.distance_to(w.position)
+		last_p = w.position
+		if w.is_fleeing() != last_flee:
+			flips += 1
+			last_flee = w.is_fleeing()
+		if i % 4 == 3:
+			print("  t=%4.1fs 位置=%s 逃=%s 距怪=%3.0f 距墙点=%3.0f 状态=%d 路径=%d/%d 邻=%d 推出=%s" % [
+				(i + 1) * 0.5, str(w.position.round()), str(w.is_fleeing()),
+				w.position.distance_to(g.position),
+				w.position.distance_to(w.flee_to) if w.flee_to != Vector2.INF else -1.0,
+				w.state, w._path_idx, w._path.size(), _near_count(w, 44.0),
+				str(Terrain.current.push_out(w.position, w.radius * 0.8).round())])
+	print("  A 结论 12 秒内逃跑开关 %d 次，总路程 %.0fpx" % [flips, travel])
+	if is_instance_valid(g):
+		g.queue_free()
+	if is_instance_valid(w):
+		w.queue_free()
+	await tree.create_timer(0.4).timeout
+
+	# ---------- B：一群农民躲同一面墙 ----------
+	var crowd: Array = []
+	for i in 5:
+		var c := Worker.new()
+		c.position = m.base.position + Vector2(90, 30 + i * 6)
+		m.add_child(c)
+		crowd.append(c)
+	await tree.create_timer(0.2).timeout
+	var g2 := Goo.new()
+	g2.position = m.base.position + Vector2(150, 20)
+	m.add_child(g2)
+	g2.speed = 0.0
+	for c in crowd:
+		c.start_flee()
+	await tree.create_timer(3.0).timeout    # 先给 3 秒走到墙根
+	var t0 := {}
+	for c in crowd:
+		t0[c] = c.position
+	var tr := 0.0
+	var last := {}
+	for c in crowd:
+		last[c] = c.position
+	var dur := 0.0
+	while dur < 5.0:
+		await tree.create_timer(0.1).timeout
+		dur += 0.1
+		for c in crowd:
+			if is_instance_valid(c):
+				tr += last[c].distance_to(c.position)
+				last[c] = c.position
+	var net := 0.0
+	var still := 0
+	for c in crowd:
+		if is_instance_valid(c):
+			net += t0[c].distance_to(c.position)
+			if not c.moving:
+				still += 1
+	print("  B 结论 到位后 5 秒：总路程 %.0fpx（人均 %.0f），人均净位移 %.0fpx，站着不动 %d/%d" % [
+		tr, tr / float(crowd.size()), net / float(crowd.size()), still, crowd.size()])
+	for c in crowd:
+		if is_instance_valid(c):
+			c.queue_free()
+	if is_instance_valid(g2):
+		g2.queue_free()
+	await tree.create_timer(0.4).timeout
+
+	# ---------- C：一队兵被派去同一个点 ----------
+	var squad: Array = []
+	var dest := Vector2(520, 400)
+	for i in 4:
+		var s := Soldier.new()
+		s.setup(false)
+		s.position = dest + Vector2(-160, -30 + i * 20)
+		m.add_child(s)
+		squad.append(s)
+	await tree.create_timer(0.2).timeout
+	for s in squad:
+		s.command_move(dest)
+	await tree.create_timer(6.0).timeout
+	var c_tr := 0.0
+	var c_last := {}
+	for s in squad:
+		c_last[s] = s.position
+	var c_dur := 0.0
+	while c_dur < 3.0:
+		await tree.create_timer(0.1).timeout
+		c_dur += 0.1
+		for s in squad:
+			if is_instance_valid(s):
+				c_tr += c_last[s].distance_to(s.position)
+				c_last[s] = s.position
+	var c_still := 0
+	var c_far := 0
+	for s in squad:
+		if is_instance_valid(s):
+			if not s.moving:
+				c_still += 1
+			if s.position.distance_to(dest) > 40.0:
+				c_far += 1
+	print("  C 结论 到点 6 秒后 3 秒内：总路程 %.0fpx（人均 %.0f），站着不动 %d/%d，离目标 >40px %d/%d" % [
+		c_tr, c_tr / float(squad.size()), c_still, squad.size(), c_far, squad.size()])
+	for s in squad:
+		if is_instance_valid(s):
+			s.queue_free()
+	await tree.create_timer(0.4).timeout
+
+	# ---------- D：兵走到一堆站着不动的队友中间（顶不进去 → 互相挤着磨） ----------
+	var spot := Vector2(640, 480)
+	var stand: Array = []
+	for i in 3:
+		var wk := Worker.new()
+		wk.position = spot + Vector2(cos(i * 2.1) * 18.0, sin(i * 2.1) * 18.0)
+		m.add_child(wk)
+		stand.append(wk)
+	await tree.create_timer(0.3).timeout
+	for wk in stand:
+		wk.command_move(wk.position)
+	var push_in: Array = []
+	for i in 2:
+		var s2 := Soldier.new()
+		s2.setup(false)
+		s2.position = spot + Vector2(-120, i * 24 - 12)
+		m.add_child(s2)
+		push_in.append(s2)
+	await tree.create_timer(0.3).timeout
+	for s2 in push_in:
+		s2.command_move(spot)
+	await tree.create_timer(5.0).timeout
+	var d_tr := 0.0
+	var d_last := {}
+	for s2 in push_in:
+		d_last[s2] = s2.position
+	var d_dur := 0.0
+	while d_dur < 3.0:
+		await tree.create_timer(0.1).timeout
+		d_dur += 0.1
+		for s2 in push_in:
+			if is_instance_valid(s2):
+				d_tr += d_last[s2].distance_to(s2.position)
+				d_last[s2] = s2.position
+	var d_still := 0
+	for s2 in push_in:
+		if is_instance_valid(s2) and not s2.moving:
+			d_still += 1
+	print("  D 结论 到点 5 秒后 3 秒内：总路程 %.0fpx（人均 %.0f），站着不动 %d/%d" % [
+		d_tr, d_tr / float(push_in.size()), d_still, push_in.size()])
+	for s2 in push_in:
+		if is_instance_valid(s2):
+			s2.queue_free()
+	for wk in stand:
+		if is_instance_valid(wk):
+			wk.queue_free()
+
+## 身边（半径 r 内）有多少个单位 —— 探针用：看是不是被人挤着磨
+func _near_count(u: Node2D, r: float) -> int:
+	var n := 0
+	for o in m.get_tree().get_nodes_in_group("units"):
+		if is_instance_valid(o) and o != u and o.position.distance_to(u.position) < r:
+			n += 1
+	return n
 
 ## ---- 单独探针：A 移动 → 半路遇怪 → 打完接着赶路 ----
 ## 全量里这条最脆（路径、卡住、时序都掺在一起），单独跑几秒就能看清卡在哪
