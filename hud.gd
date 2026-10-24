@@ -578,71 +578,31 @@ func _build_help() -> void:
 	_help.visible = false
 	_help.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(_help)
-	# 两栏排：左「怎么玩」、右「打起来怎么打」。
-	# 原来 26 行全堆在一个 Label 里，720p 下就是一面字墙，而且是从"Shift+左键加选"
-	# 这种边角操作开头的——新玩家最想知道的"这局要干什么"反而一个字没有。
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 26)
-	_help.add_child(row)
-	row.add_child(_help_col("""怎么玩（帝国式 RTS + 塔防）
-开局三步
-  1. 工程师 E 招农民（上限 16，盖房子加人口）
-  2. 农民右键矿堆采矿、右键树林伐木，自动送回基地
-  3. 工程师 R 盖兵营 → 选中兵营 Q 剑士 / W 弓手
-矿石和木材不能直接造兵
-  工程师 E 盖熔炉（矿→铁锭）、W 盖木工台（木→木板）
-  要点名的农民进厂守炉 / 守锯才有产出
-  选中熔炉：Q 招工、W 放人、E 自取
-怎么赢
-  十波怪沿土路来，打完就赢；造塔、推兵营、研究升级都算数
-  清野拿资源：框选兵右键点 Goo 巢穴拆掉，缴获后面的富矿
-基础操作
-  左键点选 · 拖动框选 · Shift 加减选 · 双击 / Ctrl 选同类
-  右键：移动 / 采集 / 攻击 / 交货 · Shift+右键排路点
-  选中基地或兵营，右键地面 = 设集结点
-  命令卡按位置：Q W E R T / A S D F G / Z X C V B
-镜头与杂项
-  H 选基地 · . 闲置农民 · , 闲置军队 · 空格 回到选中
-  Ctrl+数字 编队 · 数字 选队 · 小地图 左键跳、右键下令
-  滚轮缩放 · 贴边 / 方向键 / 中键拖动 移镜头
-  P 暂停 · + - 快进 · C 产能面板 · Del 删除 · Esc · F1
-  底栏队列点图标取消（全额退钱）· 结算页 R 再来一局"""))
-	row.add_child(_help_col("""兵怎么打（轻 RTS：像王国保卫战，但兵听你的）
-  兵出厂领站位点（兵营集结点），怪进 115 内就一个一个迎上去钉住
-  近战 1v1 独占：咬住一只，别的兵自动找下一只，不会一窝蜂围一只
-  右键 / A / D / F 随便下令；S 停止或 Q 回位 = 交还手令回防区
-  W 撤退 = 反方向：退到最近的基地 / 前哨待命，到了站住不自己回防区
-    路上不接新敌，只还手贴到身上的（弓手边走边射，近战站定打掉再走）
-  选中兵营画绿虚线 = 拦截圈：怪进这个圈才有人拦，圈外路过的不管
-  箭塔的实心圆是射程（怪在圈里就挨射），两种圈别混
-去拆巢穴
-  框选兵 → 右键点巢穴，一路走过去硬拆（路上挨咬不管，命令优先）
-  拆完 Q 回位；打崩了 W 撤退保人
-  点名的怪不受 1v1 限制：右键点同一只，选中的兵全去打它（集火）
-塔防与警报
-  工程师 T 盖箭塔（盖在土路边）· 选中箭塔 Q 升级（木板 + 铁锭）
-  N 或顶栏"叫波"：提前叫下一波，剩几秒奖励多少矿木
-  B 或顶栏"警钟"（要先选中基地）：农民躲进最近房子，房里的多射一箭
-  基地 / 前哨 / 农民挨打：小地图闪红圈 + 号角（M 静音）
-升级
-  选中基地 / 兵营，第二排 A S D F 研究；排队扣钱、取消全退、全军生效
-敌人
-  Goo 啃路边房子 · 窜窜跑得快直冲基地 · 岩壳厚带甲专拆箭塔（派剑士顶）
-  农民自保：怪凑近会自己跑到最近房子墙边躲（头顶红"!"），走远回去接着干"""))
-
-## 帮助面板的一栏：同款羊皮纸字，定宽 + 自动换行（两栏并排，720p 也放得下）
-## 字号 14 是量出来的：15 号 + 这些行数会把面板顶出屏幕底部（720 高装不下）
-func _help_col(txt: String) -> Label:
+	# 只留骨架。每个命令卡按钮本来就有悬停说明（_cmd_entry 的 tip），F1 里再抄一遍没必要。
+	# 两栏 20 多行也还是"打开就想关掉"——这里只回答三个问题：从哪开始、手怎么动、兵怎么指挥。
 	var l := Label.new()
 	l.add_theme_color_override("font_color", INK)
 	l.add_theme_constant_override("outline_size", 0)
 	l.add_theme_font_override("font", Art.body_font())
-	l.add_theme_font_size_override("font_size", 15)
-	l.add_theme_constant_override("line_spacing", -1)
-	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	l.custom_minimum_size = Vector2(548, 0)
-	l.text = txt
-	return l
+	l.add_theme_font_size_override("font_size", 16)
+	l.text = """怎么开始
+  选中基地 → Q 招农民
+  农民右键矿堆 / 树林，自己往返搬
+  选中工程师 → W 熔炉（矿→铁锭）· E 木工台（木→木板）· R 兵营
+  选中兵营 → Q 剑士 · W 弓手
+  怪沿土路来，十波打完就赢
+
+怎么操作
+  左键点选 · 拖动框选 · Shift 加选
+  右键：走过去 / 采集 / 打谁 / 交货
+  选中基地或兵营，右键地面 = 集结点
+
+兵怎么打
+  平时守在兵营周围，怪来了自己上去拦，不用管
+  A 一路打过去 · S 停止 · Q 回位 · W 撤退
+
+屏幕上按钮悬停都有说明"""
+	_help.add_child(l)
 
 func toggle_help() -> void:
 	_help.visible = not _help.visible
