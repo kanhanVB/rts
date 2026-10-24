@@ -713,11 +713,10 @@ func _hud_msg(text: String) -> void:
 ## ================================ 输入（帝国时代式） ================================
 ## 左键：点选 / 拖框；Shift+左键 加减选；双击或 Ctrl+左键 = 选屏幕内同类
 ## 右键：智能指令（移动 / 采集 / 攻击 / 交货）；选中基地/兵营右键 = 集结点；Shift+右键 = 排路点
-## 命令卡热键按 5×3 网格：QWERT / ASDFG / ZXCVB，和底栏按钮位置一一对应
-## H 基地 · . 闲置农民 · , 闲置军队 · 空格 = 镜头回到选中 · Del 删除 · Esc 取消/取消选中
-## Ctrl+数字 编队 · 数字 选队（连按两下跳过去）· Shift+数字 把该队加进当前选择 · 中键拖动平移
-const GRID_KEYS := ["Q", "W", "E", "R", "T", "A", "S", "D", "F", "G", "Z", "X", "C", "V", "B"]
-var _target_mode := ""            # "attack" / "patrol"：按了热键，等左/右键点目的地
+## 空格 镜头回到选中 · P 暂停 · N 叫波 · B 警钟 · M 静音 · Del 删除 · Esc 取消/取消选中 · F1 说明
+## 数字 选队（Ctrl 存队 / Shift 并队，连按两下跳镜头）· 中键拖动平移
+## 命令卡不配热键（一律点按钮）——唯一例外是士兵的「撤退」挂了 W
+var _target_mode := ""            # "attack" / "patrol"：按了那个按钮，等左/右键点目的地
 ## 兼容老代码 / 机器人脚本：A 移动待命 = 目标模式是 attack
 var _a_move_next: bool:
 	get:
@@ -1084,7 +1083,7 @@ func commands() -> Array:
 			out.append(_cmd_entry("upgrade", 0, "升级", "tower2", Economy.COST_TOWER_UP,
 				"升二级箭塔：2 名弓手、射程 %d、每箭 %d（护甲高的岩壳也扛不住），血 +%d" % [int(t2.range), int(t2.dmg + Tech.arrow_bonus()), int(Building.TOWER_UP_HP)]))
 		if b.kind != "base":
-			out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "拆掉这座建筑（不退资源）", "Del"))
+			out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "拆掉这座建筑（不退资源）"))
 		elif alarm_on:
 			out.append(_cmd_entry("all_clear", 14, "解除", "all_clear", {}, "警报解除（B）：躲着的农民出来，回去接着干原来的活"))
 		else:
@@ -1124,22 +1123,26 @@ func commands() -> Array:
 			# 兵可以随便动（右键照用）；「回位」是唯一轻 RTS 专属的一格——
 			# 把手令交还给兵营，走回集结点给的站位点接着守
 			out.append(_cmd_entry("recall", 0, "回位", "stop", {},
-				"放弃手上的目标，走回兵营集结点给的站位点接着守（按 S 停止也一样）"))
+				"放弃手上的目标，走回兵营集结点给的站位点接着守"))
 			out.append(_cmd_entry("retreat", 1, "撤退", "retreat", {},
-				"脱战退到最近的基地 / 前哨门口待命：路上不接新敌、只还手贴上来的，到了就站住——不会自己跑回防区。要回岗位按 Q 回位"))
+				"脱战退到最近的基地 / 前哨门口待命：路上不接新敌、只还手贴上来的，到了就站住——不会自己跑回防区。要回岗位点「回位」", "W"))
 			out.append(_cmd_entry("attack", 5, "攻击移动", "attack", {}, "走到目的地，路上遇敌一个一个拦着打"))
 			out.append(_cmd_entry("stop", 6, "停止", "stop", {}, "扔下手上的事之后回兵营的防区站好"))
 			out.append(_cmd_entry("hold", 7, "驻守", "hold", {}, "原地不动：敌人进射程就打，不追"))
 			out.append(_cmd_entry("patrol", 8, "巡逻", "patrol", {}, "在这里和目标点之间来回走，遇敌就打"))
 	if not us.any(func(u): return u is Engineer):
-		out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "删除选中的单位", "Del"))
+		out.append(_cmd_entry("delete", 14, "删除", "delete", {}, "删除选中的单位"))
 	return out
 
-func _cmd_entry(id: String, slot: int, title: String, icon_key: String, cost: Dictionary, tip: String, key := "") -> Dictionary:
-	return {"id": id, "slot": slot, "key": key if key != "" else GRID_KEYS[slot], "title": title,
+func _cmd_entry(id: String, slot: int, title: String, icon_key: String, cost: Dictionary, tip: String, key := "--") -> Dictionary:
+	return {"id": id, "slot": slot, "key": key, "title": title,
 		"icon": icon_key, "cost": cost, "tip": tip}
 
 ## 热键 → 命令卡上同位置的按钮
+## 命令卡已经去键位化了（只能点按钮），只剩「撤退」显式挂了 W：
+## 打崩了要立刻按，那时候手不该离开战场去找鼠标。
+## 占位符 "--" 是两位，_draw_cmd 只在长度 1 时画字母、run_hotkey 也只会被单字母命中，
+## 所以它既不显示也不响应。
 func run_hotkey(letter: String) -> bool:
 	for c in commands():
 		if c.key == letter:
@@ -1193,7 +1196,7 @@ func run_command(id: String) -> void:
 					u.command_retreat(_retreat_point(u))
 					n += 1
 			if n > 0:
-				_hud_msg("%d 个兵撤退到后方待命：路上不接新敌、只还手贴上来的；到了站住不动（不会自己跑回防区，要回就按 Q 回位）" % n)
+				_hud_msg("%d 个兵撤退到后方待命：路上不接新敌、只还手贴上来的；到了站住不动（不会自己跑回防区，要回就点「回位」）" % n)
 			else:
 				_hud_msg("先选中的兵，才能撤退")
 		"hold":
@@ -2297,7 +2300,7 @@ func _bottleneck() -> String:
 		var raw: String = Economy.KIND_NAME[b.recipe().in]
 		match b.line_status:
 			"no_op":
-				return "%s没人干活：选中它按 Q 招工（或选农民右键它）" % b.display_name
+				return "%s没人干活：选中它点「招工」（或选农民右键它）" % b.display_name
 			"no_in":
 				if b.self_fetch and economy.amount(b.recipe().in) < Building.FETCH_RESERVE + 1.0:
 					return "%s缺料：仓库%s不到 %d（留底），多派人采" % [b.display_name, raw, int(Building.FETCH_RESERVE)]

@@ -794,9 +794,9 @@ func _light_rts_tests() -> void:
 	m.economy.ore += 500.0
 	m.economy.ingot += 200.0
 	m._set_selection([bk])
-	m.run_hotkey("Q")        # 兵营第一格 = 剑士
+	m.run_command("sword")        # 兵营第一格 = 剑士
 	await tree.create_timer(0.15).timeout
-	m.run_hotkey("Q")
+	m.run_command("sword")
 	await tree.create_timer(0.3).timeout
 	var sws: Array = []
 	for u in tree.get_nodes_in_group("player_units"):
@@ -819,7 +819,7 @@ func _light_rts_tests() -> void:
 	_check(sw.is_manual() and sw.position.distance_to(dest) < 70.0,
 		"选中兵右键地面照样下令，兵自己走过去（离目标 %.0fpx）" % sw.position.distance_to(dest))
 	# S 停止 = 把手令交还回去，走回防区接着守
-	m.run_hotkey("S")
+	m.run_command("stop")        # 停止 = 交还手令，回防区
 	await tree.create_timer(3.6).timeout
 	_check(not sw.is_manual() and sw.position.distance_to(post) < 80.0,
 		"按 S 停止：交还手令，回集结点站好（离点 %.0fpx）" % sw.position.distance_to(post))
@@ -1072,7 +1072,7 @@ func _td_tests() -> void:
 	if not engs.is_empty():
 		m._set_selection([engs[0]])
 		var tc: Array = m.commands().filter(func(c): return c.id == "tower")
-		_check(tc.size() == 1 and tc[0].key == "T", "工程师命令卡 T = 箭塔")
+		_check(tc.size() == 1 and tc[0].slot == 4, "工程师命令卡第 5 格 = 箭塔")
 	var road_ok := false
 	for rp in m.road():
 		if m._build_mgr.placement_error(rp) == "":
@@ -1223,8 +1223,8 @@ func _aoe_tests() -> void:
 	m.select_base()
 	var wood0: float = m.economy.wood
 	var nw0: int = m._player_workers().size()
-	m.run_hotkey("Q")
-	m.run_hotkey("Q")
+	m.run_command("worker")
+	m.run_command("worker")
 	_check(m.base.queue.size() == 2 and absf(m.economy.wood - (wood0 - 60.0)) < 0.5,
 		"Q 排两个农民进基地队列，先扣钱（队列 %d，木 %.0f→%.0f）" % [m.base.queue.size(), wood0, m.economy.wood])
 	m.cancel_train(m.base, 1)
@@ -1327,7 +1327,7 @@ func _aoe_tests() -> void:
 	m.select_next_idle(true)
 	_check(m.selected.size() == 1 and m.selected[0] is Worker and m.selected[0].is_idle(), ". 键选中闲置农民")
 	m._set_selection([iw])
-	m.run_hotkey("W")
+	m.run_command("chop")
 	_check(is_instance_valid(iw.node_target) and iw.node_target.kind == "wood", "W = 去伐木")
 	m._deselect_all()
 
@@ -1533,11 +1533,15 @@ func _camp_tests() -> void:
 			n.process_mode = Node.PROCESS_MODE_INHERIT
 
 ## ---- 科技：基地 / 兵营第二排研究；排队先扣钱、取消全额退、不占人口；研究完全军生效（已有的兵也算）----
+## 命令卡格子位置（5×3 的视觉顺序）。命令卡去键位化以后 key 全是占位符 "--"，
+## 这里按格子输出，断言里的 "A=up_cart" 就表示"第二排第一个格子放的是手推车"，跟热键无关
+const CMD_SLOT_LETTER := ["Q", "W", "E", "R", "T", "A", "S", "D", "F", "G", "Z", "X", "C", "V", "B"]
+
 func _cmd_keys(ids_only_tech := true) -> String:
 	var parts: Array = []
 	for c in m.commands():
 		if not ids_only_tech or Tech.is_tech(c.id):
-			parts.append("%s=%s" % [c.key, c.id])
+			parts.append("%s=%s" % [CMD_SLOT_LETTER[int(c.slot)], c.id])
 	return " ".join(parts)
 
 func _tech_tests() -> void:
@@ -1572,7 +1576,7 @@ func _tech_tests() -> void:
 	var w0 := e.wood
 	var p0 := e.plank
 	var pop0: int = m.queued_count()
-	m.run_hotkey("A")
+	m.run_command("up_cart")
 	_check(m.base.queue.size() == 1 and m.base.queue[0].kind == "up_cart" and absf(e.wood - (w0 - 80.0)) < 0.5 and absf(e.plank - (p0 - 20.0)) < 0.5,
 		"A 研究手推车：排进基地队列，先扣 80 木 20 木板（木 %.0f→%.0f）" % [w0, e.wood])
 	_check(not _cmd_keys().contains("up_cart") and _cmd_keys(false).contains("Q=worker"), "排上的研究按钮藏起来，造农民还在")
@@ -1583,7 +1587,7 @@ func _tech_tests() -> void:
 	_check(m.base.queue.is_empty() and absf(e.wood - w0) < 0.5 and absf(e.plank - p0) < 0.5 and _cmd_keys().contains("A=up_cart"),
 		"取消研究全额退，按钮回来")
 	m.train_scale = 0.02    # 25 秒 → 0.5 秒
-	m.run_hotkey("A")
+	m.run_command("up_cart")
 	await tree.create_timer(0.9).timeout
 	_check(Tech.has("up_cart") and m.base.queue.is_empty() and not _cmd_keys().contains("up_cart"), "读条走完：手推车研究完成，按钮不再出现")
 	m.train_scale = 0.0
@@ -1609,15 +1613,15 @@ func _tech_tests() -> void:
 	_check(full >= 14.5, "研究手推车后农民采满 15 才回去交（%.1f）" % full)
 	gw.queue_free()
 
-	m.run_hotkey("S")
+	m.run_command("up_tools")
 	_check(Tech.has("up_tools") and is_equal_approx(Worker.gather_rate(), 5.2), "精工工具：采集每秒 5.2（%.2f）" % Worker.gather_rate())
 	var sm: Building = m._build_mgr.add_building("smelter", m.base.position + Vector2(-320, -170), 0)    # 临时摆一座（前面的熔炉可能被拆了）
 	var bt0: float = sm.batch_time()
-	m.run_hotkey("D")
+	m.run_command("up_craft")
 	_check(Tech.has("up_craft") and is_equal_approx(bt0, 5.0) and is_equal_approx(sm.batch_time(), 3.5), "熟练工匠：熔炉一批 %.1f → %.1f 秒" % [bt0, sm.batch_time()])
 	sm.queue_free()
 	var td0: float = m.base.tower_stats().dmg
-	m.run_hotkey("F")
+	m.run_command("up_arrows")
 	_check(Tech.has("up_arrows") and is_equal_approx(m.base.tower_stats().dmg, td0 + 3.0), "破甲箭头：基地每箭 %.0f → %.0f" % [td0, m.base.tower_stats().dmg])
 	var tw: Building = m._build_mgr.add_building("tower", m.base.position + Vector2(200, -200), 0)
 	_check(is_equal_approx(tw.tower_stats().dmg, Building.TOWER_LV[1].dmg + 3.0) and is_equal_approx(Building.TOWER_LV[1].dmg, 9.0), "破甲箭头：箭塔每箭 12（常量表没被改）")
@@ -1637,12 +1641,12 @@ func _tech_tests() -> void:
 	await tree.create_timer(0.1).timeout
 	_check(is_equal_approx(sw.atk, 12.0) and is_equal_approx(sw.max_hp, 85.0) and is_equal_approx(ar.atk_range, 140.0), "研究前：剑士 12 攻 85 血，弓手射程 140")
 	m._set_selection([bk])
-	m.run_hotkey("A")
+	m.run_command("up_blade")
 	_check(Tech.has("up_blade") and is_equal_approx(sw.atk, 16.0) and is_equal_approx(ar.atk, 8.0), "锻铁剑：已有剑士 12 → 16，弓手不变")
-	m.run_hotkey("S")
+	m.run_command("up_mail")
 	_check(Tech.has("up_mail") and is_equal_approx(sw.max_hp, 100.0) and is_equal_approx(sw.hp, 100.0) and is_equal_approx(sw.armor, 4.0)
 		and is_equal_approx(ar.max_hp, 60.0) and is_equal_approx(ar.armor, 2.0), "锁子甲：剑士 100 血 4 甲、弓手 60 血 2 甲（满血的直接补满）")
-	m.run_hotkey("D")
+	m.run_command("up_longbow")
 	_check(Tech.has("up_longbow") and is_equal_approx(ar.atk_range, 170.0) and is_equal_approx(ar.atk, 10.0) and ar.aggro_range >= 180.0,
 		"长弓：弓手射程 170、每箭 10、索敌 %.0f" % ar.aggro_range)
 	var ns := Soldier.new()
@@ -1651,7 +1655,7 @@ func _tech_tests() -> void:
 	ns.free()
 	sw.apply_techs()
 	_check(is_equal_approx(sw.atk, 16.0) and is_equal_approx(sw.max_hp, 100.0) and is_equal_approx(sw.armor, 4.0), "重算一遍不会叠两次")
-	m.run_hotkey("F")
+	m.run_command("up_medic")
 	_check(Tech.has("up_medic") and _cmd_keys() == "", "战地包扎研究完，兵营第二排空了")
 	sw.take_damage(44.0)
 	var hp1 := sw.hp
@@ -1899,7 +1903,7 @@ func _wheel_tests() -> void:
 		var keys := _cmd_keys(false)
 		e.wood += 200.0
 		e.plank += 50.0
-		m.run_hotkey("D")
+		m.run_command("waterwheel")
 		var pk: String = m._placing_kind
 		m._placing_kind = ""
 		m._build_eng = null
@@ -2476,11 +2480,11 @@ func _bell_tests() -> void:
 	m._set_selection([m.base])
 	var bi: String = m._selected_info_text()
 	var bc: Array = m.commands().filter(func(c): return c.slot == 14)
-	_check(bi.contains("警钟：躲着 %d/10" % nb) and bc.size() == 1 and bc[0].id == "all_clear" and bc[0].key == "B",
-		"点基地：信息栏写躲了几个，命令卡 B = 解除")
+	_check(bi.contains("警钟：躲着 %d/10" % nb) and bc.size() == 1 and bc[0].id == "all_clear" and bc[0].slot == 14,
+		"点基地：信息栏写躲了几个，命令卡最后一格 = 解除")
 
 	# 命令卡「解除」：屋里的出来，各回各的活
-	m.run_hotkey("B")
+	m.run_command("all_clear")
 	_check(not m.alarm_on and not Building.alarm_on and m.sfx.last == "clear" and m._hud_msg_label.text.contains("警报解除"),
 		"命令卡「解除」：警报解除（%s）" % m._hud_msg_label.text)
 	_check(all8.all(func(w): return not w.is_garrisoned() and w.visible and w.is_in_group("player_units") and w.process_mode == Node.PROCESS_MODE_INHERIT and w.state != Worker.State.SHELTER),
