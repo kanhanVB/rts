@@ -55,6 +55,15 @@ var terrain: Terrain
 
 var game_state := "play"    # play / win / lose
 
+## ---- 时间控制（P 暂停 / + - 或顶栏按钮调倍速）----
+## Engine.time_scale 是全局的：重开一局时必须在 _ready 复位，否则新局一开门就是 3 倍速/暂停
+const SPEEDS := [1.0, 2.0, 3.0]
+var speed_i := 0
+var paused := false
+## ---- 结算统计（一局一份，重开清零）----
+var stats := {"kills": 0, "lost": 0, "trained": 0, "peak_ore": 0.0, "peak_wood": 0.0}
+var overlay_stats: Label
+
 var _drag_start := Vector2.ZERO
 var _dragging := false
 var _placing_kind := ""      # ""=没在放置；"barracks"/"warehouse"=等待点地图落工地
@@ -89,6 +98,9 @@ var _rally_i := 0            # 新兵在兵营前排队的序号     # 右键落
 
 func _ready() -> void:
 	add_to_group("game")
+	Engine.time_scale = 1.0    # 上一局可能停在 3 倍速或暂停，全局缩放得复位
+	paused = false
+	speed_i = 0
 	Tech.reset()    # 科技是全局静态的：开新局清空
 	Relic.reset()   # 遗物也是
 	Building.alarm_on = false
@@ -487,6 +499,9 @@ func _spawn_engineer(pos: Vector2) -> Engineer:
 
 ## ================================ 每帧 ================================
 func _process(delta: float) -> void:
+	# 暂停时 delta = 0，倍速时 delta 被放大。镜头和提示条按“真实时间”走：
+	# 不然 3 倍速下镜头会飞、提示条 1 秒就没了
+	var rdelta := delta / Engine.time_scale if Engine.time_scale > 0.0 else 0.0
 	selected = selected.filter(func(u): return is_instance_valid(u))
 	barracks_list = barracks_list.filter(func(b): return is_instance_valid(b))
 	warehouses_list = warehouses_list.filter(func(b): return is_instance_valid(b))
@@ -505,15 +520,97 @@ func _process(delta: float) -> void:
 			_power_t = 0.5
 			_update_power()
 			_check_garrison()
+			_check_worker_safety()
+			stats.peak_ore = maxf(stats.peak_ore, economy.ore)
+			stats.peak_wood = maxf(stats.peak_wood, economy.wood)
 		_check_end()
 	_update_labels()
 	_update_panel()
-	_update_camera(delta)
+	_update_camera(rdelta)
 	hud.refresh()
 	if _hud_msg_t > 0.0:
-		_hud_msg_t -= delta
+		_hud_msg_t -= rdelta
 		_hud_msg_label.visible = _hud_msg_t > 0.0
 	queue_redraw()
+
+## ================================ 时间控制：暂停 / 倍速 ================================
+func toggle_pause() -> void:
+	if game_state != "play":
+		return
+	paused = not paused
+	_apply_time()
+	# 暂停时屏幕上已有一行大字，不再弹底部提示（重复）；恢复时提一句
+	if not paused:
+		_hud_msg("继续（%d×）" % int(SPEEDS[speed_i]))
+
+func set_speed(i: int) -> void:
+	speed_i = wrapi(i, 0, SPEEDS.size())
+	if paused:
+		paused = false    # 暂停中按 + / -：顺手回到正常速度
+	_apply_time()
+	_hud_msg("游戏速度 %d×" % int(SPEEDS[speed_i]))
+
+func cycle_speed() -> void:
+	set_speed(speed_i + 1)
+
+func speed_mult() -> float:
+	return SPEEDS[speed_i]
+
+func _apply_time() -> void:
+	Engine.time_scale = 0.0 if paused else SPEEDS[speed_i]
+
+func restart() -> void:
+	Engine.time_scale = 1.0    # 重开前复位：不然新局一开门就是上一局的速度
+	get_tree().reload_current_scene()
+
+## 结算页的两行账
+func stats_text() -> String:
+	var secs := int(game_time)
+	var l1 := "用时 %d:%02d　　击杀 %d　　阵亡 %d　　训练 %d" % [
+		secs / 60, secs % 60, int(stats.kills), int(stats.lost), int(stats.trained)]
+	var l2 := "峰值库存　矿 %d / 木 %d　　科技 %d 项　　遗物 %d 件" % [
+		int(stats.peak_ore), int(stats.peak_wood), Tech.done.size(), Relic.owned.size()]
+	return l1 + "\n" + l2
+
+## 统计上报：谁死了都记一笔（Unit.take_damage / kill 走这里）
+func note_death(u) -> void:
+	if u == null:
+		return
+	if u.team == 0:
+		stats.lost += 1
+	else:
+		stats.kills += 1
+
+## ================================ 农民自保 ================================
+## 每 0.5 秒扫一遍：怪靠近了就放下手上的活往最近的房子跑，走远了自己回去接着干。
+## 不做全城警钟（那是 B 键的事），只让挨着怪的那几个农民自己撤——玩家不用一个个点名
+func _check_worker_safety() -> void:
+	var workers := _player_workers()
+	if workers.is_empty():
+		return
+	var has_enemy := false
+	for e in get_tree().get_nodes_in_group("enemies"):
+		if is_instance_valid(e) and not e.dead:
+			has_enemy = true
+			break
+	for w in workers:
+		if not is_instance_valid(w) or w.dead or w.is_garrisoned():
+			continue
+		if w.is_fleeing():
+			# 没怪了 / 怪走远了 / 躲够时间：回去接着干
+			if not has_enemy or w.flee_time() > Worker.FLEE_MAX_T or _nearest_enemy_dist(w.position) > Worker.FLEE_SAFE_R:
+				w.end_flee()
+		elif has_enemy and _nearest_enemy_dist(w.position) < Worker.FLEE_R:
+			w.start_flee()
+
+## 到最近一只怪的距离（场上没怪 = INF）
+func _nearest_enemy_dist(pos: Vector2) -> float:
+	var best := INF
+	for e in get_tree().get_nodes_in_group("enemies"):
+		if not is_instance_valid(e) or e.dead:
+			continue
+		best = minf(best, pos.distance_to(e.position))
+	return best
 
 ## 镜头：鼠标贴边滚屏 + 滚轮缩放（缩放以屏幕中心为锚）
 func _update_camera(delta: float) -> void:
@@ -592,8 +689,12 @@ func _end(result: String, msg: String) -> void:
 	if game_state != "play":
 		return
 	game_state = result
+	paused = false
+	Engine.time_scale = 1.0    # 结算时恢复常速，不然遮罩上的动画也跟着跑飞
 	overlay.visible = true
 	overlay_label.text = ("胜利！ " if result == "win" else "失败… ") + msg
+	if overlay_stats != null:
+		overlay_stats.text = stats_text()
 
 ## ================================ HUD 提示 ================================
 ## 所有"为什么不行"都在屏幕上说清楚，绝不静默失败
@@ -713,6 +814,14 @@ func _on_key(event: InputEventKey) -> void:
 		hud.toggle_help()
 	elif k == KEY_F2:
 		toggle_panel()
+	elif k == KEY_P:
+		toggle_pause()
+	elif k == KEY_EQUAL or k == KEY_PLUS or k == KEY_KP_ADD:
+		set_speed(speed_i + 1)          # 加速：1× → 2× → 3× → 1×
+	elif k == KEY_MINUS or k == KEY_UNDERSCORE or k == KEY_KP_SUBTRACT:
+		set_speed(speed_i - 1)          # 减速
+	elif k == KEY_R and game_state != "play":
+		restart()                        # 结算页：R 再来一局
 	elif k == KEY_DELETE:
 		_delete_selected()
 	elif k == KEY_H:
@@ -1778,6 +1887,7 @@ func on_trained(b: Building, kind: String) -> void:
 	if Tech.is_tech(kind):
 		finish_research(b, kind)
 		return
+	stats.trained += 1
 	if kind == "worker":
 		var w := Worker.new()
 		w.position = open_point(b.position + Vector2(60, 40))

@@ -17,6 +17,12 @@ func run() -> void:
 		await _alert_tests()
 		_done()
 		return
+	if "--only=new" in OS.get_cmdline_user_args():
+		await _time_tests()    # 只跑暂停/倍速、结算统计、农民自保（-- --test --only=new，迭代用）
+		await _stats_tests()
+		await _flee_tests()
+		_done()
+		return
 	_check(is_instance_valid(m.base) and m.base.kind == "base", "基地存在")
 	_check(is_instance_valid(m.hive) and m.hive.kind == "hive", "巢穴存在")
 	_check(m._player_workers().size() == 3, "开局 3 农民自动上岗")
@@ -667,12 +673,130 @@ func run() -> void:
 	await _explore_tests()
 	await _bell_tests()
 	await _alert_tests()
+	await _time_tests()
+	await _stats_tests()
+	await _flee_tests()
 
 	# 拆巢穴触发胜利
 	m.hive.take_damage(99999.0)
 	await m.get_tree().create_timer(0.5).timeout
 	_check(m.game_state == "win", "拆巢穴触发胜利")
+	_check(m.overlay_stats.text.contains("击杀"), "结算页列出本局统计")
 	_done()
+
+## ---- 时间控制：暂停 / 倍速（只动引擎缩放，测完复位，别把后面的等待拖慢）----
+func _time_tests() -> void:
+	_check(m.speed_mult() == 1.0 and Engine.time_scale == 1.0, "开局 1 倍速")
+	m.set_speed(1)
+	_check(m.speed_mult() == 2.0 and Engine.time_scale == 2.0, "加速一档 = 2 倍速（引擎 time_scale 跟着走）")
+	m.cycle_speed()
+	_check(m.speed_mult() == 3.0, "再一档 = 3 倍速")
+	m.cycle_speed()
+	_check(m.speed_i == 0 and Engine.time_scale == 1.0, "第三下转回 1 倍速（1→2→3→1）")
+	m.toggle_pause()
+	_check(m.paused and Engine.time_scale == 0.0, "P 暂停：引擎时间停住（time_scale = 0）")
+	var t0: float = m.game_time
+	# 注意：暂停时 SceneTreeTimer 也不走字，这里只能等"帧"（delta=0，帧照样在跑）
+	for _i in 10:
+		await m.get_tree().process_frame
+	_check(absf(m.game_time - t0) < 0.01, "暂停时游戏时间不再往前（%.2f）" % m.game_time)
+	m.toggle_pause()
+	_check(not m.paused and Engine.time_scale == 1.0, "再按 P 继续")
+	# 暂停中按加速：顺手解除暂停开跑
+	m.toggle_pause()
+	m.set_speed(1)
+	_check(not m.paused and Engine.time_scale == 2.0, "暂停中加速：自动解除暂停并跑起来")
+	m.set_speed(0)
+	Engine.time_scale = 1.0
+	_check(m.speed_i == 0 and not m.paused, "速度复位到 1 倍速")
+
+## ---- 结算统计：击杀 / 阵亡 / 训练 / 峰值库存 ----
+func _stats_tests() -> void:
+	var k0: int = m.stats.kills
+	var g := Goo.new()
+	g.position = Vector2(300, 300)
+	m.add_child(g)
+	await m.get_tree().create_timer(0.1).timeout
+	g.take_damage(99999.0)
+	await m.get_tree().create_timer(0.2).timeout
+	_check(int(m.stats.kills) == k0 + 1, "打死一只怪，击杀 +1")
+
+	var l0: int = m.stats.lost
+	var w := Worker.new()
+	w.position = Vector2(300, 340)
+	m.add_child(w)
+	await m.get_tree().create_timer(0.1).timeout
+	w.take_damage(99999.0)
+	await m.get_tree().create_timer(0.2).timeout
+	_check(int(m.stats.lost) == l0 + 1, "自家单位阵亡，阵亡 +1")
+
+	var tr0: int = m.stats.trained
+	m._point_select(m.base.position)
+	m._on_worker_pressed()
+	await m.get_tree().create_timer(0.4).timeout
+	_check(int(m.stats.trained) == tr0 + 1, "训练出单位，训练 +1")
+
+	m.economy.ore = 777.0
+	await m.get_tree().create_timer(0.7).timeout    # 等一次 0.5 秒采样
+	_check(float(m.stats.peak_ore) >= 777.0, "峰值库存记下这一局的最高矿石（%.0f）" % float(m.stats.peak_ore))
+	var txt: String = m.stats_text()
+	_check(txt.contains("用时") and txt.contains("击杀") and txt.contains("峰值库存"), "结算文字有用时 / 击杀 / 峰值")
+
+## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
+func _flee_tests() -> void:
+	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定
+	for e in m.get_tree().get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	await m.get_tree().create_timer(0.3).timeout
+	m._check_worker_safety()
+
+	var w := Worker.new()
+	w.position = m.base.position + Vector2(240, 30)
+	m.add_child(w)
+	await m.get_tree().create_timer(0.2).timeout
+	var ore: ResNode = w._nearest_node("ore")
+	_check(ore != null, "自保测试：找到一处矿")
+	w.command_gather(ore)
+	_check(not w.is_fleeing(), "没怪的时候不跑")
+
+	var g := Goo.new()
+	g.position = w.position + Vector2(45, 0)
+	m.add_child(g)
+	await m.get_tree().create_timer(0.2).timeout
+	m._check_worker_safety()
+	_check(w.is_fleeing(), "怪贴到 45px：农民放下活开跑")
+	# 目标是"最近的己方房子墙边"（这张图上测试中途盖过仓库/箭塔，不一定就是基地）
+	var near_b: Building = null
+	var nd := INF
+	for b in m.get_tree().get_nodes_in_group("buildings"):
+		if is_instance_valid(b) and b.team == 0 and b.kind in ["base", "warehouse", "outpost", "tower"]:
+			var d: float = w.position.distance_to(b.position)
+			if d < nd:
+				nd = d
+				near_b = b
+	_check(near_b != null and w.flee_to.distance_to(near_b.position) <= near_b.size * 0.5 + 40.0,
+		"逃跑目标是最近的己方房子墙边（%s，%.0fpx）" % [near_b.kind if near_b else "无", nd])
+
+	# 拉远 200px 再量"能不能跑到"：上面那栋仓库就在脚边，贴着量不出速度
+	var tgt: Vector2 = w.flee_to
+	var back: Vector2 = (tgt - w.position)
+	back = back.normalized() if back.length() > 0.001 else Vector2(1, 0)
+	w.position = tgt + back * 200.0
+	w._path = PackedVector2Array()
+	w._path_idx = 0
+	g.position = w.position + back * 60.0    # 怪跟着挪过去：不然拉开 200px 后自动判定"已脱险"就收工了
+	var d0 := w.position.distance_to(tgt)
+	await m.get_tree().create_timer(1.2).timeout
+	var d1 := w.position.distance_to(tgt)
+	_check(w.is_fleeing() and d1 < d0 - 60.0, "往避难所跑（离目标 %.0f → %.0f）" % [d0, d1])
+
+	g.queue_free()
+	await m.get_tree().create_timer(0.3).timeout
+	m._check_worker_safety()
+	_check(not w.is_fleeing(), "怪没了：自己收工往回走")
+	_check(is_instance_valid(w.node_target) and w.state != Worker.State.IDLE, "回去接着干原来的活（采矿）")
+	w.queue_free()
 
 func _done() -> void:
 	if m._fail == 0:

@@ -45,6 +45,8 @@ var _wave_bar: ProgressBar
 var _wave_box: HBoxContainer
 var _call_btn: Button    # 提前叫波（N）
 var _bell_btn: Button    # 警钟 / 解除警报（B）
+var _speed_btn: Button   # 游戏速度（+ / -，点一下加一档；暂停时显示 ⏸）
+var _pause_tag: Label    # 暂停时屏幕上方那行提示
 var _help: PanelContainer
 var _top: PanelContainer
 var _bottom: PanelContainer
@@ -235,11 +237,24 @@ func _build_top_bar() -> void:
 	hb.add_child(_clock_val)
 	var bp := _small_btn(hb, "产能", "产能面板（C 键）")
 	bp.pressed.connect(func(): main.toggle_panel())
+	_speed_btn = _small_btn(hb, "1×", "游戏速度：点一下加一档（+ 加速 / - 减速 / P 暂停）")
+	_speed_btn.custom_minimum_size.x = 46
+	_speed_btn.pressed.connect(func(): main.cycle_speed())
 	var bh := _small_btn(hb, "?", "操作说明（F1）")
 	bh.pressed.connect(toggle_help)
 	main.res_label = Label.new()     # 兼容：完整资源文字仍写在这里（不显示）
 	main.res_label.visible = false
 	root.add_child(main.res_label)
+	# 暂停提示：屏幕上方一行大字（默认隐藏）
+	_pause_tag = Label.new()
+	_pause_tag.text = "已暂停　·　按 P 继续"
+	_pause_tag.add_theme_font_size_override("font_size", 26)
+	_pause_tag.add_theme_color_override("font_color", Color(1.0, 0.93, 0.6))
+	_pause_tag.add_theme_constant_override("outline_size", 9)
+	_pause_tag.add_theme_color_override("font_outline_color", Color(0.18, 0.1, 0.04))
+	_pause_tag.visible = false
+	_pause_tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(_pause_tag)
 
 func _badge(parent: Control, key: String, tip: String, with_sub := false) -> Control:
 	var hb := HBoxContainer.new()
@@ -567,6 +582,8 @@ Ctrl+数字：编队 · 数字：选队（连按两下跳过去）· Shift+数�
 B / 顶栏"警钟"：农民全躲进最近有空位的基地 / 仓库 / 前哨 / 箭塔，躲进会射箭的房子每人每轮多射一箭；再按一次解除，各回各的活
 基地 / 前哨 / 农民挨打：小地图那儿闪红圈 + 号角（M 静音）
 敌人：Goo 啃路边房子 · 窜窜跑得快、直冲基地 · 岩壳又厚又带甲、专拆箭塔（派剑士顶）
+农民自保：怪凑到跟前，挨着的那几个自己放下活跑到最近的基地/仓库/前哨/箭塔墙边（头顶红"!"），怪走远了自己回去接着干
+P：暂停（暂停时照样能看地图、改指令）· + / - 或顶栏"1×"：1×/2×/3× 快进 · 结算页 R：再来一局
 C：产能面板 · F1：本说明"""
 	_help.add_child(l)
 
@@ -609,8 +626,17 @@ func _build_overlay() -> void:
 	l.custom_minimum_size.x = 460
 	vb.add_child(l)
 	main.overlay_label = l
+	# 结算统计：用时 / 击杀 / 阵亡 / 训练 / 峰值库存 / 科技 / 遗物
+	var st := Label.new()
+	st.add_theme_font_size_override("font_size", 18)
+	st.add_theme_color_override("font_color", Color(0.36, 0.26, 0.16))
+	st.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	st.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	st.custom_minimum_size.x = 460
+	vb.add_child(st)
+	main.overlay_stats = st
 	var restart := Button.new()
-	restart.text = "再来一局"
+	restart.text = "再来一局（R）"
 	restart.add_theme_font_size_override("font_size", 22)
 	restart.custom_minimum_size = Vector2(190, 54)
 	restart.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -657,6 +683,19 @@ func refresh() -> void:
 		_hero_val.remove_theme_color_override("font_color")
 	var secs := int(main.game_time)
 	_clock_val.text = "%02d:%02d" % [secs / 60, secs % 60]
+	# 时间控制：暂停时按钮变 ⏸，2× / 3× 时变黄提醒"现在是快进的"
+	if main.paused:
+		_speed_btn.text = "暂停"
+		_speed_btn.add_theme_color_override("font_color", RED_TEXT)
+	elif int(main.speed_i) > 0:
+		_speed_btn.text = "%d×" % int(main.SPEEDS[main.speed_i])
+		_speed_btn.add_theme_color_override("font_color", Color(1.0, 0.86, 0.35))
+	else:
+		_speed_btn.text = "1×"
+		_speed_btn.remove_theme_color_override("font_color")
+	_pause_tag.visible = main.paused
+	if main.paused:
+		_fit(_pause_tag, Vector2((VW - _pause_tag.size.x) * 0.5, TOP_H + 22.0))
 	# 波次条：离下一波越近越满
 	var wm: WaveManager = main._wave_mgr
 	_wave_box.visible = main.game_state == "play"

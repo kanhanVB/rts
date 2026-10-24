@@ -302,6 +302,7 @@ func take_damage(amount: float, from: Node2D = null) -> void:
 	if hp <= 0.0:
 		dead = true
 		_death_fx()
+		_report_death()
 		died.emit(self)
 		queue_free()
 
@@ -312,8 +313,16 @@ func kill() -> void:
 	dead = true
 	hp = 0.0
 	_death_fx()
+	_report_death()
 	died.emit(self)
 	queue_free()
+
+## 统计上报：一局打下来杀了多少、死了多少（main.stats / 结算页用）。
+## 放在基类里，剑士弓手农民工程师、怪全走这一处，不用到处挂信号
+func _report_death() -> void:
+	var g := get_tree().get_first_node_in_group("game")
+	if g != null and g.has_method("note_death"):
+		g.note_death(self)
 
 ## 攻击时画一条亮线，纯反馈
 func attack_fx_to(pos: Vector2) -> void:

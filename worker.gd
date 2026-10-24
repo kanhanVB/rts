@@ -4,6 +4,7 @@ class_name Worker
 ## 也能进熔炉/木工台当工人：守线读条、把成品扛回仓库、顺路从仓库扛原料（State.OPERATE）。
 ## 还能去野地捡宝箱 / 遗物（State.FETCH）：走过去弯腰扛起来，扛回基地 / 仓库 / 前哨才算到手；半路被打死就掉在原地。
 ## 警钟（State.SHELTER）：放下手上的活，跑进最近有空位的基地 / 仓库 / 前哨 / 箭塔躲着；解除后接着干原来的活。
+## 自保（flee_to）：被怪近身（或被咬了一口）自动跑到最近的房子墙边，怪走远了自己回去接着干——不用玩家点名。
 
 enum State { IDLE, TO_NODE, GATHERING, TO_BASE, OPERATE, FETCH, SHELTER }
 
@@ -35,6 +36,76 @@ var _op_stuck_at := Vector2.INF
 var _op_back := false    # 守线时被挤开、正在走回工位
 ## 捡宝：去哪件、手上扛着哪件（{kind, loot, relic}；空 = 没扛）
 const PICK_TIME := 0.8   # 弯腰扛起来要多久
+
+## ---------- 自保：怪靠近就撤，危险过去再回来 ----------
+## 跟警钟（B）分工：警钟是玩家下令、全城进屋（绝对安全，但自己不干活）；
+## 这里是被动反射——只有身边那几只自己跑，跑到最近的房子墙边贴着，不动其他人的活儿
+const FLEE_R := 95.0          # 这个圈里有怪 = 放下活开跑
+const FLEE_SAFE_R := 260.0    # 怪退出这个圈 = 安全，回去接着干
+const FLEE_MAX_T := 9.0       # 最多躲这么久（怪卡在房子后面看不见时也能自己回去）
+const FLEE_SPEED := 1.35      # 逃跑时腿快 35%
+
+var flee_to := Vector2.INF    # INF = 没在逃
+var _flee_t := 0.0
+
+func is_fleeing() -> bool:
+	return flee_to != Vector2.INF
+
+func flee_time() -> float:
+	return _flee_t
+
+## 起跑：跑到最近的基地/仓库/前哨/箭塔墙边（不进屋——进屋是警钟的事）
+func start_flee() -> void:
+	if dead or is_garrisoned() or state == State.SHELTER or flee_to != Vector2.INF:
+		return
+	var b := _nearest_safe()
+	if b == null:
+		return    # 附近一座自己的房子都没有：只能听天由命
+	_remember_job()
+	_leave_work()    # 加工线的工位先让出来，别占着炉子不干活
+	waypoints.clear()
+	fetch_target = null
+	_pick_t = 0.0
+	var away := (position - b.position)
+	away = away.normalized() if away.length() > 0.001 else Vector2(0, 1)
+	flee_to = b.position + away * (b.size * 0.5 + 30.0)
+	_flee_t = 0.0
+	move_target = flee_to
+	_path = _find_path(flee_to)
+	_path_idx = 0
+
+func _step_flee(delta: float) -> void:
+	_flee_t += delta
+	if state == State.SHELTER:
+		flee_to = Vector2.INF    # 玩家敲了警钟：交给屋里那套
+		return
+	_move_toward(flee_to, delta * FLEE_SPEED)
+
+## 危险过去了：回去接着干原来的活（采原来那处 / 回加工线 / 先把手上的货交了）
+func end_flee() -> void:
+	if flee_to == Vector2.INF:
+		return
+	flee_to = Vector2.INF
+	_flee_t = 0.0
+	_path = PackedVector2Array()
+	_path_idx = 0
+	move_target = position
+	_resume_work()
+
+func _nearest_safe() -> Building:
+	var best: Building = null
+	var best_d := INF
+	for b in _group("buildings"):
+		if not is_instance_valid(b) or b.team != 0:
+			continue
+		if b.kind not in ["base", "warehouse", "outpost", "tower"]:
+			continue
+		var d := position.distance_to(b.position)
+		if d < best_d:
+			best_d = d
+			best = b
+	return best
+
 var fetch_target: Treasure = null
 var treasure := {}
 var _pick_t := 0.0
@@ -56,6 +127,10 @@ func _ready() -> void:
 	display_name = "农民"
 
 func _step(delta: float) -> void:
+	# 正在躲怪：这一帧只管跑，别的状态机都停摆（跑到了就贴着房子等）
+	if flee_to != Vector2.INF:
+		_step_flee(delta)
+		return
 	match state:
 		State.TO_NODE:
 			if node_target == null or not is_instance_valid(node_target):
@@ -408,22 +483,28 @@ func seek_shelter() -> void:
 	if dead or is_garrisoned():
 		return
 	if state != State.SHELTER:
-		# 记下在干什么：解除警报后接着干（闲着的记着原来要走去哪）
-		match state:
-			State.TO_NODE, State.GATHERING, State.TO_BASE:
-				_resume = {"node": node_target, "kind": _want_kind if _want_kind != "" else carry_kind}
-			State.OPERATE:
-				_resume = {"work_at": work_at}
-			State.FETCH:
-				_resume = {"fetch": fetch_target}
-			_:
-				_resume = {"move": move_target} if position.distance_to(move_target) > 20.0 else {}
+		_remember_job()
 		_leave_work()    # 加工线的工位先让出来（回来再上岗）
 		waypoints.clear()
 		fetch_target = null
 		_pick_t = 0.0
 		state = State.SHELTER
+		flee_to = Vector2.INF    # 进屋了就不用再跑
 	_pick_shelter()
+
+## 记下手上在干什么：警钟躲藏 / 遇敌逃跑都用它，危险过去照原样接着干
+func _remember_job() -> void:
+	if not _resume.is_empty():
+		return    # 已经记过一次（逃跑途中又敲警钟），别把"逃跑"记成原来的活
+	match state:
+		State.TO_NODE, State.GATHERING, State.TO_BASE:
+			_resume = {"node": node_target, "kind": _want_kind if _want_kind != "" else carry_kind}
+		State.OPERATE:
+			_resume = {"work_at": work_at}
+		State.FETCH:
+			_resume = {"fetch": fetch_target}
+		_:
+			_resume = {"move": move_target} if position.distance_to(move_target) > 20.0 else {}
 
 ## 警钟响着时右键基地 / 仓库 / 前哨 / 箭塔：指定躲进这座（满了返回 false，照旧自己找）
 func shelter_into(b: Building) -> bool:
@@ -605,9 +686,11 @@ func _drop_shelter() -> void:
 	if state == State.SHELTER:
 		state = State.IDLE
 		move_target = position
+	flee_to = Vector2.INF    # 逃跑也一起收：玩家点名就是最高优先级
+	_flee_t = 0.0
 	_resume = {}
 
-## 被怪打：报警（小地图闪 + 号角，main 节流）；躲在屋里的打不着
+## 被怪打：报警（小地图闪 + 号角，main 节流）+ 立刻自己撤（不等下一轮扫描）；躲在屋里的打不着
 func take_damage(amount: float, from: Node2D = null) -> void:
 	if is_garrisoned():
 		return
@@ -615,6 +698,7 @@ func take_damage(amount: float, from: Node2D = null) -> void:
 		var game := get_tree().get_first_node_in_group("game")
 		if game != null and game.has_method("alert_attack"):
 			game.alert_attack(position, "worker")
+		start_flee()
 	super(amount, from)
 
 ## ---------- 指令 ----------
@@ -869,8 +953,9 @@ func _face_x() -> float:
 	return NAN
 
 func _art_extra(feet: Vector2, h: float) -> void:
-	if state == State.SHELTER:
-		Art.text(self, feet - Vector2(0, h + 7.0) + _head_off, "!", 15, Color(1.0, 0.42, 0.3))    # 警钟响着、还在外面跑
+	if state == State.SHELTER or is_fleeing():
+		# 警钟响着还在外面跑 / 被怪盯上正在撤：头顶一个红"!"
+		Art.text(self, feet - Vector2(0, h + 7.0) + _head_off, "!", 15, Color(1.0, 0.42, 0.3))
 	if is_instance_valid(deliver_to):
 		# 脚下亮蓝点 = 玩家手动指派过交货点
 		Art.ellipse(self, feet + Vector2(0, 1), 4.0, Color(0.2, 0.15, 0.1))
