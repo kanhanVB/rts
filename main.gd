@@ -94,6 +94,7 @@ var alarm_on := false
 var sfx: Sfx
 var alerts: Array = []             # [{pos, what, t0, last}]：哪儿挨打、什么挨打、第一下 / 最近一下的时间
 var _alert_sfx_t := -999.0
+var _hive_told := false            # 巢穴吐守军的说明只说一次（别每座巢穴都念一遍）
 var _rally_i := 0            # 新兵在兵营前排队的序号     # 右键落点圈：[{pos, t0, attack}]
 
 func _ready() -> void:
@@ -692,7 +693,8 @@ func _check_end() -> void:
 	if not is_instance_valid(base):
 		_end("lose", "基地被拆了")
 	elif not hives.any(func(h): return is_instance_valid(h)):
-		_end("win", "巢穴被拆了！" if hives.size() <= 1 else "所有巢穴都被拆了！")
+		# 吐出来的守军不算数：巢穴一倒就赢，不用回头清场（说明放在消息里，别让玩家以为漏了什么）
+		_end("win", "巢穴被拆了！剩下的守军不用管了" if hives.size() <= 1 else "所有巢穴都被拆了！剩下的守军不用管了")
 
 func _end(result: String, msg: String) -> void:
 	if game_state != "play":
@@ -1640,6 +1642,38 @@ func active_alerts() -> Array:
 func alert_text(what: String) -> String:
 	return {"base": "基地遭到攻击！", "outpost": "前哨遭到攻击！"}.get(what, "农民遭到攻击！")
 
+## ---------- 巢穴被捅了会吐守军（触发在 building.gd 的 _spit_check）----------
+## 吐出来的怪设成"守军"：守着巢穴不走土路，玩家的人靠近才一窝扑上来；
+## wave_enemies() 不算守军，所以拆掉巢穴照样直接赢，不用回头清场。
+## 血量跟着波次加成（和 wave_mgr._spawn 一个口径）：后期的巢穴掏出来的也更厚
+func hive_spit(h: Building, kinds: Array, toward: Node2D = null) -> int:
+	if game_state != "play":
+		return 0
+	if h == null or not is_instance_valid(h) or h.is_queued_for_deletion():
+		return 0
+	var made: Array = []
+	for t in kinds:
+		var goo := Goo.make(t)
+		var ang := randf() * TAU
+		var at: Vector2 = open_point(h.position + Vector2(cos(ang), sin(ang)) * (h.size * 0.62 + 16.0))
+		goo.position = at
+		goo.guard(h.position, at)    # 认这座巢穴当窝：只在这片守
+		add_child(goo)
+		if _wave_mgr.wave > 1:
+			goo.max_hp *= 1.0 + 0.06 * float(_wave_mgr.wave - 1)
+			goo.hp = goo.max_hp
+		Fx.spawn(self, "dust", at + Vector2(0, 6), {"size": 34.0, "life": 0.55})
+		made.append(goo)
+	# 谁捅的窝就扑谁
+	if toward != null and is_instance_valid(toward):
+		for e in made:
+			if is_instance_valid(e):
+				e.alert(toward)
+	if not _hive_told:
+		_hive_told = true
+		_hud_msg("巢穴被捅了！它开始往外吐守军——先打退这一窝，再接着拆")
+	return made.size()
+
 ## M：音效开关
 func toggle_mute() -> void:
 	Sfx.muted = not Sfx.muted
@@ -2225,7 +2259,7 @@ func _selected_info_text() -> String:
 					"（%s）" % " ".join(parts) if not parts.is_empty() else "",
 					" · %d 秒后补 1 只" % ceili(rl) if rl >= 0.0 else "", economy.cost_text(c.loot())]
 			elif t.kind == "hive":
-				txt += "\n敌人老窝：每波怪从这里出来，拆掉所有巢穴就赢"
+				txt += "\n敌人老窝：每波怪从这里出来，拆掉所有巢穴就赢\n挨打会往外吐守军（最多 %d 只）——带够兵再来，别拿一两个兵磨" % Building.SPIT_MAX
 			if t.is_processor():
 				var r: Dictionary = t.recipe()
 				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %s 秒%s\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,

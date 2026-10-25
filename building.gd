@@ -102,11 +102,66 @@ func take_damage(amount: float, from: Node2D = null) -> void:
 	hp -= amount
 	_hurt_until = Time.get_ticks_msec() + 160
 	queue_redraw()
+	# 巢穴：一挨打就往外吐守军（拆巢穴不能白给）。被拆死的那一下不吐
+	if kind == "hive" and team == 1 and hp > 0.0:
+		_spit_check(from)
 	if hp <= 0.0:
 		if not is_queued_for_deletion():
 			Fx.spawn(get_parent(), "dust", position + Vector2(0, size * 0.2), {"size": size * 1.6, "life": 0.8})
 		queue_free()
 		release_garrison()    # 房子塌了：躲着的人跑出来（警钟还响着就去别处躲）
+
+## ---------- 巢穴：被捅了会吐守军 ----------
+## 以前拆巢穴基本是白给：一队兵围上去砍 900 血，中间零阻力，"太容易拆了"。
+## 现在巢穴一挨打就开始往外吐怪，三段节奏：
+##   1) 第一下挨打：一口气吐一窝（捅马蜂窝的那声"嗡"）——哪怕玩家一波秒拆也得先打这窝
+##   2) 之后每 SPIT_CD 秒吐一只，血越少吐的品种越狠（快被拆时掏岩壳护窝）
+##   3) 血跌破 SPIT_RAGE_HP：再一口气吐一窝（垂死反扑）
+## 总量有上限：防止玩家拿一个兵慢慢磨血、把守军刷成一片海。
+## 吐出来的怪设成"守军"（见 main.hive_spit）：守着巢穴不走土路，而胜利判定不算守军——
+## 所以把巢穴拆掉的那一刻照样直接赢，不用回头清场。
+const SPIT_CD := 3.2            # 挨打期间最快隔这么久吐一只
+const SPIT_MAX := 9             # 一座巢穴最多吐这么多只
+const SPIT_RAGE_HP := 0.35      # 血跌破这个比例：垂死反扑，再吐一窝
+var _spit_hurt := false         # 已经挨过打（第一窝出过没有）
+var _spit_rage := false         # 已经跌破过红线（反扑出过没有）
+var _spit_n := 0                # 这一座已经吐了几只
+var _spit_cd := 0.0             # 下一只还要等多久
+
+func _spit_check(from: Node2D) -> void:
+	if _spit_n >= SPIT_MAX:
+		return
+	var batch: Array = []
+	if not _spit_hurt:
+		_spit_hurt = true
+		_spit_cd = SPIT_CD
+		batch = ["goo", "goo", "runner"]
+	elif not _spit_rage and hp < max_hp * SPIT_RAGE_HP:
+		_spit_rage = true
+		batch = ["goo", "runner", "brute"]
+	elif _spit_cd <= 0.0:
+		_spit_cd = SPIT_CD
+		batch = [_spit_pick()]
+	if batch.is_empty():
+		return
+	while _spit_n + batch.size() > SPIT_MAX:
+		batch.pop_back()    # 快到上限了：这一窝按剩下名额砍短
+	if batch.is_empty():
+		return
+	_spit_n += batch.size()
+	if _game_ref == null or not is_instance_valid(_game_ref):
+		_game_ref = get_tree().get_first_node_in_group("game")
+	if _game_ref != null and _game_ref.has_method("hive_spit"):
+		_game_ref.hive_spit(self, batch, from)
+
+## 吐什么：血越少越狠
+func _spit_pick() -> String:
+	var frac := hp / max_hp
+	if frac <= 0.3:
+		return "brute" if _spit_n % 4 == 3 else ("runner" if _spit_n % 2 == 1 else "goo")
+	if frac <= 0.6:
+		return "runner" if _spit_n % 2 == 1 else "goo"
+	return "goo"
 
 ## 城堡自带箭塔（王国保卫战式）：开局没兵也能顶住零星几只 Goo，但挡不住大波
 const TOWER_RANGE := 170.0
@@ -371,6 +426,9 @@ func _produce(delta: float) -> void:
 ## 挨打抖动 / 选中圈要持续刷新（便宜：只在需要时重画）
 var _was_selected := false
 func _process(delta: float) -> void:
+	# 巢穴吐守军：两只之间要隔一会儿（吐的节奏靠这个倒计时）
+	if _spit_cd > 0.0:
+		_spit_cd = maxf(0.0, _spit_cd - delta)
 	if has_tower():
 		_tower(delta)
 	if kind == "tower":

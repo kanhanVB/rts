@@ -1323,6 +1323,50 @@ func _light_rts_tests() -> void:
 	eb.queue_free()
 	await tree.create_timer(0.2).timeout
 
+	# ---- 巢穴挨打会吐守军（拆巢穴不能白给）----
+	# 以前拆巢穴零阻力：一队兵围上去砍 900 血就赢了
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	await tree.create_timer(0.25).timeout
+	var hvx: Building = null
+	for h in m.hives:
+		if is_instance_valid(h):
+			hvx = h
+			break
+	_check(hvx != null, "场上还有巢穴可以试")
+	if hvx != null:
+		# 全量跑时前面的测试可能已经捅过这座巢穴（_spit_hurt / _spit_rage 已经翻过去了），
+		# 那样第一下只会按"每 3.2 秒一只"吐 1 只。这里先把它复位成没挨过打的状态
+		hvx._spit_hurt = false
+		hvx._spit_rage = false
+		hvx._spit_n = 0
+		hvx._spit_cd = 0.0
+		var nh0 := tree.get_nodes_in_group("enemies").size()
+		hvx.hp = hvx.max_hp
+		hvx.take_damage(10.0, null)    # 捅一下
+		await tree.create_timer(0.25).timeout
+		var nh1 := tree.get_nodes_in_group("enemies").size()
+		_check(nh1 >= nh0 + 3, "巢穴挨打会吐一窝守军（%d → %d）" % [nh0, nh1])
+		var spit0: Array = tree.get_nodes_in_group("enemies").filter(
+			func(e): return is_instance_valid(e) and e is Goo and e.is_guard())
+		_check(spit0.size() >= 3, "吐出来的是守军（守着巢穴不走土路，%d 只）" % spit0.size())
+		var wv0: Array = m._wave_mgr.wave_enemies()
+		_check(spit0.all(func(e): return not wv0.has(e)), "守军不算波次怪（拆完巢穴照样直接赢，不用清场）")
+		# 上限：磨血也刷不出无尽守军
+		hvx._spit_n = Building.SPIT_MAX
+		hvx.hp = hvx.max_hp
+		hvx._spit_cd = 0.0
+		var nh2 := tree.get_nodes_in_group("enemies").size()
+		hvx.take_damage(5.0, null)
+		await tree.create_timer(0.25).timeout
+		_check(tree.get_nodes_in_group("enemies").size() == nh2,
+			"吐满 %d 只就不再吐（磨血刷不出无尽守军）" % Building.SPIT_MAX)
+		for e in tree.get_nodes_in_group("enemies"):
+			if is_instance_valid(e):
+				e.queue_free()
+		await tree.create_timer(0.25).timeout
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
 	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；
