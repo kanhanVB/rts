@@ -1220,6 +1220,23 @@ func _light_rts_tests() -> void:
 	st.queue_free()
 	await tree.create_timer(0.3).timeout
 
+	# ---- 结算页的按键不能被吞掉 ----
+	# _unhandled_input 以前一进结算页就 return，而 R（再来一局）/ F1（帮助）
+	# 写在下面的 _on_key 里，等于永远收不到——按钮上写着"再来一局（R）"，
+	# 按下去毫无反应。这里临时把状态改成 win 验一下，验完立刻还原。
+	# （只验 F1：R 会 reload_current_scene，一按整套测试就从头再跑一遍）
+	var gs: String = m.game_state
+	m.game_state = "win"
+	var hv0: bool = m.hud.help_visible()
+	var fk := InputEventKey.new()
+	fk.keycode = KEY_F1
+	fk.pressed = true
+	m._unhandled_input(fk)
+	_check(m.hud.help_visible() != hv0, "结算页按键没被吞掉（F1 还能开帮助）")
+	if m.hud.help_visible() != hv0:
+		m.hud.toggle_help()    # 收回来，别影响后面
+	m.game_state = gs
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
 	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；
@@ -1478,9 +1495,12 @@ func _fuzz_probe() -> void:
 	var tree := m.get_tree()
 	var rng := RandomNumberGenerator.new()
 	var seed_n := 20261025
+	var span := 100.0
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--seed="):
 			seed_n = int(a.substr(7))
+		elif a.begins_with("--fuzz-time="):
+			span = float(a.substr(12))    # 跑多久（秒）：长跑探针用，默认 100
 	rng.seed = seed_n
 	print("[FUZZ] 种子 %d" % seed_n)
 	# 基地要是被打掉了，后面所有"以基地为参照"的检查都会踩空（预先是探针自己崩，
@@ -1496,7 +1516,7 @@ func _fuzz_probe() -> void:
 	var spin_said := {}
 	# 注意：暂停是 Engine.time_scale = 0，普通 create_timer 会永远不触发，
 	# 探针自己把自己挂住（第 4 个参数 = 忽略时间缩放）
-	while t < 100.0:
+	while t < span:
 		await tree.create_timer(0.12, true, false, true).timeout
 		# 每帧都可能被上一轮操作弄成结算态（基地被拆 / 巢穴拆光）：拉回对局继续按。
 		# 顺手补一次 _update_power()：它在真实游戏里是 _process 的 play 块每 0.5 秒跑一次，
@@ -1657,7 +1677,7 @@ func _fuzz_probe() -> void:
 	var end_bad := _fuzz_violations()
 	for v in end_bad:
 		_check(false, "结束时状态不变量破了：" + v)
-	_check(end_bad.is_empty(), "乱按 100 秒之后状态没串（%d 项）" % end_bad.size())
+	_check(end_bad.is_empty(), "乱按 %d 秒之后状态没串（%d 项）" % [int(span), end_bad.size()])
 	print("[FUZZ] 场上 农民%d 兵%d 怪%d 建筑%d" % [
 		tree.get_nodes_in_group("player_units").size(),
 		tree.get_nodes_in_group("enemies").size(),
@@ -3471,6 +3491,15 @@ func _alert_tests() -> void:
 	var tree := m.get_tree()
 	var bm: BuildManager = m._build_mgr
 	var bp: Vector2 = m.base.position
+	# 先把场上剩下的怪和兵清掉：这一段全是"刚好一条报警"的精确断言，
+	# 前面测试留下的怪随便啃谁一口就会多出一条（size == 1 直接挂）
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	for s in tree.get_nodes_in_group("player_units"):
+		if is_instance_valid(s) and s is Soldier:
+			s.queue_free()
+	await tree.create_timer(0.2).timeout
 	m.alerts.clear()
 	m._alert_sfx_t = -999.0
 	var n0: int = int(m.sfx.played.get("alert", 0))
@@ -3521,10 +3550,23 @@ func _alert_tests() -> void:
 	wf.queue_free()
 	g.queue_free()
 	m.base.hp = hp0
-	# 真打：野地里落单的农民被 Goo 咬
+	# 真打：野地里落单的农民被 Goo 咬。
+	# 这里要验的是"挨咬会不会报警"，不是"农民会不会跑"，所以得先把两个干扰拿掉：
+	#   ① 前面几段测试留下的兵：它们会把这只要咬人的 Goo 勾走（怪一挨打就把目标换成打它的人），
+	#      怪半路改去追兵，农民就一直等不到那一口
+	#   ② 农民自己的自保反射：怪进 95px 它就掉头跑，农民 115px/s 比 Goo 的 62 快一倍，
+	#      6 秒都追不上——于是这条断言时好时坏（单独跑 --only=bell 是过的，跑全量就挂）
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	for s in tree.get_nodes_in_group("player_units"):
+		if is_instance_valid(s) and s is Soldier:
+			s.queue_free()
+	await tree.create_timer(0.2).timeout
 	m.alerts.clear()
 	var lone := _far_spot(250.0)
 	var wl := _new_worker(lone)
+	wl.process_mode = Node.PROCESS_MODE_DISABLED    # 定住：要的是这一口，不是逃跑
 	var gb := Goo.make("goo")
 	gb.position = m.open_point(lone + Vector2(40, 0))
 	m.add_child(gb)

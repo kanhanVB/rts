@@ -748,6 +748,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		_clamp_camera()
 		return
 	if game_state != "play":
+		# 结算页：只有「R 再来一局」和「F1 帮助」还该管用。
+		# 以前这两条写在下面 _on_key 里，而这里一进结算页就 return，
+		# 于是按钮上写着"再来一局（R）"、键按下去毫无反应（R 那条分支成了死代码）
+		if event is InputEventKey and event.pressed and not event.echo:
+			if event.keycode == KEY_R:
+				restart()
+			elif event.keycode == KEY_F1:
+				hud.toggle_help()
 		return
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
@@ -822,8 +830,6 @@ func _on_key(event: InputEventKey) -> void:
 		hud.toggle_help()
 	elif k == KEY_P:
 		toggle_pause()
-	elif k == KEY_R and game_state != "play":
-		restart()                        # 结算页：R 再来一局
 	elif k == KEY_N:
 		call_wave_early()
 	elif k == KEY_B:
