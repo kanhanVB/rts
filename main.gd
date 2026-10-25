@@ -1384,6 +1384,12 @@ func _issue_command(pos: Vector2) -> void:
 	if target == null:
 		pos = open_point(pos)    # 点进树林里 = 走到林子边上
 	var depot := _friendly_depot_at(pos)     # 选农民右键己方收货建筑 = 指派交货点
+	# 选中工程师右键一座受损的己方建筑 = 点名去修。
+	# 修理本来是全自动的（闲着就去修最近那座），这条只是让玩家能指定修哪座
+	var fixable: Building = _friendly_building_at(click)
+	if fixable != null and (fixable.hp >= fixable.max_hp - 0.5 or fixable.is_queued_for_deletion()):
+		fixable = null
+	var n_fix := 0
 	# 右键加工厂：正在采对口原料的 = 改送料（送货工）；其余的（闲着/采别的/别处的工人）= 进厂干活
 	var proc: Building = depot if depot != null and depot.is_processor() else null
 	var n_op := 0
@@ -1419,6 +1425,8 @@ func _issue_command(pos: Vector2) -> void:
 		elif depot != null and u is Worker:
 			u.set_deliver_to(depot)
 			n_feed += 1
+		elif u is Engineer and fixable != null and u.command_fix(fixable):
+			n_fix += 1
 		elif target is ResNode:
 			# 士兵/工程师点资源点 = 走过去，不是攻击指令
 			u.command_move(_spread_pos(move_idx, pos))
@@ -1448,21 +1456,26 @@ func _issue_command(pos: Vector2) -> void:
 		return
 	if target is ResNode and target.rich and target.guarded() and not _selected_workers().is_empty():
 		_hud_msg("这片富矿还有 Goo 据点的守军看着：农民过去会挨咬，先带兵清掉")
-	# 指派必须看得见反馈：说清楚这批货进去以后变成什么
+	# 指派必须看得见反馈：说清楚这批货进去以后变成什么。
+	# 几件事可能同时发生（框选农民+工程师右键点一座受损的仓库 = 改送货点 + 工程师去修），
+	# 拼成一条说完，别后一句把前一句顶掉
+	var notes: Array = []
 	if proc != null:
-		var parts: Array = []
 		if n_op > 0:
-			parts.append("%d 个农民进%s干活（工人 %d/%d）" % [n_op, proc.display_name, proc.op_count(), Building.OP_MAX])
+			notes.append("%d 个农民进%s干活（工人 %d/%d）" % [n_op, proc.display_name, proc.op_count(), Building.OP_MAX])
 		if n_full > 0:
-			parts.append("%s人满了（%d/%d），%d 个没排上" % [proc.display_name, Building.OP_MAX, Building.OP_MAX, n_full])
+			notes.append("%s人满了（%d/%d），%d 个没排上" % [proc.display_name, Building.OP_MAX, Building.OP_MAX, n_full])
 		if n_feed > 0:
-			parts.append("%d 个农民改送%s到%s料场" % [n_feed, Economy.KIND_NAME[proc.recipe().in], proc.display_name])
-		if not parts.is_empty():
-			_hud_msg("；".join(parts))
+			notes.append("%d 个农民改送%s到%s料场" % [n_feed, Economy.KIND_NAME[proc.recipe().in], proc.display_name])
 	elif depot != null:
 		var nw := _selected_workers().size()
 		if nw > 0:
-			_hud_msg("%d 个农民改送%s：%s" % [nw, depot.display_name, _depot_result(depot)])
+			notes.append("%d 个农民改送%s：%s" % [nw, depot.display_name, _depot_result(depot)])
+	if n_fix > 0:
+		notes.append("工程师去修%s（缺 %d 点血，每秒回 %d%%）" % [fixable.display_name,
+			int(fixable.max_hp - fixable.hp), int(Engineer.FIX_RATE * 100.0)])
+	if not notes.is_empty():
+		_hud_msg("；".join(notes))
 
 ## 右键宝箱 / 遗物：选中的农民里最近的那个去扛（别的农民手上的活不动）；兵跟过去护着
 func _order_fetch(t: Treasure) -> void:
@@ -1807,6 +1820,20 @@ func _friendly_depot_at(pos: Vector2) -> Building:
 			best = b
 	return best
 
+## 鼠标下最近的己方建筑（不限种类）。右键指名修理用它——箭塔 / 兵营 / 水车这些
+## 不在 DEPOT_KINDS 里，但也得能修
+func _friendly_building_at(pos: Vector2) -> Building:
+	var best: Building = null
+	var best_d := INF
+	for b in get_tree().get_nodes_in_group("buildings"):
+		if not is_instance_valid(b) or b.team != 0 or b.is_queued_for_deletion():
+			continue
+		var d := pos.distance_to(b.position)
+		if d < b.size * 0.75 and d < best_d:
+			best_d = d
+			best = b
+	return best
+
 ## ================================ 经济 ================================
 ## 资源出入账统一走 economy（基建加资源种类时只在 Economy 里加）
 func add_resource(kind: String, amount: float) -> void:
@@ -1839,6 +1866,13 @@ func _player_engineers() -> Array:
 		if u is Engineer:
 			r.append(u)
 	return r
+
+## 正在修这座建筑的工程师（没有 = null）。信息栏用来显示"有人在修，还要几秒"
+func _fixer_of(b: Building) -> Engineer:
+	for e in _player_engineers():
+		if is_instance_valid(e) and e.fixing_at() == b:
+			return e
+	return null
 
 ## ================================ UI ================================
 func _build_ui() -> void:
@@ -2199,6 +2233,14 @@ func _selected_info_text() -> String:
 					"（水车带动 快 30%）" if t.powered() else "", t.status_text(), "开" if t.self_fetch else "关"]
 			if sl != "" and not t.trains():
 				txt += "\n" + sl
+			# 残血了：有没有人在修 / 怎么叫人修
+			if t.hp < t.max_hp - 0.5 and t.team == 0:
+				var fx := _fixer_of(t)
+				if fx != null:
+					var per: float = t.max_hp * Engineer.FIX_RATE
+					txt += "\n工程师正在修：每秒回 %.0f 点，约 %d 秒修满" % [per, ceili((t.max_hp - t.hp) / per)]
+				else:
+					txt += "\n受损：选中工程师右键这座 = 点名去修（他闲着也会自己来修）"
 			return txt
 		var u: Unit = t
 		var atk_txt := "—" if u.atk <= 0.0 else "%.0f（%.1f秒/下）" % [u.atk, u.atk_cd]
@@ -2233,6 +2275,15 @@ func _selected_info_text() -> String:
 				line += " · 撤退中（不接新敌，只还手贴上来的）"
 			elif s.is_manual():
 				line += " · 听你的手令（S 停止 / 回位 才回防区）"
+		elif u is Engineer and u.team == 0:
+			var e: Engineer = u
+			var fx := e.fixing_at()
+			if e.build_site != null and is_instance_valid(e.build_site):
+				line += " · 正在盖%s（%d%%）" % [e.build_site.label_text(), int(round(e.build_site.progress * 100.0))]
+			elif fx != null:
+				line += " · 正在修%s（%.0f/%.0f，每秒回 %d）" % [fx.display_name, fx.hp, fx.max_hp, int(fx.max_hp * Engineer.FIX_RATE)]
+			else:
+				line += "\n闲着、附近没仗打也没工地要盖的时候，会自己去修打坏了的房子\n右键一座受损的自家建筑 = 点名去修"
 		return line
 	var counts := {}
 	for u in list:

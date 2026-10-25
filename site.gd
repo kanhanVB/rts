@@ -30,6 +30,35 @@ func _exit_tree() -> void:
 func has_builder() -> bool:
 	return assigned != null and is_instance_valid(assigned)
 
+## 目标建筑的名字。Building 那边是 var display_name，工地不是 Building（没有等级），
+## 但名字表是同一张——信息栏要念"正在盖仓库"，不念"正在盖?"。
+## 改名表时记得两边一起改
+func label_text() -> String:
+	match kind:
+		"base":
+			return "基地"
+		"barracks":
+			return "兵营"
+		"hive":
+			return "巢穴"
+		"camp":
+			return "Goo 据点"
+		"warehouse":
+			return "仓库"
+		"smelter":
+			return "熔炉"
+		"workshop":
+			return "木工台"
+		"tower":
+			return "箭塔"
+		"waterwheel":
+			return "水车"
+		"outpost":
+			return "前哨"
+		"ruins":
+			return "据点废墟"
+	return "?"
+
 func _process(_delta: float) -> void:
 	queue_redraw()
 

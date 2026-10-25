@@ -1180,6 +1180,15 @@ func _light_rts_tests() -> void:
 	# move_target 要是还停在很久以前点名去过的那一头，_can_yield() 会判"还没走到"
 	# → 站着不给队友让路，在门口当路障（打转检测里就是这么逮到他的：
 	#   状态=IDLE，move_target 却在 1200px 外的地图另一头）
+	# 场上得先收拾干净：工程师闲着现在会自己去修残血房子，前面测试随便留一座
+	# 半血建筑，他就会一路奔过去，这条"闲站"的断言当场就不成立了
+	for b0 in tree.get_nodes_in_group("buildings"):
+		if is_instance_valid(b0):
+			b0.hp = b0.max_hp
+	for e0 in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e0):
+			e0.queue_free()    # 有怪贴着他也会追，move_target 同样收不回来
+	await tree.create_timer(0.2).timeout
 	var en := Engineer.new()
 	en.position = Vector2(640, 560)
 	m.add_child(en)
@@ -1236,6 +1245,46 @@ func _light_rts_tests() -> void:
 	if m.hud.help_visible() != hv0:
 		m.hud.toggle_help()    # 收回来，别影响后面
 	m.game_state = gs
+
+	# ---- 修理：建筑打坏了，工程师自己去修 ----
+	# 以前建筑一掉血就是永久残血，只能拆了重盖（还不退资源）
+	for b in tree.get_nodes_in_group("buildings"):
+		if is_instance_valid(b):
+			b.hp = b.max_hp    # 别的房子全补满：不然工程师可能跑去修别的，结果不确定
+	var rb: Building = m._build_mgr.add_building("warehouse", m.open_point(Vector2(700, 650)), 0)
+	m._on_building_built(rb)
+	await tree.create_timer(0.2).timeout
+	rb.hp = rb.max_hp * 0.4
+	var ep := Engineer.new()
+	ep.position = m.open_point(rb.position + Vector2(70, 30))
+	m.add_child(ep)
+	await tree.create_timer(0.15).timeout
+	var fix_hp0: float = rb.hp
+	await tree.create_timer(4.0).timeout
+	_check(rb.hp > fix_hp0 + 20.0 and ep.fixing_at() == rb,
+		"建筑掉血了：工程师自己跑过去修（%.0f → %.0f / %.0f）" % [fix_hp0, rb.hp, rb.max_hp])
+	# 修满就收工，别对着满血的房子一直抡
+	rb.hp = rb.max_hp - 1.0
+	await tree.create_timer(1.0).timeout
+	_check(rb.hp >= rb.max_hp - 0.01 and ep.fixing_at() == null,
+		"修满了就收工（%.0f/%.0f，ep 状态 %d，指着 %s）" % [rb.hp, rb.max_hp, ep.state, _fix_target_name(ep)])
+	# 只掉几点血：不值当跑一趟
+	rb.hp = rb.max_hp - 5.0
+	await tree.create_timer(1.0).timeout
+	_check(ep.fixing_at() == null, "只掉了几点血：不折腾（%.0f/%.0f，ep 状态 %d，指着 %s）" % [rb.hp, rb.max_hp, ep.state, _fix_target_name(ep)])
+	# 有怪贴上来：先放下锤子，不能边挨咬边修
+	rb.hp = rb.max_hp * 0.4
+	var fix_goo := Goo.make("goo")
+	fix_goo.position = m.open_point(ep.position + Vector2(55, 0))
+	m.add_child(fix_goo)
+	fix_goo.speed = 0.0
+	await tree.create_timer(0.8).timeout
+	_check(ep.fixing_at() == null, "有怪贴上来：先放下锤子（不边挨咬边修，ep 状态 %d，指着 %s）" % [ep.state, _fix_target_name(ep)])
+	if is_instance_valid(fix_goo):
+		fix_goo.queue_free()
+	ep.queue_free()
+	rb.queue_free()
+	await tree.create_timer(0.3).timeout
 
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
@@ -3246,6 +3295,13 @@ func _new_worker(p: Vector2) -> Worker:
 	w.position = m.open_point(p)
 	m.add_child(w)
 	return w
+
+## 断言失败时用来打印"他现在指着哪座房子"。多个工程师在场时，
+## 单看 ep 的状态码看不出他到底被谁勾走了
+func _fix_target_name(e: Engineer) -> String:
+	if e == null or not is_instance_valid(e) or e.fix_target == null or not is_instance_valid(e.fix_target):
+		return "无"
+	return e.fix_target.display_name
 
 ## 最多等 secs 秒，cond 一成立就返回 true
 func _wait_for(cond: Callable, secs: float) -> bool:
