@@ -134,6 +134,8 @@ func _ready() -> void:
 		_wave_mgr.wave_timer = 999.0    # 测试期间不来波次，保证断言确定性
 		train_scale = 0.0               # 老断言按"点了就出"写的；读条另有专门的测试
 		_run_test()
+	elif "--fuzz" in OS.get_cmdline_user_args():
+		_run_fuzz()    # 随机乱按：真实随机图 + 真实波次（见 _run_fuzz 的注释）
 	elif "--showcase" in OS.get_cmdline_user_args():
 		showcase = true
 		_run_showcase()
@@ -2614,3 +2616,10 @@ const TestSuite := preload("res://test_suite.gd")
 
 func _run_test() -> void:
 	await TestSuite.new(self).run()
+
+## 乱按模式（-- --fuzz [--seed=N]）：**不进 --test 的简化档**——
+## 用真实随机图（河/林/迷雾）+ 真实波次 + 真实读条，然后交给探针随机乱点。
+## --test 会把地图固定成经典平原、关掉波次、把读条设成 0 秒，
+## 那种环境测不出"河对岸放了个工地""怪卡在林子后面"这类真问题
+func _run_fuzz() -> void:
+	await TestSuite.new(self).run_fuzz()

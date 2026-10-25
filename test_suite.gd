@@ -9,6 +9,14 @@ var m: Node2D
 func _init(main: Node2D) -> void:
 	m = main
 
+## 乱按模式入口（main 的 `-- --fuzz`）：跑在**真实随机图**上，不是 --test 的简化档，
+## 所以没有经典坐标可用——探针里一律不许假设 base 在 (170,560)、矿在固定位置
+func run_fuzz() -> void:
+	print("[FUZZ] 真实随机图乱按模式")
+	await m.get_tree().create_timer(1.5).timeout
+	await _fuzz_probe()
+	_done()
+
 func run() -> void:
 	print("[TEST] 开始")
 	await m.get_tree().create_timer(1.0).timeout
@@ -19,6 +27,10 @@ func run() -> void:
 	if "--only=bell" in OS.get_cmdline_user_args():
 		await _bell_tests()    # 只跑警钟 / 报警这一块（调试用：-- --test --only=bell）
 		await _alert_tests()
+		_done()
+		return
+	if "--only=fuzz" in OS.get_cmdline_user_args():
+		await _fuzz_probe()    # 乱按探针：随机下指令/点按钮，专找报错和状态残留（-- --test --only=fuzz）
 		_done()
 		return
 	if "--only=circle" in OS.get_cmdline_user_args():
@@ -940,6 +952,24 @@ func _light_rts_tests() -> void:
 		sw.queue_free()
 	await tree.create_timer(0.2).timeout
 
+	# ---- 换了目标却不重算路：不能沿旧路径滑走 ----
+	# _move_toward 优先走 _path，以前传进去的目标点会被无视：
+	# 调用方改 move_target = 脚下想让它站住，结果它沿着老路越滑越远
+	# （A 移动来回拉锯、门口转圈都是这一条踩出来的）
+	var w3 := Worker.new()
+	w3.position = Vector2(560, 470)
+	m.add_child(w3)
+	await tree.create_timer(0.2).timeout
+	w3._path = w3._find_path(Vector2(980, 470))    # 先算一条奔东边去的路
+	w3._path_idx = 0
+	w3.move_target = w3.position                   # 然后让它"站着别动"
+	var p_before := w3.position
+	await tree.create_timer(0.7).timeout
+	var slid := w3.position.distance_to(p_before)
+	_check(slid < 10.0, "换了目标不清旧路径：不会沿老路滑走（滑了 %.0fpx）" % slid)
+	w3.queue_free()
+	await tree.create_timer(0.2).timeout
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
 	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；
@@ -977,8 +1007,13 @@ func _flee_tests() -> void:
 			if d < nd:
 				nd = d
 				near_b = b
-	_check(near_b != null and w.flee_to.distance_to(near_b.position) <= near_b.size * 0.5 + 40.0,
-		"逃跑目标是最近的己方房子墙边（%s，%.0fpx）" % [near_b.kind if near_b else "无", nd])
+	# 墙点 = 房子中心 + 朝外 (半个身位 + 30px) + 沿墙拉开最多 42px（几个人一起躲别挤一个点）
+	# 所以离中心最远能到 半个体量 + 30 + 42；下限是"别站进墙里"
+	var fd: float = w.flee_to.distance_to(near_b.position) if near_b != null else INF
+	var lo: float = near_b.size * 0.5 if near_b != null else 0.0
+	_check(near_b != null and fd <= lo + 30.0 + 46.0 and fd >= lo,
+		"逃跑目标是最近的己方房子墙边（%s，离房子中心 %.0fpx，应在 %.0f~%.0f）" % [
+			near_b.kind if near_b else "无", fd, lo, lo + 76.0])
 
 	# 别再瞬移农民了：瞬移落点经常正好压在房子/树上，1.2 秒全花在"脱困"，
 	# 量出来就是"没跑"。改成只把怪挪到它旁边，量"腿到底动没动、方向是不是背对怪"
@@ -1073,6 +1108,296 @@ func _flee_tests() -> void:
 		m._check_worker_safety()
 		_check(not w2.is_fleeing(), "怪清掉了：回矿上接着干")
 		w2.queue_free()
+
+## 乱按期间反复查的"状态不变量"：这些字段玩家看不见，但一旦串了就会出现
+## "兵站着发呆 / 农民不干活 / 房子不产能 / 人口算错"这类怪现象。
+## 返回违规描述数组（空 = 干净）。只查"本帧就一定不对"的事，瞬态误报由调用方
+## 用"连续两次都出现才算"过滤。
+func _fuzz_violations() -> Array:
+	var bad: Array = []
+	var tree := m.get_tree()
+	# 1) 账本不能是负数（花之前都查过 can_afford，负了就是漏查）
+	for k in ["ore", "wood", "ingot", "plank"]:
+		var v: float = m.economy.amount(k)
+		if v < -0.001:
+			bad.append("资源 %s = %.1f" % [k, v])
+	# 2) 人口 / 农民不能超上限
+	if m.unit_count() > m.UNIT_CAP:
+		bad.append("人口 %d > 上限 %d" % [m.unit_count(), m.UNIT_CAP])
+	if m.worker_count() > m.WORKER_CAP:
+		bad.append("农民 %d > 上限 %d" % [m.worker_count(), m.WORKER_CAP])
+	# 3) 分类列表里不能有失效引用 / 同一座建筑出现两次（会出现双倍产能 / 面板错）
+	var lists := [["兵营", m.barracks_list], ["仓库", m.warehouses_list],
+		["加工厂", m.processors_list], ["水车", m.wheels], ["巢穴", m.hives]]
+	for pair in lists:
+		var arr: Array = pair[1]
+		var seen := {}
+		for x in arr:
+			if not is_instance_valid(x):
+				bad.append("%s列表里有失效引用" % pair[0])
+				break
+			if seen.has(x):
+				bad.append("%s列表里 %s 出现两次" % [pair[0], x.display_name])
+				break
+			seen[x] = 1
+	# 4) 农民的活儿指向的对象：要么空，要么活着
+	for w in tree.get_nodes_in_group("units"):
+		if not is_instance_valid(w) or not (w is Worker) or w.dead:
+			continue
+		for f in ["work_at", "node_target", "fetch_target", "deliver_to", "shelter_at", "shelter_in"]:
+			var v = w.get(f)
+			if v != null and not is_instance_valid(v):
+				bad.append("农民的 %s 指向已释放对象" % f)
+				break
+	# 5) 兵的钉子 / 兵营：要么空，要么活着；钉着的怪身上得记着自己
+	for s in tree.get_nodes_in_group("player_units"):
+		if not is_instance_valid(s) or not (s is Soldier):
+			continue
+		if s.pin_target != null and not is_instance_valid(s.pin_target):
+			bad.append("兵的钉子指向已释放对象")
+		elif is_instance_valid(s.pin_target) and not s.is_ranged and s.pin_target.get("pinned_by") != s:
+			bad.append("兵钉着怪，怪身上却没记着他")
+		if s.post_home != null and not is_instance_valid(s.post_home):
+			bad.append("兵的兵营指向已释放对象")
+	# 6) 加工线的工人名单：不能有失效引用 / 重复；每个人手上也得指着这条线
+	for b in tree.get_nodes_in_group("buildings"):
+		if not is_instance_valid(b) or b.is_queued_for_deletion():
+			continue
+		var seen_op := {}
+		for op in b.operators:
+			if not is_instance_valid(op):
+				bad.append("%s的工人名单里有失效引用" % b.display_name)
+				break
+			if seen_op.has(op):
+				bad.append("%s的工人名单里有重复" % b.display_name)
+				break
+			seen_op[op] = 1
+			if op.work_at != b:
+				bad.append("%s的工人不认这条线" % b.display_name)
+				break
+		# 躲人名单：躲着的必须真的在这间屋里
+		for w in b.sheltered:
+			if not is_instance_valid(w):
+				bad.append("%s的躲人名单里有失效引用" % b.display_name)
+				break
+			if w.shelter_in != b:
+				bad.append("%s的躲人不认这间屋" % b.display_name)
+				break
+		# 水车供电：powering 和 powered_by 得互相对得上
+		for p in b.powering:
+			if not is_instance_valid(p):
+				bad.append("水车的供电名单里有失效引用")
+				break
+			if p.powered_by != b:
+				bad.append("水车带着它，它却认别的水车")
+				break
+		if b.powered_by != null and is_instance_valid(b.powered_by) and not b.powered_by.powering.has(b):
+			bad.append("%s认了水车，水车名单里却没有它" % b.display_name)
+	# 7) 血量：死的不该还满血站着，活的不该是 0 血
+	for u in tree.get_nodes_in_group("units"):
+		if not is_instance_valid(u) or u.dead:
+			continue
+		if u.hp <= 0.0:
+			bad.append("%s 活着但血量 %.1f" % [u.display_name, u.hp])
+		elif u.hp > u.max_hp + 0.01:
+			bad.append("%s 血量 %.1f 超过上限 %.1f" % [u.display_name, u.hp, u.max_hp])
+	return bad
+
+## ---- 乱按探针（-- --test --only=fuzz [--seed=N]）----
+## 全量测试都是"按正确流程操作"，测不出"玩家乱点"踩出来的报错和状态残留。
+## 这里用固定种子随机做真实入口的动作：随机选（含空选、含尸体）、随机右键
+## （地面/资源/怪/建筑）、把当前选中的命令全按一遍、随机放置建筑、随机删单位、
+## 开关暂停/警钟/叫波。看的是日志里有没有 SCRIPT ERROR，以及游戏还能不能继续跑。
+## 固定种子 → 可复现；换 --seed=N 就是另一局。报错的行号直接定位。
+func _fuzz_probe() -> void:
+	var tree := m.get_tree()
+	var rng := RandomNumberGenerator.new()
+	var seed_n := 20261025
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--seed="):
+			seed_n = int(a.substr(7))
+	rng.seed = seed_n
+	print("[FUZZ] 种子 %d" % seed_n)
+	# 基地要是被打掉了，后面所有"以基地为参照"的检查都会踩空（预先是探针自己崩，
+	# 看着像游戏的 bug）。开场记下位置，之后只用这个坐标
+	var anchor: Vector2 = m.base.position
+	var acts := {"选": 0, "右键": 0, "按命令": 0, "放置": 0, "删除": 0, "开关": 0}
+	var t := 0.0
+	var beat := 0
+	var inv_beat := 0
+	var prev_bad: Array = []      # 上一次采样的违规（连续两次都出现才算真破了）
+	var reported := {}
+	var spin := {}                # 单位 id -> {p: 上次位置, t: 上次时间, mv: 在动的采样数}
+	var spin_said := {}
+	# 注意：暂停是 Engine.time_scale = 0，普通 create_timer 会永远不触发，
+	# 探针自己把自己挂住（第 4 个参数 = 忽略时间缩放）
+	while t < 100.0:
+		await tree.create_timer(0.12, true, false, true).timeout
+		# 每帧都可能被上一轮操作弄成结算态（基地被拆 / 巢穴拆光）：拉回对局继续按
+		if m.game_state != "play":
+			m.game_state = "play"
+			m.overlay.visible = false
+		t += 0.12
+		if int(t) / 10 > beat:
+			beat = int(t) / 10
+			print("[FUZZ] %3ds 农民%d 兵%d 怪%d 建筑%d" % [beat * 10,
+				tree.get_nodes_in_group("player_units").size(),
+				tree.get_nodes_in_group("enemies").size(),
+				tree.get_nodes_in_group("buildings").size(),
+				tree.get_nodes_in_group("res_nodes").size()])
+		# 每 2 秒查一次状态不变量：连续两次都破才算真 bug（单帧的"建筑刚死、农民下一帧才反应过来"不算）
+		if int(t / 2) > inv_beat:
+			inv_beat = int(t / 2)
+			var cur := _fuzz_violations()
+			for v in cur:
+				if prev_bad.has(v) and not reported.has(v):
+					reported[v] = 1
+					_check(false, "状态不变量破了（持续 2 秒）：" + v)
+			prev_bad = cur
+			# 原地打转：6 秒里每一帧都在动、却几乎没挪地方（用户最早报的"门口转圈"就是这种）。
+			# 位移门槛给得大方（15px），只抓"真的在原地转"的
+			for u in tree.get_nodes_in_group("units"):
+				if not is_instance_valid(u) or u.dead:
+					continue
+				var uid := u.get_instance_id()
+				var rec = spin.get(uid)
+				if rec == null:
+					spin[uid] = {"p": u.position, "t": t, "mv": 1 if u.moving else 0}
+					continue
+				rec["mv"] = int(rec["mv"]) + (1 if u.moving else 0)
+				if t - float(rec["t"]) >= 6.0:
+					var moved: float = u.position.distance_to(rec["p"])
+					var n_mv: int = rec["mv"]
+					if moved < 15.0 and n_mv >= 3 and not spin_said.has(uid):
+						spin_said[uid] = 1
+						print("[FUZZ] %s 在 %s 原地打转（6 秒内动 %d 次、只挪了 %.0fpx）状态=%s 目标=%s 距目标=%.0f 路径=%d 身边=%d" % [
+							u.display_name, str(u.position.round()), n_mv, moved,
+							str(u.get("state")), str(u.move_target.round()),
+							u.position.distance_to(u.move_target), u._path.size(),
+							_near_count(u, 26.0)])
+					spin[uid] = {"p": u.position, "t": t, "mv": 1 if u.moving else 0}
+		# 资源托底：不然造不起东西，后面全是"买不起"的空转
+		if int(t) % 3 == 0:
+			m.economy.add("ore", 40.0)
+			m.economy.add("wood", 40.0)
+			m.economy.add("ingot", 10.0)
+			m.economy.add("plank", 10.0)
+		match rng.randi_range(0, 10):
+			0, 1, 2:
+				# 随机选一批：可能空、可能是尸体、可能是怪、可能是敌方建筑
+				var pool: Array = []
+				pool.append_array(tree.get_nodes_in_group("player_units"))
+				pool.append_array(tree.get_nodes_in_group("buildings"))
+				pool.append_array(tree.get_nodes_in_group("enemies"))
+				var pick: Array = []
+				for i in rng.randi_range(0, 4):
+					if pool.is_empty():
+						break
+					pick.append(pool[rng.randi_range(0, pool.size() - 1)])
+				m._set_selection(pick)
+				acts["选"] += 1
+			3, 4, 5:
+				# 随机右键：地面 / 矿点 / 怪身上 / 建筑 / 地图外
+				var targets: Array = [Vector2(rng.randf_range(-40, 1500), rng.randf_range(-40, 900))]
+				for n in tree.get_nodes_in_group("res_nodes"):
+					targets.append(n.position)
+				for e in tree.get_nodes_in_group("enemies"):
+					if is_instance_valid(e):
+						targets.append(e.position)
+				for b in tree.get_nodes_in_group("buildings"):
+					if is_instance_valid(b):
+						targets.append(b.position)
+				# 也按屏幕坐标点选一次（走 _pick_at / _point_select 那条真实路径）
+				m._command_at(targets[rng.randi_range(0, targets.size() - 1)], rng.randf() < 0.3)
+				acts["右键"] += 1
+			6, 7:
+				# 把当前选中能用的命令全按一遍（大量命令会因选错东西而提前 return）
+				var cmds: Array = m.commands()
+				for c in cmds:
+					if m.game_state != "play":
+						m.game_state = "play"
+					m.run_command(c.id)
+				acts["按命令"] += 1
+			8:
+				# 选中工程师时随机放一座房子（点在地图上：合法/不合法都试）
+				for b in tree.get_nodes_in_group("player_units"):
+					if is_instance_valid(b) and b is Engineer:
+						m._set_selection([b])
+						var kinds := ["warehouse", "smelter", "workshop", "barracks", "tower", "outpost"]
+						var kind: String = kinds[rng.randi_range(0, kinds.size() - 1)]
+						m._start_placing(kind)
+						if m._placing_kind != "":
+							m._build_mgr.try_place(kind,
+								Vector2(rng.randf_range(60, 1400), rng.randf_range(60, 820)),
+								m._build_eng)
+							m._placing_kind = ""
+						break
+				acts["放置"] += 1
+			9:
+				# 删掉选中的单位（Del）：只删单位，别把基地删了让全局重置
+				var kill: Array = []
+				for s in m.selected:
+					if is_instance_valid(s) and s is Unit:
+						kill.append(s)
+				if not kill.is_empty():
+					m._set_selection(kill)
+					m._delete_selected()
+				acts["删除"] += 1
+			_:
+				# 各种开关：暂停 / 警钟 / 加速 / 叫波 / 面板
+				match rng.randi_range(0, 4):
+					0:
+						m.toggle_pause()
+						m.toggle_pause()
+					1:
+						if rng.randf() < 0.5:
+							m.run_command("bell")
+						else:
+							m.run_command("all_clear")
+					2:
+						m.cycle_speed()
+					3:
+						m.call_wave_early()
+					4:
+						m.toggle_panel()
+				acts["开关"] += 1
+	m.paused = false    # 乱按可能停在暂停上：后面的断言要跑起来
+	m._apply_time()
+	m.game_state = "play"
+	m.overlay.visible = false
+	print("[FUZZ] 动作统计 " + str(acts))
+	# 收尾再查一遍（这时场上静止，瞬态早过去了）
+	var end_bad := _fuzz_violations()
+	for v in end_bad:
+		_check(false, "结束时状态不变量破了：" + v)
+	_check(end_bad.is_empty(), "乱按 100 秒之后状态没串（%d 项）" % end_bad.size())
+	print("[FUZZ] 场上 农民%d 兵%d 怪%d 建筑%d" % [
+		tree.get_nodes_in_group("player_units").size(),
+		tree.get_nodes_in_group("enemies").size(),
+		tree.get_nodes_in_group("buildings").size(),
+		tree.get_nodes_in_group("res_nodes").size()])
+	# 游戏还得能继续跑：农民在干活、兵能打、怪能走
+	var alive_worker := 0
+	for w in m._player_workers():
+		if is_instance_valid(w) and not w.dead:
+			alive_worker += 1
+	_check(alive_worker > 0 or m._player_workers().is_empty(), "乱按之后没卡死（场上还有活着的农民）")
+	# 自保这套系统还在：贴一只不动的怪，看农民还跑不跑（用开场记下的 anchor，别碰可能已拆的基地）
+	var g1 := Goo.new()
+	g1.position = anchor + Vector2(90, 0)
+	m.add_child(g1)
+	g1.speed = 0.0
+	await tree.create_timer(0.2, true, false, true).timeout
+	var w1 := Worker.new()
+	w1.position = anchor + Vector2(60, 0)
+	m.add_child(w1)
+	await tree.create_timer(0.3, true, false, true).timeout
+	m._check_worker_safety()
+	# 附近一座自己的房子都没有时会听天由命（不跑），这也是对的
+	if w1._nearest_safe() != null:
+		_check(w1.is_fleeing(), "乱按之后系统还活着：怪来了农民照样跑")
+	w1.queue_free()
+	g1.queue_free()
 
 ## ---- 单独探针：转圈 / 来回跑（-- --test --only=circle）----
 ## 用户报的「怪一来农民就在基地门口转圈、部队有时候也转圈」，拆成两件事量：
