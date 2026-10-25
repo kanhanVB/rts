@@ -20,9 +20,15 @@ func _ready() -> void:
 		Terrain.current.occupy(_fp, 1)
 
 func _exit_tree() -> void:
-	if Terrain.current != null and not _fp.is_empty():
-		Terrain.current.occupy(_fp, -1)
-		_fp = []
+	var t := Terrain.current
+	if is_instance_valid(t) and not _fp.is_empty():
+		t.occupy(_fp, -1)
+	_fp = []
+
+## 有没有工程师在管它。认领人死了但没来得及松手也算"无主"——
+## 不然工地一直显示"施工中"，别人又只认无主的工地，就永远没人接手
+func has_builder() -> bool:
+	return assigned != null and is_instance_valid(assigned)
 
 func _process(_delta: float) -> void:
 	queue_redraw()
@@ -67,7 +73,7 @@ func _art_draw() -> bool:
 	draw_rect(Rect2(-size * 0.35, by, size * 0.7 * progress, 4), Color(0.9, 0.76, 0.4))
 	if hp < max_hp:
 		Art.hp_bar(self, Vector2(0, by - 8.0), size * 0.7, hp / max_hp, true, 4.0)
-	var txt := "等待工程师" if assigned == null else "施工中 %d%%" % int(progress * 100.0)
+	var txt := "等待工程师" if not has_builder() else "施工中 %d%%" % int(progress * 100.0)
 	Art.text(self, Vector2(0, by - (16.0 if hp < max_hp else 5.0)), txt, 13)
 	return true
 
@@ -88,5 +94,5 @@ func _draw() -> void:
 	# 进度条
 	draw_rect(Rect2(-size / 2.0, -size / 2.0 - 12.0, size, 5.0), Color(0, 0, 0, 0.5))
 	draw_rect(Rect2(-size / 2.0, -size / 2.0 - 12.0, size * progress, 5.0), Color(0.95, 0.8, 0.3))
-	var txt := "等待工程师" if assigned == null else "施工中 %d%%" % int(progress * 100.0)
+	var txt := "等待工程师" if not has_builder() else "施工中 %d%%" % int(progress * 100.0)
 	draw_string(ThemeDB.fallback_font, Vector2(-size / 2.0, -size / 2.0 - 26.0), txt, HORIZONTAL_ALIGNMENT_LEFT, size * 2.0, 12, Color(0.2, 0.18, 0.12))

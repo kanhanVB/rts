@@ -88,7 +88,7 @@ func _step(delta: float) -> void:
 				for s in sites:
 					if not is_instance_valid(s):
 						continue
-					if s.assigned == null:
+					if not s.has_builder():
 						command_build(s)
 						break
 			if state != State.IDLE:
@@ -201,6 +201,12 @@ func _drop_site() -> void:
 	if build_site != null and is_instance_valid(build_site):
 		build_site.assigned = null    # 工地无主，别的工程师可以接手
 	build_site = null
+
+## 阵亡 / 被删：把手上的工地松开。
+## 不松的话工地一直挂着"施工中"，而别的工程师只认 assigned == null 的工地，
+## 于是谁也不会接手，那个工地就永远烂在那儿（显示施工中，进度一动不动）
+func _exit_tree() -> void:
+	_drop_site()
 
 ## ---------- 绘制：KR 小人（橙色工装 + 黄安全帽 + 大锤） ----------
 ## ---------- 贴图版 ----------

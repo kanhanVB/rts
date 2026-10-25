@@ -1194,6 +1194,32 @@ func _light_rts_tests() -> void:
 	en.queue_free()
 	await tree.create_timer(0.2).timeout
 
+	# ---- 工程师阵亡，他认领的工地要变回无主、能自动被别人接手 ----
+	# assigned 不清的话：工地永远显示"施工中"，而别的工程师只认无主的工地，
+	# 于是一整局都没人接手，那工地就烂在那儿（在前线盖塔时工程师被打死就撞上）
+	var st := ConstructionSite.new()
+	st.kind = "warehouse"
+	st.position = Vector2(600, 640)
+	m.add_child(st)
+	await tree.create_timer(0.2).timeout
+	var e1 := Engineer.new()
+	e1.position = Vector2(630, 640)
+	m.add_child(e1)
+	await tree.create_timer(0.15).timeout
+	e1.command_build(st)
+	_check(st.has_builder() and e1.build_site == st, "工程师认领工地")
+	e1.queue_free()    # 阵亡
+	await tree.create_timer(0.4).timeout
+	_check(not st.has_builder(), "工程师阵亡：工地变回无主（认领关系松开了）")
+	var e2 := Engineer.new()
+	e2.position = Vector2(660, 640)
+	m.add_child(e2)
+	await tree.create_timer(0.8).timeout
+	_check(e2.build_site == st and st.has_builder(), "别的工程师自动接手这个工地")
+	e2.queue_free()
+	st.queue_free()
+	await tree.create_timer(0.3).timeout
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
 	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；
