@@ -2236,7 +2236,9 @@ func _selected_info_text() -> String:
 			# 残血了：有没有人在修 / 怎么叫人修
 			if t.hp < t.max_hp - 0.5 and t.team == 0:
 				var fx := _fixer_of(t)
-				if fx != null:
+				if fx != null and fx.state == Engineer.State.TO_FIX:
+					txt += "\n工程师正赶过来（%.0f/%.0f，到了每秒回 %.0f 点）" % [t.hp, t.max_hp, t.max_hp * Engineer.FIX_RATE]
+				elif fx != null:
 					var per: float = t.max_hp * Engineer.FIX_RATE
 					txt += "\n工程师正在修：每秒回 %.0f 点，约 %d 秒修满" % [per, ceili((t.max_hp - t.hp) / per)]
 				else:
@@ -2280,6 +2282,9 @@ func _selected_info_text() -> String:
 			var fx := e.fixing_at()
 			if e.build_site != null and is_instance_valid(e.build_site):
 				line += " · 正在盖%s（%d%%）" % [e.build_site.label_text(), int(round(e.build_site.progress * 100.0))]
+			elif fx != null and e.state == Engineer.State.TO_FIX:
+				# 还在路上：这时候说"正在修"会让人以为血条该涨了
+				line += " · 正赶去修%s（%.0f/%.0f）" % [fx.display_name, fx.hp, fx.max_hp]
 			elif fx != null:
 				line += " · 正在修%s（%.0f/%.0f，每秒回 %d）" % [fx.display_name, fx.hp, fx.max_hp, int(fx.max_hp * Engineer.FIX_RATE)]
 			else:

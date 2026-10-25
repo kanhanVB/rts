@@ -521,8 +521,11 @@ static func bell_glyph(ci: CanvasItem, c: Vector2, k := 1.0, rot := 0.0) -> void
 func _sync_commands() -> void:
 	var cmds: Array = main.commands()
 	var sig := ""
+	# 签名必须带上标题和说明：箭塔 / 二级箭塔的 tip 里写着"每箭 %d"，
+	# 那个数是现查科技加成的。只按 id@slot 判变化的话，研究完「破甲箭头」
+	# 按钮还在，签名没变 → 悬停提示永远停在旧数字（写着 9，实际打 12）
 	for c in cmds:
-		sig += "%s@%d;" % [c.id, c.slot]
+		sig += "%s@%d:%s|%s;" % [c.id, c.slot, c.title, c.tip]
 	if sig != _cmd_sig:
 		_cmd_sig = sig
 		_cmd_at.clear()

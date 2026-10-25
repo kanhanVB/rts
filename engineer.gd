@@ -21,8 +21,10 @@ var fix_target: Building = null
 var _fix_think := 0.0         # 多久之后再扫一遍有没有要修的
 var _fix_wait := 0.0          # 这一趟已经走了多久
 var _fix_fx := 0.0            # 下一次飘 "+N"
-var _fix_skip: Building = null
-var _fix_skip_t := 0.0
+## 放弃过的房子 → 还要跳过它多久（秒）。用 instance_id 当键，不是对象引用：
+## 记单座的话，场上两座都修不到（隔着河 / 堵在林子里）就会来回折返一辈子——
+## 放弃 A 记 A、挑到 B 放弃记 B 把 A 顶掉、又挑回 A……A B A B 转到天荒地老
+var _fix_skip := {}
 var attack_range: float = 30.0
 var attack_damage: float = 6.0
 var attack_cooldown: float = 0.9
@@ -49,7 +51,11 @@ func _ready() -> void:
 
 func _step(delta: float) -> void:
 	_cd = max(0.0, _cd - delta)
-	_fix_skip_t = maxf(0.0, _fix_skip_t - delta)
+	if not _fix_skip.is_empty():
+		for k in _fix_skip.keys():
+			_fix_skip[k] = float(_fix_skip[k]) - delta
+			if _fix_skip[k] <= 0.0:
+				_fix_skip.erase(k)    # 冷却到了：这座重新算候选
 	match state:
 		State.TO_SITE:
 			if build_site == null or not is_instance_valid(build_site):
@@ -84,8 +90,7 @@ func _step(delta: float) -> void:
 			_fix_wait += delta
 			if _fix_wait > FIX_GIVE_UP:
 				# 走不到（隔着河 / 被挤在缝里顶不过去）：先不管这座，过一会儿再说
-				_fix_skip = fix_target
-				_fix_skip_t = FIX_SKIP_T
+				_fix_skip[fix_target.get_instance_id()] = FIX_SKIP_T
 				_drop_fix()
 				return
 			_move_toward(_fix_spot(fix_target), delta)
@@ -227,13 +232,16 @@ func _nearest_damaged() -> Building:
 	for b in _group("buildings"):
 		if not is_instance_valid(b) or b.team != 0 or b.is_queued_for_deletion():
 			continue
-		if b == _fix_skip and _fix_skip_t > 0.0:
+		if _fix_skip.has(b.get_instance_id()):
 			continue    # 刚放弃过：走不到，别在人家的路上来回折返
+		var vital: bool = b.kind == "base" or b.kind == "outpost"
 		var miss: float = b.max_hp - b.hp
-		if miss < maxf(FIX_MIN, b.max_hp * 0.12):
+		# 12% 的"小缺口不折腾"按血量算，对基地/前哨不合适：它们血厚（掉 100 点才够 12%），
+		# 而这两个被打掉就直接输，掉一点也该补上——固定用小门槛
+		if miss < (FIX_MIN if vital else maxf(FIX_MIN, b.max_hp * 0.12)):
 			continue
 		var d: float = position.distance_to(b.position)
-		var s: float = d * (0.45 if (b.kind == "base" or b.kind == "outpost") else 1.0) - miss * 2.0
+		var s: float = d * (0.45 if vital else 1.0) - miss * 2.0
 		if s < best_s:
 			best_s = s
 			best = b

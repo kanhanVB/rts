@@ -1284,7 +1284,44 @@ func _light_rts_tests() -> void:
 		fix_goo.queue_free()
 	ep.queue_free()
 	rb.queue_free()
-	await tree.create_timer(0.3).timeout
+	await tree.create_timer(0.4).timeout
+
+	# ---- 基地掉一点点血也要修：12% 的门槛对血厚的建筑不合适 ----
+	# 基地 600 血，12% = 72——掉 40 点以前压根进不了候选，可它被打掉就直接输。
+	# 现在基地/前哨改用固定的小门槛（FIX_MIN）
+	var eb := Engineer.new()
+	eb.position = m.open_point(m.base.position + Vector2(75, 35))
+	m.add_child(eb)
+	await tree.create_timer(0.2).timeout
+	m.base.hp = m.base.max_hp - 40.0
+	var base0: float = m.base.hp
+	await tree.create_timer(3.0).timeout
+	_check(m.base.hp > base0 + 5.0,
+		"基地掉 40 点血也去修（%.0f → %.0f / %.0f）" % [base0, m.base.hp, m.base.max_hp])
+	m.base.hp = m.base.max_hp
+
+	# ---- 修不到的房子：每座各自记冷却，别互相顶掉 ----
+	# 以前 _fix_skip 只记一座：场上两座都走不到（隔着河 / 堵在林子里）时
+	# 放弃 A 记 A、挑到 B 放弃记 B 把 A 顶掉、又挑回 A……A B A B 折返一辈子
+	for b in tree.get_nodes_in_group("buildings"):
+		if is_instance_valid(b):
+			b.hp = b.max_hp
+	var sk1: Building = m._build_mgr.add_building("warehouse", m.open_point(Vector2(560, 700)), 0)
+	var sk2: Building = m._build_mgr.add_building("warehouse", m.open_point(Vector2(880, 700)), 0)
+	m._on_building_built(sk1)
+	m._on_building_built(sk2)
+	await tree.create_timer(0.2).timeout
+	sk1.hp = sk1.max_hp * 0.4
+	sk2.hp = sk2.max_hp * 0.4
+	eb._fix_skip[sk1.get_instance_id()] = 30.0
+	eb._fix_skip[sk2.get_instance_id()] = 30.0
+	_check(eb._nearest_damaged() == null, "两座都放弃过的房子同时被跳过（不互相顶掉）")
+	eb._fix_skip.clear()
+	sk1.queue_free()
+	sk2.queue_free()
+	await tree.create_timer(0.2).timeout
+	eb.queue_free()
+	await tree.create_timer(0.2).timeout
 
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
