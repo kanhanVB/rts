@@ -1660,8 +1660,12 @@ func _fuzz_probe() -> void:
 		t += 0.12
 		if int(t) / 10 > beat:
 			beat = int(t) / 10
-			print("[FUZZ] %3ds 农民%d 兵%d 怪%d 建筑%d" % [beat * 10,
-				tree.get_nodes_in_group("player_units").size(),
+			# 标签和取值必须一对一：以前写的是"农民 兵 怪 建筑"，取的却是
+			# 玩家单位 / 怪 / 建筑 / 资源点——"建筑455"其实是有 455 处树和矿，
+			# 看日志的人（包括我）会被带偏
+			var pu := tree.get_nodes_in_group("player_units")
+			var nw := pu.filter(func(u): return u is Worker).size()
+			print("[FUZZ] %3ds 农民%d 兵%d 怪%d 建筑%d 资源%d" % [beat * 10, nw, pu.size() - nw,
 				tree.get_nodes_in_group("enemies").size(),
 				tree.get_nodes_in_group("buildings").size(),
 				tree.get_nodes_in_group("res_nodes").size()])
@@ -1770,11 +1774,23 @@ func _fuzz_probe() -> void:
 						break
 				acts["放置"] += 1
 			9:
-				# 删掉选中的单位（Del）：只删单位，别把基地删了让全局重置
+				# 删掉选中的单位（Del）：只删单位，别把基地删了让全局重置；
+				# 但也别把最后一个农民删掉——收尾还要验"农民在干活、怪来了会跑"，
+				# 人删光了那些断言就没东西可测（以前就是这样：日志常年是 0 农民还在绿着）
 				var kill: Array = []
+				var total_w := 0
+				for w in m._player_workers():
+					if is_instance_valid(w) and not w.dead:
+						total_w += 1
+				var killing_w := 0
 				for s in m.selected:
-					if is_instance_valid(s) and s is Unit:
-						kill.append(s)
+					if not (is_instance_valid(s) and s is Unit):
+						continue
+					if s is Worker:
+						if total_w - killing_w <= 1:
+							continue    # 留最后一个农民不删
+						killing_w += 1
+					kill.append(s)
 				if not kill.is_empty():
 					m._set_selection(kill)
 					m._delete_selected()
@@ -1808,8 +1824,9 @@ func _fuzz_probe() -> void:
 	for v in end_bad:
 		_check(false, "结束时状态不变量破了：" + v)
 	_check(end_bad.is_empty(), "乱按 %d 秒之后状态没串（%d 项）" % [int(span), end_bad.size()])
-	print("[FUZZ] 场上 农民%d 兵%d 怪%d 建筑%d" % [
-		tree.get_nodes_in_group("player_units").size(),
+	var fpu := tree.get_nodes_in_group("player_units")
+	var fnw := fpu.filter(func(u): return u is Worker).size()
+	print("[FUZZ] 场上 农民%d 兵%d 怪%d 建筑%d 资源%d" % [fnw, fpu.size() - fnw,
 		tree.get_nodes_in_group("enemies").size(),
 		tree.get_nodes_in_group("buildings").size(),
 		tree.get_nodes_in_group("res_nodes").size()])
@@ -1818,7 +1835,11 @@ func _fuzz_probe() -> void:
 	for w in m._player_workers():
 		if is_instance_valid(w) and not w.dead:
 			alive_worker += 1
-	_check(alive_worker > 0 or m._player_workers().is_empty(), "乱按之后没卡死（场上还有活着的农民）")
+	# 这条只抓"半死状态"：农民死了却没清掉（dead 但还在组里，alive_worker 会掉到 0 而组非空）。
+	# fuzz 故意不管游戏（不造兵、不防守），被怪打崩是正常结局，不算卡死——
+	# 但"0 农民"这件事得留在日志里（上面那行 print），别静默
+	_check(alive_worker > 0 or m._player_workers().is_empty(),
+		"乱按之后没卡死（活着的农民 %d 个 / 组里 %d 个）" % [alive_worker, m._player_workers().size()])
 	# 自保这套系统还在：贴一只不动的怪，看农民还跑不跑（用开场记下的 anchor，别碰可能已拆的基地）
 	var g1 := Goo.new()
 	g1.position = anchor + Vector2(90, 0)

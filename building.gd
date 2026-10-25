@@ -144,8 +144,10 @@ func _spit_check(from: Node2D) -> void:
 		batch = [_spit_pick()]
 	if batch.is_empty():
 		return
+	# 名额不够时从前面砍，把尾部的岩壳留下：垂死反扑那一窝如果被砍掉岩壳，
+	# 就只剩两只软怪，"反扑"等于没反
 	while _spit_n + batch.size() > SPIT_MAX:
-		batch.pop_back()    # 快到上限了：这一窝按剩下名额砍短
+		batch.pop_front()
 	if batch.is_empty():
 		return
 	_spit_n += batch.size()

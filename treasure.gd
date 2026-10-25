@@ -72,6 +72,8 @@ static func draw_icon(ci: CanvasItem, d: Dictionary, at: Vector2, h: float) -> v
 		ci.draw_rect(Rect2(at + Vector2(-h * 0.6, -h), Vector2(h * 1.2, h)), Color(0.6, 0.4, 0.2))
 
 func _process(_delta: float) -> void:
+	if not visible:
+		return    # 迷雾里看不见：不用每帧重画（re-visible 时引擎会自己重绘）
 	queue_redraw()    # 闪光 / 宝石上下浮动（一张图只有几件，每帧重画很便宜）
 
 func _draw() -> void:
