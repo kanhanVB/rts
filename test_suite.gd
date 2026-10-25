@@ -44,6 +44,10 @@ func run() -> void:
 		await _flee_tests()
 		_done()
 		return
+	if "--only=line" in OS.get_cmdline_user_args():
+		await _line_probe()    # 单独探针：加工线总量守恒（-- --test --only=line，20 秒一轮）
+		_done()
+		return
 	_check(is_instance_valid(m.base) and m.base.kind == "base", "基地存在")
 	_check(is_instance_valid(m.hive) and m.hive.kind == "hive", "巢穴存在")
 	_check(m._player_workers().size() == 3, "开局 3 农民自动上岗")
@@ -789,6 +793,89 @@ func _stats_tests() -> void:
 	var txt: String = m.stats_text()
 	_check(txt.contains("用时") and txt.contains("击杀") and txt.contains("峰值库存"), "结算文字有用时 / 击杀 / 峰值")
 
+## 矿 + 铁锭的总量（仓库 + 料场 + 成品堆 + 炉里那一批 + 工人扛在身上的）。
+## 冶炼是 5 矿 → 5 铁锭（1:1），所以这个和必须恒定：
+## 涨了 = 货凭空冒出来（重复入账），掉了 = 货被吞了（扛着离岗丢了、料场溢出没退回）
+func _line_total() -> float:
+	var s: float = m.economy.ore + m.economy.ingot
+	for b in m.processors_list:
+		if not is_instance_valid(b) or b.kind != "smelter":
+			continue
+		s += b.stock_in + b.stock_out
+		if b.batch_on:
+			s += float(b.recipe().n)    # 已经投进炉、这一批还没出炉的
+	for w in m._player_workers():
+		if is_instance_valid(w) and (w.carry_kind == "ore" or w.carry_kind == "ingot"):
+			s += w.carry_amount
+	return s
+
+## 加工线上每个工人此刻在哪儿、拿着什么（守恒断言失败时打印，好定位是哪一段丢的货）
+func _line_workers_text() -> String:
+	var out: Array = []
+	for w in m._player_workers():
+		if not is_instance_valid(w):
+			continue
+		out.append("%s/%s/%s%.0f" % [
+			"work" if w.state == Worker.State.OPERATE else str(w.state),
+			str(w.get("op_phase")), w.carry_kind, w.carry_amount])
+	return " ".join(out)
+
+## 单独探针：加工线总量守恒（-- --test --only=line）。只盯一件事——
+## 矿 + 铁锭的总量不许变。每 0.4 秒打一行明细，掉货的那一步一眼能看出来
+func _line_probe() -> void:
+	var tree := m.get_tree()
+	# 场上原有的采集农民必须清掉：他们一边挖矿一边往仓库送，矿一直在涨，
+	# 总量自然跟着涨——那是"别人在挣钱"，不是这条线在造货。怪也清掉（咬死工人会带走手上的货）
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	for u in tree.get_nodes_in_group("player_units"):
+		if is_instance_valid(u):
+			u.queue_free()
+	await tree.create_timer(0.3).timeout
+	var line: Building = null
+	for b in m.processors_list:
+		if is_instance_valid(b) and b.kind == "smelter":
+			line = b
+			break
+	if line == null:
+		line = m._build_mgr.add_building("smelter", Vector2(300, 480), 0)
+		m._on_building_built(line)    # 走和正规建造一样的归档，不然它不在 processors_list 里，统计不到
+	line.self_fetch = true
+	line.stock_in = 0.0
+	line.stock_out = 0.0
+	line.batch = 0.0
+	line.batch_on = false
+	line.made_total = 0.0
+	m.economy.ore = 300.0
+	m.economy.ingot = 0.0
+	var co1 := Worker.new()
+	co1.position = line.position + Vector2(-40, 70)
+	m.add_child(co1)
+	var co2 := Worker.new()
+	co2.position = line.position + Vector2(40, 70)
+	m.add_child(co2)
+	await tree.create_timer(0.2).timeout
+	m._set_selection([co1, co2])
+	m._issue_command(line.position)
+	m.selected.clear()
+	var con0 := _line_total()
+	print("[LINE] 起始总量 %.0f（炉在 %s）" % [con0, str(line.position.round())])
+	var worst := 0.0
+	var t := 0.0
+	while t < 30.0:
+		await tree.create_timer(0.4).timeout
+		t += 0.4
+		var cur := _line_total()
+		var d := cur - con0
+		if absf(d) > 0.4:
+			print("[LINE] %5.1fs 总量 %+.1f | 仓矿 %.0f 铁 %.0f 料 %.0f 炉 %s 成 %.0f | %s" % [
+				t, d, m.economy.ore, m.economy.ingot, line.stock_in,
+				"投了" if line.batch_on else "-", line.stock_out, _line_workers_text()])
+		worst = maxf(worst, absf(d))
+	_check(worst < 1.0, "加工线总量守恒：30 秒里矿 + 铁锭没多也没少（最大偏差 %.1f）" % worst)
+	_check(line.made_total > 0.0, "守恒的同时熔炉确实在出货（累计 %.0f）" % line.made_total)
+
 ## ---- 轻 RTS：兵听兵营集结点、近战 1v1 钉住、不自动补员 ----
 func _light_rts_tests() -> void:
 	var tree := m.get_tree()
@@ -968,6 +1055,99 @@ func _light_rts_tests() -> void:
 	var slid := w3.position.distance_to(p_before)
 	_check(slid < 10.0, "换了目标不清旧路径：不会沿老路滑走（滑了 %.0fpx）" % slid)
 	w3.queue_free()
+	await tree.create_timer(0.2).timeout
+
+	# ---- 加工线总量守恒：5 矿出 5 铁锭（1:1），全程总量不许变 ----
+	# 货在系统里只会在几处之间挪：仓库 → 料场 → 炉里那一批 → 成品堆 → 工人身上。
+	# 任何"扣了料场却没进炉""工人扛着货离岗货就没了""成品搬回仓库入账两次"
+	# 都会让这个总和跳一下——单看某一步是看不出来的，所以盯总量
+	# 场上别的农民得先清掉：他们在采矿，仓库矿一直在涨，会把总量顶上去
+	for w in m._player_workers():
+		if is_instance_valid(w):
+			w.queue_free()
+	await tree.create_timer(0.2).timeout
+	var line: Building = null
+	for b in m.processors_list:
+		if is_instance_valid(b) and b.kind == "smelter":
+			line = b
+			break
+	if line == null:
+		line = m._build_mgr.add_building("smelter", Vector2(300, 480), 0)
+		m._on_building_built(line)    # 走和正规建造一样的归档，不然它不在 processors_list 里，统计不到
+	for o in line.operators.duplicate():
+		if is_instance_valid(o):
+			o.command_stop()
+	line.stock_in = 0.0
+	line.stock_out = 0.0
+	line.batch = 0.0
+	line.batch_on = false
+	line.made_total = 0.0
+	line.self_fetch = true
+	m.economy.ore = maxf(m.economy.ore, 300.0)    # 料别中途断（一炉 5 矿，24 秒烧不掉这么多）
+	var co1 := Worker.new()
+	co1.position = line.position + Vector2(-40, 70)
+	m.add_child(co1)
+	var co2 := Worker.new()
+	co2.position = line.position + Vector2(40, 70)
+	m.add_child(co2)
+	await tree.create_timer(0.2).timeout
+	m._set_selection([co1, co2])
+	m._issue_command(line.position)
+	m.selected.clear()
+	var con0 := _line_total()
+	var worst := 0.0
+	var worst_what := ""
+	var t_con := 0.0
+	while t_con < 24.0:
+		await tree.create_timer(0.4).timeout
+		t_con += 0.4
+		var cur := _line_total()
+		if absf(cur - con0) > worst + 0.4:
+			worst = absf(cur - con0)
+			worst_what = "（%.1fs 差 %+.1f：仓矿 %.0f 铁 %.0f 料 %.0f 炉 %s 成 %.0f | %s）" % [
+				t_con, cur - con0, m.economy.ore, m.economy.ingot, line.stock_in,
+				str(line.batch_on), line.stock_out, _line_workers_text()]
+	_check(worst < 1.0, "加工线总量守恒：24 秒里矿 + 铁锭没多也没少（最大偏差 %.1f）%s" % [worst, worst_what])
+	_check(line.made_total > 0.0, "守恒的同时熔炉确实在出货（累计 %.0f）" % line.made_total)
+	co1.queue_free()
+	co2.queue_free()
+	await tree.create_timer(0.2).timeout
+
+	# ---- 同向排队走不该"靠右让路" ----
+	# 两个人都朝东走、前后排着队：分离力该把他们沿 x 推开（前后拉大），
+	# 横向（y）一点不该动。以前不判方向，同向也各往自己右手让——
+	# 两人右手是同一边，一起斜着漂，队伍在路上看着一扭一扭的
+	var q1 := Soldier.new()
+	q1.setup(false)
+	q1.position = Vector2(640, 500)
+	m.add_child(q1)
+	var q2 := Soldier.new()
+	q2.setup(false)
+	m.add_child(q2)
+	# 前后间距取"最小间距再近 4px"：正好在推力的作用范围里，
+	# 太远了（比如刚好等于 min_d）两边都不推，测了等于没测
+	var gap: float = q1.radius + q2.radius - 2.0
+	q2.position = q1.position + Vector2(gap, 0)
+	await tree.create_timer(0.3).timeout
+	q1.moving = true
+	q2.moving = true
+	q1._vel_dir = Vector2.RIGHT
+	q2._vel_dir = Vector2.RIGHT
+	var qy0: float = q1.position.y
+	q1._separate()    # 只算一帧的推力，别让 AI 把它走回去
+	var qdy: float = q1.position.y - qy0
+	_check(absf(qdy) < 0.2, "同向排队走：不往右让（横向被推了 %+.1fpx）" % qdy)
+	# 反过来：正对向的两个人还是要错开肩膀（不然面对面顶牛）
+	q1.position = Vector2(640, 500)
+	q2.position = q1.position + Vector2(gap, 0)
+	q1._vel_dir = Vector2.RIGHT
+	q2._vel_dir = Vector2.LEFT
+	qy0 = q1.position.y
+	q1._separate()
+	var qdy2: float = q1.position.y - qy0
+	_check(absf(qdy2) > 0.8, "对向而行的两个人：还是会错开肩膀（横向挪了 %+.1fpx）" % qdy2)
+	q1.queue_free()
+	q2.queue_free()
 	await tree.create_timer(0.2).timeout
 
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----

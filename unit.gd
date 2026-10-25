@@ -212,8 +212,12 @@ func _separate() -> void:
 				if not moving and u.moving and u.team == team and _can_yield():
 					push = off / d * (min_d - d) * 0.6
 					yielded = true
-				# 双方都在走 + 大致对向/交汇 → 往自己右手侧让
-				if moving and u.moving and _vel_dir != Vector2.ZERO:
+				# 双方都在走 + 大致对向/交汇 → 往自己右手侧让。
+				# 这里的"对向"必须真判一下：同向并排的两个人右手是同一边，
+				# 一让两人一起往那边偏，推不开还把整队带得斜着走，
+				# _move_toward 再把人拉回来——队伍在路上就一扭一扭的。
+				# dot < 0.35 约等于夹角超过 70°：正对向(-1)、垂直交汇(0) 都让，并排同向(+1) 不让
+				if moving and u.moving and _vel_dir != Vector2.ZERO and _vel_dir.dot(u._vel_dir) < 0.35:
 					var right := Vector2(_vel_dir.y, -_vel_dir.x)    # 移动方向的右侧法线
 					push += right * (min_d - d) * 0.4
 				position += push

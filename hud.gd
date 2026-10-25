@@ -1126,5 +1126,12 @@ class Minimap extends Control:
 			_jump(event.position)
 			accept_event()
 
+	## 按住拖动时手滑出小地图、在别处松开：那个"松开"事件不会送到这里（控件没抓住鼠标），
+	## _held 就一直挂着，之后鼠标随便移回小地图上方（不用按）镜头就跟着乱跳。
+	## 这里每帧对一下真实按键状态把它清掉——和 main 里拖框那个兜底是同一类问题
+	func _process(_delta: float) -> void:
+		if _held and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+			_held = false
+
 	func _jump(p: Vector2) -> void:
 		main.center_on(p / _k())
