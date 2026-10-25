@@ -31,6 +31,10 @@ var _attack_fx: Array = []        # [{to: Vector2, t: 剩余秒数}]
 var attack_target: Node2D = null  # 战斗单位当前攻击目标（基类声明，子类复用）
 var _path: PackedVector2Array = PackedVector2Array()   # A* 路径（为空 = 无路径）
 var _path_idx := 0                # 当前走到的路径点下标
+## 这条路径是奔哪儿去的（_find_path 记下）。_move_toward 用它判断"路和目标对不上"，
+## 差得太多就丢掉旧路直线走——见 _move_toward 开头的注释
+var _path_want := Vector2.INF
+const STALE_PATH_GAP := 40.0      # 比 REPATH_GAP(20) 大一圈：没重算路但目标小挪一下是正常的
 var _lane_off := Vector2.ZERO     # 天生车道偏移：同路径的群单位不叠成一条线
 
 # 动画状态（KR 式小人用）
@@ -125,6 +129,15 @@ func _on_stuck() -> void:
 ## 朝目标点走一步，返回走之前与目标的距离。
 ## 若寻路路径存在，先沿路径点走；走完最后一个点再直线逼近目标。
 func _move_toward(pos: Vector2, delta: float) -> float:
+	# 路径和这次要去的目标对不上（调用方换了目标却没重算路）：
+	# 照着旧路走会一路滑向老目的地——"换了目标却还在走老路""站着不动却一直挪"
+	# 都是这么来的（A 移动来回拉锯、门口转圈都栽在这上面）。
+	# 只在"本来该站住"的情况下判定（新目标就在脚下 60px 内），追移动目标时不受影响，
+	# 那样最多直线走一帧，需要绕障碍的调用方本来就会自己 _find_path
+	if not _path.is_empty() and position.distance_to(pos) < 60.0 \
+			and _path_want.distance_to(pos) > STALE_PATH_GAP:
+		_path = PackedVector2Array()
+		_path_idx = 0
 	var target := pos
 	if not _path.is_empty() and _path_idx < _path.size():
 		target = _path[_path_idx]
@@ -277,6 +290,7 @@ func command_move(pos: Vector2) -> void:
 
 ## 从当前位置到目标点的寻路（有地形层就绕开阻挡，否则空=直线）
 func _find_path(pos: Vector2) -> PackedVector2Array:
+	_path_want = pos    # 记下"这条路由哪儿算的"：_move_toward 靠它识别过期的路
 	var t := Terrain.current
 	if t == null:
 		return PackedVector2Array()
