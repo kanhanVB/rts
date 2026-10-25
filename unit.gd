@@ -100,9 +100,13 @@ func _process(delta: float) -> void:
 	var ter := Terrain.current
 	if ter != null and ter.has_solids():
 		position += ter.push_out(position, radius * 0.8)    # 被挤进树林/矿堆就推回来，贴着林边走会顺着边滑
-	# 卡住检测：0.7 秒挪了不到 2.5px（被人群挤住）→ 就地停下列队
+	# 卡住检测：0.7 秒净挪不到 8px（被人群挤住 / 撞在岸边来回顶）→ 交给子类脱困。
+	# 阈值原来是 2.5px，但"走一帧被推回来一帧"的震荡每帧就有 3px，
+	# 每次都够格去刷新起点，_stuck_t 永远累积不起来 —— 看着在原地磨一分钟也判不出来。
+	# 8px 对正常行走是安全的：最快的怪 62 速度也就 1px/帧，8px 要 8 帧（0.13 秒），
+	# 远够不到 0.7 秒的线
 	if moving:
-		if position.distance_to(_stuck_pos) < 2.5:
+		if position.distance_to(_stuck_pos) < 8.0:
 			_stuck_t += delta
 			if _stuck_t > 0.7:
 				_stuck_t = 0.0

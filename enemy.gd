@@ -33,6 +33,9 @@ var _scan_t := 0.0                      # 距下次重新索敌的倒计时
 var _cached_target: Node2D = null       # 上次扫描到的目标
 var _repath_cd := 0.0                   # 重算路径的冷却
 var _path_goal := Vector2(-9999, -9999)  # 上次寻路时的目标位置
+var _chase_who: Node2D = null            # 正在追谁（换目标时重置下面的停滞统计）
+var _chase_best := INF                   # 追这个目标以来最近的距（越小越近）
+var _chase_stall := 0.0                  # 多久没能更近一步了
 
 const HUNT_RADIUS := 70.0    # 普通 Goo：贴脸（70px 内）才咬单位；建筑才是行军目标，不计距离（各品种见 TYPES.hunt）
 ## 波次刷出来的 Goo 沿土路行军（王国保卫战式）：只有路边 LANE_AGGRO 内的建筑/工地会被盯上，
@@ -252,6 +255,10 @@ func _step(delta: float) -> void:
 		return
 	_lane_fighting = t != null
 	if t:
+		if t != _chase_who:
+			_chase_who = t
+			_chase_best = INF
+			_chase_stall = 0.0
 		var d := position.distance_to(t.position)
 		var reach := attack_range * _terrain_range_factor()
 		if t is Building:
@@ -265,6 +272,19 @@ func _step(delta: float) -> void:
 				t.take_damage(attack_damage * (siege if (t is Building or t is ConstructionSite) else 1.0), self)    # 带上自己：玩家那边据此报警
 				attack_fx_to(t.position)
 			return
+		# 追了 3 秒还没能离目标更近（撞在岸边来回顶、挤在缝里）：走一次脱困。
+		# 光靠 unit.gd 那个"位置没挪动"判不出来——那种走一帧被推回来一帧的震荡，
+		# 来回幅度能超过 8px 的门槛，起点每帧都被刷新，_stuck_t 永远攒不起来。
+		# 这里直接盯"离目标有没有变近"，震荡再大也藏不住
+		if d < _chase_best - 20.0:
+			_chase_best = d
+			_chase_stall = 0.0
+		else:
+			_chase_stall += delta
+			if _chase_stall > 3.0:
+				_chase_stall = 0.0
+				_on_stuck()
+				return
 		# 目标挪动明显（>24px）且冷却到了才重算路径（绕开悬崖/深水）。
 		# 以前追移动中的单位时 t.position 每帧都变，每只 Goo 每帧跑一次 A*
 		move_target = t.position
@@ -275,6 +295,29 @@ func _step(delta: float) -> void:
 			_path = _find_path(t.position)
 			_path_idx = 0
 	_move_toward(move_target, delta)
+
+## 卡住了（撞在岸边 / 挤在窄缝里顶不进去）：侧向挪半步换个角度，并作废旧路径。
+## 基类那个 _on_stuck 只把 move_target 按回脚下，而 _step 下一帧又把它设回目标点——
+## 追建筑时目标根本不动，272 行那条"目标挪了 24px 才重算"永远不成立，
+## 于是 _path 一直是用同一个起点算的老路，撞上河/林子就只能顶着磨几分钟。
+## 所以这里必须自己清 _path_goal / _repath_cd：让下一步无条件重算一条新路
+func _on_stuck() -> void:
+	if is_guard():
+		move_target = position    # 守军在窝边小范围巡守，挪不远是常态，别折腾
+		return
+	var to_go: Vector2 = move_target - position
+	move_target = position
+	if to_go.length() < 40.0:
+		return    # 目的地就在脚下（待命 / 正在咬）：不动是正常的
+	var side := to_go.orthogonal().normalized()
+	if side == Vector2.ZERO:
+		side = Vector2.RIGHT
+	position += side * radius    # 挪一个身位，脱离卡住的格子边缘
+	_path = PackedVector2Array()
+	_path_idx = 0
+	_path_goal = Vector2(-9999, -9999)
+	_repath_cd = 0.0
+	_stuck_pos = position
 
 func _follow_lane(delta: float) -> void:
 	if _lane_fighting:    # 打完一架回到路上：从最近的路点接着走

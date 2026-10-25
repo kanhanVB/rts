@@ -1150,6 +1150,50 @@ func _light_rts_tests() -> void:
 	q2.queue_free()
 	await tree.create_timer(0.2).timeout
 
+	# ---- 怪卡住了要能自己脱困 ----
+	# 以前 Goo 用的是基类 _on_stuck（只把 move_target 按回脚下），而 _step 下一帧
+	# 又把它设回目标点；追建筑时目标不动，"挪了 24px 才重算路"那条永远不成立，
+	# 于是 _path 一直是同一个起点算的老路，撞在岸边就只能顶着磨好几分钟
+	var gg := Goo.new()
+	gg.position = Vector2(640, 560)
+	m.add_child(gg)
+	await tree.create_timer(0.2).timeout
+	gg.move_target = Vector2(1040, 560)     # 400px 外有地方要去
+	gg._path_goal = Vector2(900, 560)       # 假装上一次是奔那儿算的路
+	gg._repath_cd = 0.4
+	var gp0: Vector2 = gg.position
+	gg._on_stuck()
+	_check(gg.position.distance_to(gp0) > 5.0,
+		"怪卡住了会侧向挪半步脱困（挪了 %.0fpx）" % gg.position.distance_to(gp0))
+	_check(gg._path_goal == Vector2(-9999, -9999) and gg._repath_cd <= 0.0,
+		"脱困时把旧路径作废：下一步无条件重算，不然还朝着老目标磨")
+	# 目的地就在脚下（待命 / 正在咬）→ 不该乱挪：那种"不动"是正常的
+	gg.position = Vector2(640, 560)
+	gg.move_target = gg.position
+	var gp1: Vector2 = gg.position
+	gg._on_stuck()
+	_check(gg.position.distance_to(gp1) < 0.5, "没地方要去的时候，卡住判定不乱挪怪")
+	gg.queue_free()
+	await tree.create_timer(0.2).timeout
+
+	# ---- 工程师闲站时要把"要去的地方"收回脚下 ----
+	# move_target 要是还停在很久以前点名去过的那一头，_can_yield() 会判"还没走到"
+	# → 站着不给队友让路，在门口当路障（打转检测里就是这么逮到他的：
+	#   状态=IDLE，move_target 却在 1200px 外的地图另一头）
+	var en := Engineer.new()
+	en.position = Vector2(640, 560)
+	m.add_child(en)
+	await tree.create_timer(0.2).timeout
+	en.move_order = false
+	en.state = Engineer.State.IDLE
+	en.move_target = Vector2(1400, 900)
+	await tree.create_timer(0.4).timeout
+	_check(en.move_target.distance_to(en.position) < 24.0,
+		"工程师闲站时把要去的地方收回脚下（还差 %.0fpx）" % en.move_target.distance_to(en.position))
+	_check(en._can_yield(), "工程师闲着会给队友让路（不当路障）")
+	en.queue_free()
+	await tree.create_timer(0.2).timeout
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
 	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；
@@ -1307,19 +1351,22 @@ func _fuzz_violations() -> Array:
 	if m.worker_count() > m.WORKER_CAP:
 		bad.append("农民 %d > 上限 %d" % [m.worker_count(), m.WORKER_CAP])
 	# 3) 分类列表里不能有失效引用 / 同一座建筑出现两次（会出现双倍产能 / 面板错）
+	# 结算/暂停时这些列表不清（_process 的 play 块不跑，_update_power 也就不会 filter），
+	# 那时留着死引用是冻结的正常样子，恢复 play 第一拍就清掉了——只在真打的时候严格查
 	var lists := [["兵营", m.barracks_list], ["仓库", m.warehouses_list],
 		["加工厂", m.processors_list], ["水车", m.wheels], ["巢穴", m.hives]]
-	for pair in lists:
-		var arr: Array = pair[1]
-		var seen := {}
-		for x in arr:
-			if not is_instance_valid(x):
-				bad.append("%s列表里有失效引用" % pair[0])
-				break
-			if seen.has(x):
-				bad.append("%s列表里 %s 出现两次" % [pair[0], x.display_name])
-				break
-			seen[x] = 1
+	if _lists_live():
+		for pair in lists:
+			var arr: Array = pair[1]
+			var seen := {}
+			for x in arr:
+				if not is_instance_valid(x):
+					bad.append("%s列表里有失效引用" % pair[0])
+					break
+				if seen.has(x):
+					bad.append("%s列表里 %s 出现两次" % [pair[0], x.display_name])
+					break
+				seen[x] = 1
 	# 4) 农民的活儿指向的对象：要么空，要么活着
 	for w in tree.get_nodes_in_group("units"):
 		if not is_instance_valid(w) or not (w is Worker) or w.dead:
@@ -1383,6 +1430,18 @@ func _fuzz_violations() -> Array:
 			bad.append("%s 血量 %.1f 超过上限 %.1f" % [u.display_name, u.hp, u.max_hp])
 	return bad
 
+## 这个位置的地形能不能走（打转打印用：区分"被地形挡住"和"被人群挤住"）
+func _walkable_at(p: Vector2) -> bool:
+	var t := Terrain.current
+	if t == null:
+		return true
+	return t.walkable(int(p.x / Terrain.CELL), int(p.y / Terrain.CELL))
+
+## 厂子/仓库/水车这些分类列表只在"正在打"的时候才有人维护（_process 里的 play 块），
+## 结算页和暂停时本来就是冻结的，那时候列表里留几个死引用不算状态串
+func _lists_live() -> bool:
+	return m.game_state == "play" and not m.paused
+
 ## ---- 乱按探针（-- --test --only=fuzz [--seed=N]）----
 ## 全量测试都是"按正确流程操作"，测不出"玩家乱点"踩出来的报错和状态残留。
 ## 这里用固定种子随机做真实入口的动作：随机选（含空选、含尸体）、随机右键
@@ -1413,10 +1472,15 @@ func _fuzz_probe() -> void:
 	# 探针自己把自己挂住（第 4 个参数 = 忽略时间缩放）
 	while t < 100.0:
 		await tree.create_timer(0.12, true, false, true).timeout
-		# 每帧都可能被上一轮操作弄成结算态（基地被拆 / 巢穴拆光）：拉回对局继续按
+		# 每帧都可能被上一轮操作弄成结算态（基地被拆 / 巢穴拆光）：拉回对局继续按。
+		# 顺手补一次 _update_power()：它在真实游戏里是 _process 的 play 块每 0.5 秒跑一次，
+		# 而这里 game_state 被 _check_end 反复拉回结算态，play 帧少得可怜，
+		# processors_list / wheels 会有好几秒顾不上 filter 死引用——那不是游戏漏了清理，
+		# 是探针把时间线掰弯了。手动跑一次，把"恢复对局状态会自愈"这件事补上
 		if m.game_state != "play":
 			m.game_state = "play"
 			m.overlay.visible = false
+			m._update_power()
 		t += 0.12
 		if int(t) / 10 > beat:
 			beat = int(t) / 10
@@ -1448,13 +1512,29 @@ func _fuzz_probe() -> void:
 				if t - float(rec["t"]) >= 6.0:
 					var moved: float = u.position.distance_to(rec["p"])
 					var n_mv: int = rec["mv"]
-					if moved < 15.0 and n_mv >= 3 and not spin_said.has(uid):
+					# 必须"有地方要去"才算打转：目的地就在脚下（守军在小范围巡守、
+					# 单位站定待命）时偶尔挪两下是正常行为，不是原地转
+					var wants: float = u.position.distance_to(u.move_target)
+					if moved < 15.0 and n_mv >= 3 and wants > 40.0 and not spin_said.has(uid):
 						spin_said[uid] = 1
-						print("[FUZZ] %s 在 %s 原地打转（6 秒内动 %d 次、只挪了 %.0fpx）状态=%s 目标=%s 距目标=%.0f 路径=%d 身边=%d" % [
+						# 怪多带几个字段：lane 有没有走完、在追谁、卡了多久、脚下是不是可走格
+						# （"追到最后一个路点后变纯直线，撞河/林顶着磨"和"被人群挤住"要分得开）
+						var extra := ""
+						if u is Goo:
+							var cur_pt := -1.0
+							if u._path_idx < u._path.size():
+								cur_pt = u.position.distance_to(u._path[u._path_idx])
+							extra = " lane=%s 路点=%d/%d 追=%s 卡=%.1fs 可走=%s spd=%.0f idx=%d/%d 到当前点=%.0f 正在咬=%s" % [
+								str(u.lane), u._lane_idx, u._lane.size(),
+								"有" if u._cached_target != null else "无",
+								u._stuck_t, str(_walkable_at(u.position)), u.speed,
+								u._path_idx, u._path.size(), cur_pt,
+								str(u.attack_target != null)]
+						print("[FUZZ] %s 在 %s 原地打转（6 秒内动 %d 次、只挪了 %.0fpx）状态=%s 目标=%s 距目标=%.0f 路径=%d 身边=%d%s" % [
 							u.display_name, str(u.position.round()), n_mv, moved,
 							str(u.get("state")), str(u.move_target.round()),
 							u.position.distance_to(u.move_target), u._path.size(),
-							_near_count(u, 26.0)])
+							_near_count(u, 26.0), extra])
 					spin[uid] = {"p": u.position, "t": t, "mv": 1 if u.moving else 0}
 		# 资源托底：不然造不起东西，后面全是"买不起"的空转
 		if int(t) % 3 == 0:
@@ -1545,6 +1625,7 @@ func _fuzz_probe() -> void:
 	m._apply_time()
 	m.game_state = "play"
 	m.overlay.visible = false
+	m._update_power()    # 同上：先把 play 期间该做的维护补一遍，再查收尾不变量
 	print("[FUZZ] 动作统计 " + str(acts))
 	# 收尾再查一遍（这时场上静止，瞬态早过去了）
 	var end_bad := _fuzz_violations()

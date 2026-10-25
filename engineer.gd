@@ -93,6 +93,10 @@ func _step(delta: float) -> void:
 						break
 			if state != State.IDLE:
 				return
+			# 闲着就把"要去的地方"收回脚下：不然 move_target 还停在很久以前
+			# 玩家点名让他去过的那一头，_can_yield() 判"还没走到"→ 站着不给队友
+			# 让路，在门口当路障（打转检测里就是这么发现他的：IDLE 却记着 1200px 外的点）
+			move_target = position
 			# 贴脸自卫
 			var t := _acquire_target()
 			if t == null:
