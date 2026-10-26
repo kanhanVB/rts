@@ -388,7 +388,7 @@ func _draw_cmd(slot: int) -> void:
 		return
 	var c: Dictionary = _cmd_at[slot]
 	var id: String = c.id
-	if id in ["attack", "stop", "hold", "patrol", "retreat", "delete", "bell", "all_clear"]:
+	if id in ["attack", "stop", "hold", "patrol", "retreat", "delete", "bell", "all_clear", "cut"]:
 		_glyph(b, id, Vector2(28, 17))
 	else:
 		var t := icon(c.icon)
@@ -446,6 +446,14 @@ func _glyph(ci: CanvasItem, id: String, c: Vector2) -> void:
 				var n := Vector2(s, 1.0).normalized().orthogonal() * 5.0
 				ci.draw_line(g - n, g + n, ink, 4.0)
 				ci.draw_line(g - n, g + n, Hud.GOLD, 2.0)
+		"cut":    # 被挖断的土路：上下两条路沿中断，中间一道沟（两壁 + 沟里的土色）
+			for dy in [-6.0, 6.0]:
+				ci.draw_line(c + Vector2(-12.0, dy), c + Vector2(-5.0, dy), ink, 2.5)
+				ci.draw_line(c + Vector2(5.0, dy), c + Vector2(12.0, dy), ink, 2.5)
+			ci.draw_rect(Rect2(c + Vector2(-5.0, -10.0), Vector2(10.0, 20.0)), Color(0.55, 0.38, 0.24))
+			ci.draw_rect(Rect2(c + Vector2(-5.0, -10.0), Vector2(10.0, 20.0)), ink, false, 1.5)
+			ci.draw_line(c + Vector2(-2.0, -10.0), c + Vector2(-2.0, 10.0), Color(0.3, 0.2, 0.13), 1.0)
+			ci.draw_line(c + Vector2(2.5, -10.0), c + Vector2(2.5, 10.0), Color(0.3, 0.2, 0.13), 1.0)
 		"stop":      # 红色八角
 			var pts := PackedVector2Array()
 			for i in 8:
@@ -596,6 +604,8 @@ func _build_help() -> void:
   怪沿土路来，十波打完就赢
   拆掉所有巢穴也算赢——但巢穴挨打会往外吐守军，带够兵再去
   房子被打坏了工程师会自己去修（右键一座受损的自家建筑 = 点名）
+  选工程师 →「断道」：点土路挖一道壕沟，怪只能绕林子（慢、还被塔白射）
+  但巢穴一直在孵：拖着不打它会额外派一窝过来；每波还会把断掉的路踩平一段
 
 怎么操作
   左键点选 · 拖动框选 · Shift 加选

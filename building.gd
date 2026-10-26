@@ -165,6 +165,61 @@ func _spit_pick() -> String:
 		return "runner" if _spit_n % 2 == 1 else "goo"
 	return "goo"
 
+## ---------- 巢穴：孵化（拖得越久越凶）----------
+## 以前"拖着不打"是零代价：十波倒计时慢慢走，巢穴安安静静。
+## 现在每座巢穴都在孵，涨满就额外派一窝沿土路来——早打有钱（提前叫波奖励），
+## 拖着有代价，两头才算对称。血越少孵得越急（被逼急了拼命生），波次越高也越快。
+const BROOD_T := 78.0          # 满血、第 1 波时孵一窝要多久（秒）
+const BROOD_MIN := 34.0        # 再怎么快也不快过这个
+const BROOD_WARN := 0.8        # 涨到这个比例先喊一嗓子（给玩家反应时间）
+var brood := 0.0               # 孵化进度 0~1
+var _brood_warned := false
+var _brood_drawn := 0.0        # 已经画出来的进度（每 1% 才重绘一次，别每帧重画）
+
+func _tick_brood(delta: float) -> void:
+	if hp <= 0.0:
+		return
+	if _game_ref == null or not is_instance_valid(_game_ref):
+		_game_ref = get_tree().get_first_node_in_group("game")
+	var g: Node = _game_ref
+	if g == null:
+		return
+	var st = g.get("game_state")
+	if st != null and String(st) != "play":
+		return    # 暂停 / 结算时别偷偷孵
+	var wave := 0
+	var wm = g.get("_wave_mgr")
+	if wm != null:
+		wave = int(wm.get("wave"))
+	var span: float = maxf(BROOD_MIN, BROOD_T - float(wave) * 5.0)
+	span *= lerpf(0.55, 1.0, clampf(hp / max_hp, 0.0, 1.0))    # 残血 = 孵得更急
+	brood = minf(1.0, brood + delta / span)
+	if int(brood * 100.0) != int(_brood_drawn * 100.0):
+		_brood_drawn = brood
+		queue_redraw()    # 建筑平时不重绘：孵化条得跟着涨
+	if not _brood_warned and brood >= BROOD_WARN:
+		_brood_warned = true
+		if g.has_method("_hud_msg"):
+			g._hud_msg("一座巢穴躁动起来——它要提前派一窝出来了")
+	if brood >= 1.0:
+		brood = 0.0
+		_brood_warned = false
+		if g.has_method("hive_brood"):
+			g.hive_brood(self)
+
+## 还要多久孵出来（秒）：信息栏用
+func brood_left() -> float:
+	var g: Node = _game_ref
+	if g == null or not is_instance_valid(g):
+		return -1.0
+	var wave := 0
+	var wm = g.get("_wave_mgr")
+	if wm != null:
+		wave = int(wm.get("wave"))
+	var span: float = maxf(BROOD_MIN, BROOD_T - float(wave) * 5.0)
+	span *= lerpf(0.55, 1.0, clampf(hp / max_hp, 0.0, 1.0))
+	return maxf(0.0, (1.0 - brood) * span)
+
 ## 城堡自带箭塔（王国保卫战式）：开局没兵也能顶住零星几只 Goo，但挡不住大波
 const TOWER_RANGE := 170.0
 const TOWER_DMG := 8.0
@@ -431,6 +486,8 @@ func _process(delta: float) -> void:
 	# 巢穴吐守军：两只之间要隔一会儿（吐的节奏靠这个倒计时）
 	if _spit_cd > 0.0:
 		_spit_cd = maxf(0.0, _spit_cd - delta)
+	if kind == "hive" and team == 1:
+		_tick_brood(delta)
 	if has_tower():
 		_tower(delta)
 	if kind == "tower":
@@ -537,6 +594,13 @@ func _draw() -> void:
 	if hp < max_hp:
 		draw_rect(Rect2(-size * 0.5, -size * 0.74, size, 6.0), Color(0, 0, 0, 0.5))
 		draw_rect(Rect2(-size * 0.5, -size * 0.74, size * hp / max_hp, 6.0), Color(0.3, 0.9, 0.3))
+	# 巢穴孵化条（紫红色，在血条上面一条）：涨满就多派一窝过来。
+	# 不画的话玩家完全不知道它在"长大"，只会在挨打时莫名其妙多出一队怪
+	if kind == "hive" and team == 1 and brood > 0.12:
+		var by: float = -size * 0.74 - 9.0
+		draw_rect(Rect2(-size * 0.5, by, size, 5.0), Color(0, 0, 0, 0.5))
+		draw_rect(Rect2(-size * 0.5, by, size * clampf(brood, 0.0, 1.0), 5.0),
+			Color(0.85, 0.35, 0.85) if brood < BROOD_WARN else Color(0.95, 0.25, 0.3))
 	if is_processor():
 		_proc_draw(Vector2(0, size * 0.42), size * 1.1)
 

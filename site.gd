@@ -55,6 +55,8 @@ func label_text() -> String:
 			return "水车"
 		"outpost":
 			return "前哨"
+		"cut":
+			return "断道"
 		"ruins":
 			return "据点废墟"
 	return "?"

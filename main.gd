@@ -95,6 +95,8 @@ var sfx: Sfx
 var alerts: Array = []             # [{pos, what, t0, last}]：哪儿挨打、什么挨打、第一下 / 最近一下的时间
 var _alert_sfx_t := -999.0
 var _hive_told := false            # 巢穴吐守军的说明只说一次（别每座巢穴都念一遍）
+var _brood_told := false           # 巢穴孵化的说明只说一次
+var _sever_told := false           # 断道的说明只说一次
 var _rally_i := 0            # 新兵在兵营前排队的序号     # 右键落点圈：[{pos, t0, attack}]
 
 func _ready() -> void:
@@ -466,6 +468,149 @@ func roads_of(h: Node2D) -> Array:
 		if int(road_hive[k] if k < road_hive.size() else k) == i:
 			out.append(roads[k])
 	return out
+
+## ---------- 断道改路 ----------
+## 怪只认土路、而且沿路点是直线走、不会自己绕（见 enemy._follow_lane），
+## 所以"断道"必须真改路数据，光在中间放个障碍它只会顶着磨。
+## 做法：地形刷一条不可走的壕沟（set_cell 会同步 A*），再把这条路按 A* 重算一遍——
+## 新路自然绕开壕沟。已经走在上面的怪当场换成新路。
+## 但填不长久：每波开始巢穴会把最早断的一段踩平（你断，它填）。
+const MAX_SEVER := 2          # 同时最多断这么多段（再多就把最早的填回去）
+const SEVER_SPAN := 7         # 壕沟从土路往两边各延伸几格（接上树/水就提前停）
+var severed: Array = []       # [{cells: [[Vector2i, 旧地形], ...], hive: int, pos: Vector2}]
+
+## 离 pos 最近的一段土路：{road, seg, dist, at, dir}；不在路上（超过 max_d）返回 {}
+func _nearest_road(pos: Vector2, max_d := 40.0) -> Dictionary:
+	var best := {}
+	var best_d := max_d
+	for k in roads.size():
+		var rd: Array = roads[k]
+		for i in rd.size() - 1:
+			var a: Vector2 = rd[i]
+			var b: Vector2 = rd[i + 1]
+			var q: Vector2 = Geometry2D.get_closest_point_to_segment(pos, a, b)
+			var d: float = q.distance_to(pos)
+			if d < best_d:
+				best_d = d
+				best = {"road": k, "seg": i, "dist": d, "at": q, "dir": (b - a).normalized()}
+	return best
+
+## 这里能不能断："" = 能
+func sever_error(pos: Vector2) -> String:
+	if terrain == null:
+		return ""
+	if _nearest_road(pos, 40.0).is_empty():
+		return "放不下：得点在土路上——要断的是怪走的那条路"
+	for s in severed:
+		if pos.distance_to(s["pos"]) < 96.0:
+			return "这一段已经挖断了"
+	return ""
+
+## 这里断过没有（画预览 / 测试用）
+func severed_here(pos: Vector2) -> bool:
+	for s in severed:
+		if pos.distance_to(s["pos"]) < 96.0:
+			return true
+	return false
+
+## 挖断：刷壕沟 → 重算路 → 路上的怪改走新路。返回是否真断了
+func cut_road_at(pos: Vector2) -> bool:
+	if terrain == null or sever_error(pos) != "":
+		return false
+	var hit := _nearest_road(pos, 40.0)
+	if hit.is_empty():
+		return false
+	var at: Vector2 = hit["at"]
+	var dir: Vector2 = hit["dir"]
+	if dir == Vector2.ZERO:
+		dir = Vector2.RIGHT
+	var k: int = int(hit["road"])
+	var hive_i: int = int(road_hive[k] if k < road_hive.size() else k)
+	var cells: Array = _dig_trench(at, dir)
+	if cells.is_empty():
+		return false
+	# 顺手把这条路的数据也换成绕行版：新出生的怪直接就按新路走，不用现场算。
+	# 换不了也没关系——已经在上面的怪走到断口会自己寻路绕过去（见 enemy._follow_lane），
+	# 所以这里不做回滚：沟挖出来了就是挖出来了
+	_reroute(hive_i)
+	severed.append({"cells": cells, "hive": hive_i, "pos": at})
+	while severed.size() > MAX_SEVER:
+		road_reclaim(true)
+	if not _sever_told:
+		_sever_told = true
+		_hud_msg("土路挖断了！怪只能绕林子走——但巢穴每波会把路重新踩平")
+	else:
+		_hud_msg("土路又挖断一段——怪得绕路了")
+	return true
+
+## 从路中间横着刷一条不可走的壕沟（2 格宽），两头一直顶到现成的障碍。
+## 两条注意：
+##  ① 不能"碰到障碍就停"——沟和树之间留一格缝，怪侧移 32px 就钻过去了，
+##     等于白挖（实测就是这么回事：只挖出 3 格，横切方向 .....11.111，缝在第 3 格）
+##  ② 所以要接着往前探，把缝填掉，直到连着几格都是现成障碍才收手
+func _dig_trench(at: Vector2, dir: Vector2) -> Array:
+	var n := Vector2(-dir.y, dir.x)
+	var cells: Array = []
+	var seen := {}
+	for side in [1.0, -1.0]:
+		var wall := 0        # 连着碰到几格现成障碍了
+		for step in SEVER_SPAN:
+			var p: Vector2 = at + n * (side * float(step) * Terrain.CELL)
+			for w in 2:    # 沟 2 格宽：沿路方向铺两格，别只切一根线
+				var q: Vector2 = p - dir * (float(w) * Terrain.CELL * 0.5)
+				var c := Vector2i(int(floor(q.x / Terrain.CELL)), int(floor(q.y / Terrain.CELL)))
+				if not terrain.in_bounds(c.x, c.y):
+					wall += 1
+					continue
+				if seen.has(c):
+					continue
+				# 现成的障碍（树/水/矿/建筑）：不动它，但接着往前探
+				if not terrain.walkable(c.x, c.y):
+					wall += 1
+					continue
+				wall = 0
+				seen[c] = true
+				cells.append([c, terrain.cell_type(c)])
+			if wall >= 3:
+				break
+	for e in cells:
+		terrain.set_cell(e[0], Terrain.T.CLIFF)
+	return cells
+
+## 把挖掉的格子还原成原来的地形
+func _restore_cells(cells: Array) -> void:
+	for e in cells:
+		terrain.set_cell(e[0], int(e[1]))
+
+## 按 A* 重算这个巢穴的路（绕开新挖的沟）。换不动（经典手绘图 / 地形给不出路）就返回 false，
+## 那种情况靠 enemy._follow_lane 现场寻路兜底
+func _reroute(hive_i: int) -> bool:
+	if hive_i < 0 or hive_i >= hives.size():
+		return true
+	var h: Node2D = hives[hive_i]
+	if h == null or not is_instance_valid(h) or base == null or terrain == null:
+		return true
+	var pts := terrain.find_path(base.position, h.position)
+	if pts.size() < 3:
+		return false    # 太短的"路"没用：路点全压在建筑脚下，start_lane 会把它剔干净
+	var fresh: Array = []
+	for p in pts:
+		fresh.append(p)
+	for k in roads.size():
+		if int(road_hive[k] if k < road_hive.size() else k) == hive_i:
+			roads[k] = fresh.duplicate()
+	return true
+
+## 巢穴把最早断的一段踩平（每波开始调用）。quiet = 超上限时的静默回收
+func road_reclaim(quiet := false) -> bool:
+	if severed.is_empty():
+		return false
+	var s: Dictionary = severed.pop_front()
+	_restore_cells(s["cells"])
+	_reroute(int(s["hive"]))
+	if not quiet:
+		_hud_msg("巢穴把断掉的那段土路重新踩平了——路口又通了")
+	return true
 
 ## 点到树林/矿里（不能站人）→ 最近的空地。经典图看手绘地图的树林，随机图看地形格子
 func open_point(p: Vector2) -> Vector2:
@@ -1117,6 +1262,8 @@ func commands() -> Array:
 			"贴着河岸盖，轮子泡在深水里：%d 以内的熔炉 / 木工台（最多 %d 座）一批快 30%%" % [int(Building.WHEEL_R), Building.WHEEL_MAX]))
 		out.append(_cmd_entry("outpost", 8, "前哨", "outpost", Economy.COST_OUTPOST,
 			"盖在拆掉的 Goo 据点废墟旁：Goo 再也回不来；能交货、能造农民，塔上一名弓手（射程 %d）" % int(Building.OUTPOST_TOWER.range)))
+		out.append(_cmd_entry("cut", 9, "断道", "cut", BuildManager.COST_TABLE["cut"],
+			"点土路上挖一道壕沟：怪只能绕林子走（慢、还被塔白射）。巢穴每波会把最早断的一段重新踩平——你断，它填"))
 		return out
 	if all_workers:
 		out.append(_cmd_entry("mine", 0, "采矿", "ore", {}, "去最近的矿堆采矿"))
@@ -1177,7 +1324,7 @@ func run_command(id: String) -> void:
 			_on_sword_pressed()
 		"archer":
 			_on_archer_pressed()
-		"warehouse", "smelter", "workshop", "barracks", "tower", "waterwheel", "outpost":
+		"warehouse", "smelter", "workshop", "barracks", "tower", "waterwheel", "outpost", "cut":
 			_start_placing(id)
 		"upgrade":
 			_upgrade_selected_tower()
@@ -1673,6 +1820,28 @@ func hive_spit(h: Building, kinds: Array, toward: Node2D = null) -> int:
 		_hive_told = true
 		_hud_msg("巢穴被捅了！它开始往外吐守军——先打退这一窝，再接着拆")
 	return made.size()
+
+## ---------- 巢穴孵出一窝（由 building.gd 的 _tick_brood 触发）----------
+## 和吐守军不一样：这一窝是"波次怪"，走土路往你家来，清掉才算完。
+## 意思是"别只顾着守倒计时，地图上那几个窝自己会长大"。
+func hive_brood(h: Building) -> void:
+	if game_state != "play":
+		return
+	if h == null or not is_instance_valid(h) or h.is_queued_for_deletion():
+		return
+	var wave: int = _wave_mgr.wave
+	var kinds: Array = ["goo"]
+	if wave >= 4:
+		kinds.append("runner")
+	if wave >= 7:
+		kinds.append("brute")
+	var made: Array = _wave_mgr.spawn_brood(h, kinds)
+	if made.is_empty():
+		return
+	Fx.spawn(self, "dust", h.position + Vector2(0, h.size * 0.3), {"size": h.size * 1.3, "life": 0.7})
+	if not _brood_told:
+		_brood_told = true
+		_hud_msg("巢穴孵出了一窝——它没等波次，自己沿土路摸过来了")
 
 ## M：音效开关
 func toggle_mute() -> void:
@@ -2171,7 +2340,13 @@ func _place_name(kind: String) -> String:
 			return "水车（贴着河岸，轮子朝着深水）"
 		"outpost":
 			return "前哨（盖在 Goo 据点废墟旁）"
+		"cut":
+			return "断道（点在土路上：挖一道壕沟，怪只能绕林子）"
 	return "设施"
+
+## 断道：工程师去土路上挖壕沟（走工地流程，所以能被怪打断、也能被别人接手）
+func _on_cut_pressed() -> void:
+	_start_placing("cut")
 
 func _on_sword_pressed() -> void:
 	_train_soldier(false)
@@ -2259,7 +2434,10 @@ func _selected_info_text() -> String:
 					"（%s）" % " ".join(parts) if not parts.is_empty() else "",
 					" · %d 秒后补 1 只" % ceili(rl) if rl >= 0.0 else "", economy.cost_text(c.loot())]
 			elif t.kind == "hive":
+				var bl: float = t.brood_left()
 				txt += "\n敌人老窝：每波怪从这里出来，拆掉所有巢穴就赢\n挨打会往外吐守军（最多 %d 只）——带够兵再来，别拿一两个兵磨" % Building.SPIT_MAX
+				txt += "\n正在孵：%d%%（约 %s 之后多派一窝过来——拖着不打，它自己会长大）" % [
+					int(t.brood * 100.0), Building.fmt_secs(bl) if bl >= 0.0 else "?"]
 			if t.is_processor():
 				var r: Dictionary = t.recipe()
 				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %s 秒%s\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,
@@ -2537,6 +2715,11 @@ func _draw() -> void:
 		draw_rect(rect, Color(0.6, 1.0, 0.5, 0.1))
 		draw_rect(rect, Color(0.75, 1.0, 0.6, 0.85), false, 2.0 / cam.zoom.x)
 	# ---- 放置设施的幽灵预览：半透明建筑贴图，能放 = 绿，不能放 = 红 ----
+	# 已经挖断的路段：画个缺口标记（地形本身会把壕沟画成悬崖色，这里再点明白一点）
+	for s in severed:
+		var sat: Vector2 = s["pos"]
+		draw_circle(sat, 13.0, Color(0.22, 0.15, 0.09, 0.5))
+		draw_arc(sat, 13.0, 0.0, TAU, 20, Color(0.95, 0.78, 0.45, 0.85), 1.5)
 	if _placing_kind != "":
 		var p := get_global_mouse_position()
 		var ok := _placement_ok(_placing_kind, p)
@@ -2553,7 +2736,22 @@ func _draw() -> void:
 			for r in get_tree().get_nodes_in_group("buildings"):
 				if r is Ruins and r.position.distance_to(p) < 1400.0:
 					_range_ring(r.position, Ruins.OUTPOST_R, ok)
-		if Art.has("buildings/" + _placing_kind):
+		elif _placing_kind == "cut":
+			# 断道：把要挖的那一刀直接画出来（顺着土路横切），好不好断一眼可见
+			var hit := _nearest_road(p, 40.0)
+			if not hit.is_empty():
+				var at: Vector2 = hit["at"]
+				var dv: Vector2 = hit["dir"]
+				var nv := Vector2(-dv.y, dv.x)
+				var reach: float = float(SEVER_SPAN) * Terrain.CELL
+				draw_line(at - nv * reach, at + nv * reach, Color(0.35, 0.22, 0.12, 0.55), 10.0)
+				draw_line(at - nv * reach, at + nv * reach, tint, 2.0)
+				draw_circle(at, 6.0, tint)
+			else:
+				draw_circle(p, 16.0, Color(1.0, 0.45, 0.4, 0.35))    # 没点在土路上
+		if _placing_kind == "cut":
+			pass    # 断道不画建筑剪影（下面那段是给设施用的）
+		elif Art.has("buildings/" + _placing_kind):
 			var sz: float = Building.size_of(_placing_kind)    # 和盖好后一样大
 			Art.ellipse(self, p + Vector2(0, sz * 0.38), sz * 0.95, Color(tint, 0.35))
 			Art.draw_w(self, "buildings/" + _placing_kind, p + Vector2(0, sz * 0.42), Building.art_w(_placing_kind, sz), tint,

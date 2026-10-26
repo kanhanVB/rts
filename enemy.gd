@@ -47,6 +47,7 @@ var _lane_idx := 0
 var _lane_fighting := false
 var _lane_best := INF
 var _lane_stall := 0.0
+var _lane_probe := 0.0          # 隔一会儿探一次"前方路还通不通"（土路被玩家挖断时用）
 
 func start_lane(points: Array) -> void:
 	if points.size() < 2:
@@ -341,7 +342,19 @@ func _follow_lane(delta: float) -> void:
 		_lane_idx += 1
 		_lane_best = INF
 		_lane_stall = 0.0
-	_path = PackedVector2Array()
+		_path = PackedVector2Array()    # 换路点了：上一段算的绕行路作废
+		_lane_probe = 0.0               # 新的一段要立刻探一次通不通
+	# 玩家把土路挖断了（main.cut_road_at 在地形上刷壕沟）：前方直线过不去就别硬顶，
+	# 自己算一条绕行路从林子里绕。每 0.35 秒才探一次——line_walkable 是密集采样，
+	# 每帧每只怪都调太贵
+	_lane_probe -= delta
+	if _path.is_empty() and _lane_probe <= 0.0:
+		_lane_probe = 0.35
+		var ter := Terrain.current
+		if ter != null and not ter.line_walkable(position, wp):
+			_path = _find_path(wp)
+			_path_goal = wp
+			_path_idx = 0
 	move_target = wp
 	_move_toward(wp, delta)
 

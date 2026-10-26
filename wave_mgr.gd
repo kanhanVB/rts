@@ -66,6 +66,10 @@ func _start_wave() -> void:
 		for t in fresh:
 			parts.append("%s——%s" % [Goo.TYPES[t].name, Goo.TYPES[t].tip])
 		g._hud_msg("第 %d 波来了新怪：%s" % [wave, "；".join(parts)])
+	# 巢穴把最早断的一段土路重新踩平：你断，它填。
+	# 不然挖一次沟就能让所有怪绕一辈子，这条机制就变成"一次性开关"了
+	if g != null and g.has_method("road_reclaim"):
+		g.road_reclaim()
 
 ## 场上还活着的波次怪（据点守军不算：十波打完就赢，不用去清野）
 func wave_enemies() -> Array:
@@ -115,6 +119,28 @@ func call_early() -> int:
 
 func spawning() -> bool:
 	return not _queue.is_empty()
+
+## 孵化：从**指定**巢穴派一队走土路。不算波次、不进 _queue，
+## 所以 wave_enemies() 照样把它算成"场上的怪"——它不是守军，清掉才算完
+func spawn_brood(h: Node2D, kinds: Array) -> Array:
+	var g := _game()
+	var made: Array = []
+	if g == null or h == null or not is_instance_valid(h):
+		return made
+	var rd: Array = g.road_for(h)
+	var out_dir := Vector2(0, 1)
+	if rd.size() >= 2:
+		out_dir = (rd[maxi(rd.size() - 6, 0)] - h.position).normalized()
+	for t in kinds:
+		var goo := Goo.make(t)
+		goo.position = h.position + out_dir * randf_range(60.0, 90.0) \
+			+ out_dir.orthogonal() * randf_range(-40.0, 40.0)
+		g.add_child(goo)
+		goo.max_hp *= 1.0 + 0.06 * maxf(wave - 1, 0)
+		goo.hp = goo.max_hp
+		goo.start_lane(rd)
+		made.append(goo)
+	return made
 
 ## 每只怪轮流从还活着的巢穴出来，沿那个巢穴自己的土路走
 var _spawn_i := 0

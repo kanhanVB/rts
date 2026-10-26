@@ -13,6 +13,8 @@ const COST_TABLE := {
 	"tower": Economy.COST_TOWER,
 	"waterwheel": Economy.COST_WATERWHEEL,
 	"outpost": Economy.COST_OUTPOST,
+	# 断道不是建筑：花一点木材和工期，完工不落地变成房子，而是把那段土路挖开
+	"cut": {"wood": 30},
 }
 const BRIDGE_CLEAR := 100.0    # 水车离桥至少这么远（别把桥头堵了）
 const FORD_CLEAR := 130.0      # 离浅滩中心至少这么远（浅滩是另一条过河的路）
@@ -51,6 +53,12 @@ func placement_error(pos: Vector2, kind := "") -> String:
 		return "放不下：离边界太近，往中间点"
 	if g != null and g.has_method("fog_explored") and not g.fog_explored(pos):
 		return "放不下：那里还没探过——先派人去看看"
+	# 断道反过来：必须压在土路上（别的设施都得躲着路走）。查完直接返回，
+	# 后面那一串"离建筑远一点 / 别堵路"的规则对它全都不适用
+	if kind == "cut":
+		if g == null or not g.has_method("sever_error"):
+			return ""
+		return g.sever_error(pos)
 	# 前哨只认 Goo 据点的废墟：拆了窝、在旁边扎下来，这片地盘就永远是你的
 	if kind == "outpost":
 		var ruin: Node2D = null
@@ -158,6 +166,8 @@ func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
 		site.build_time = 7.0
 	elif kind == "outpost":
 		site.build_time = 10.0    # 前哨大一圈，多敲两秒（施工期间废墟停表）
+	elif kind == "cut":
+		site.build_time = 5.0     # 挖条壕沟比盖房子快：断道要在怪走到之前抢先挖好
 	add_child(site)
 	if eng != null and is_instance_valid(eng):
 		eng.command_build(site)    # 谁下的令谁去盖
@@ -169,6 +179,20 @@ func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
 ## 工地完工回调：工程师敲满进度后调这里
 func complete_site(site: ConstructionSite) -> void:
 	if not is_instance_valid(site) or site.is_queued_for_deletion():
+		return
+	if site.kind == "cut":
+		# 断道：完工不造房子，把那段土路挖开（挖不动就退钱，别让玩家白花木材）
+		var g := _game()
+		var ok := false
+		if g != null and g.has_method("cut_road_at"):
+			ok = g.cut_road_at(site.position)
+		if ok:
+			site.queue_free()
+		else:
+			var refund: Dictionary = COST_TABLE.get("cut", {})
+			if g != null:
+				g.economy.gain(refund)
+				site.queue_free()
 		return
 	var b := add_building(site.kind, site.position, 0)
 	_hud(_place_label(site.kind))

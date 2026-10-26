@@ -1369,6 +1369,91 @@ func _light_rts_tests() -> void:
 				e.queue_free()
 		await tree.create_timer(0.25).timeout
 
+	# ---- 巢穴孵化：拖着不打，它自己会长大 ----
+	var hv2: Building = null
+	for h in m.hives:
+		if is_instance_valid(h):
+			hv2 = h
+			break
+	_check(hv2 != null, "场上还有巢穴可以试孵化")
+	if hv2 != null:
+		hv2._spit_hurt = false
+		hv2._spit_rage = false
+		hv2._spit_n = 0
+		hv2.brood = 0.0
+		var be0 := tree.get_nodes_in_group("enemies").size()
+		hv2.brood = 1.2    # 直接推到"满了"：一帧就会被 _tick_brood 收掉
+		await tree.create_timer(0.5).timeout
+		var be1 := tree.get_nodes_in_group("enemies").size()
+		_check(be1 > be0, "孵化满了会额外派一队过来（%d → %d）" % [be0, be1])
+		_check(hv2.brood < 0.3, "派完一队之后重新开始孵（%.2f）" % hv2.brood)
+		var born: Array = tree.get_nodes_in_group("enemies").filter(
+			func(e): return is_instance_valid(e) and e is Goo and not e.is_guard())
+		_check(born.size() >= 1, "孵出来的是波次怪、走土路来（%d 只）" % born.size())
+		for e in tree.get_nodes_in_group("enemies"):
+			if is_instance_valid(e):
+				e.queue_free()
+		await tree.create_timer(0.25).timeout
+
+	# ---- 断道改路：土路上挖壕沟，怪只能绕林；巢穴每波再踩平一段 ----
+	var rdA: Array = m.road()
+	_check(rdA.size() > 6, "拿到土路点列（%d 个点）可以试断道" % rdA.size())
+	var midp: Vector2 = rdA[rdA.size() / 2]
+	_check(m.sever_error(m.base.position + Vector2(0, 150)) != "", "不点在土路上断不了")
+	_check(m.sever_error(midp) == "", "点在土路上可以断")
+	# 横切方向先算好（断完之后路就换掉了，_nearest_road 可能找不到原位置）
+	var dir_road := Vector2.RIGHT
+	var hitk: Dictionary = m._nearest_road(midp, 40.0)
+	if not hitk.is_empty():
+		dir_road = hitk["dir"]
+	# 先放一只怪站在这头，让它往沟对面走
+	var walker := Goo.new()
+	walker.position = m.open_point(midp - dir_road * 60.0)
+	m.add_child(walker)
+	var cut_ok: bool = m.cut_road_at(midp)
+	_check(cut_ok, "土路挖断了")
+	_check(m.severed.size() >= 1, "记下断口位置（%d 处）" % m.severed.size())
+	# 沟挖好了才给怪派活：让它从这头直奔沟对面的路点
+	walker.start_lane([midp + dir_road * 90.0, midp - dir_road * 60.0])
+	await tree.create_timer(0.9).timeout
+	_check(walker.lane and walker._path.size() > 0,
+		"前方被壕沟切断时怪会自己算绕行路（%d 个路径点）" % walker._path.size())
+	var at_cut: Vector2 = midp
+	if m.severed.size() > 0:
+		at_cut = m.severed[m.severed.size() - 1]["pos"]
+	if m.terrain != null:
+		# 别用"沿横切方向数几个点不可走"来验：沟两头一接上树/水就停（那正是想要的），
+		# 数出来几个取决于那一带林子多密，跟"断没断"没关系。
+		# 直接验语义：断口那格不能走，而且顺着土路直着走已经过不去了
+		_check(m.terrain.solid_at(at_cut), "断口那一格不能走了")
+		_check(not m.terrain.line_walkable(at_cut - dir_road * 70.0, at_cut + dir_road * 70.0),
+			"顺着土路直着走已经过不去了（被壕沟切断）")
+		var road_now: Array = m.road()
+		if road_now.size() == rdA.size():
+			# 经典手绘图的地形网格里没有树林（树是贴图层），A* 给不出像样的绕行路，
+			# _reroute 会主动放弃——那就靠怪走到断口现场寻路兜底（上面那条已经验过）。
+			# 这里不假装通过，写清楚跳过了
+			print("  --  经典图给不出绕行路数据（地形里没林子），靠怪现场寻路：已验")
+		else:
+			var path_ok := true
+			for p in road_now:
+				if not m.terrain.walkable(int(p.x / Terrain.CELL), int(p.y / Terrain.CELL)):
+					path_ok = false
+					break
+			_check(path_ok, "重算出来的绕行路每个点都还能走（没把怪引到沟里）")
+	# 每波踩平：你断，它填
+	var sn0: int = m.severed.size()
+	var back_at: Vector2 = m.severed[0]["pos"]
+	m.road_reclaim()
+	_check(m.severed.size() == sn0 - 1, "每波开始巢穴把一段土路踩平（%d → %d）" % [sn0, m.severed.size()])
+	if m.terrain != null:
+		_check(m.terrain.walkable(int(back_at.x / Terrain.CELL), int(back_at.y / Terrain.CELL)),
+			"踩平之后断口又能走了")
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	await tree.create_timer(0.25).timeout
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
 	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；
