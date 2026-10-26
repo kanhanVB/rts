@@ -65,10 +65,10 @@ func placement_error(pos: Vector2, kind := "") -> String:
 				return "放不下：这片废墟已经在盖前哨了"
 	# 据点先查：在禁建圈里怎么挪都没用，直接告诉玩家先拆窝
 	for b in get_tree().get_nodes_in_group("buildings"):
-		if b.kind == "camp" and b.team != 0 and pos.distance_to(b.position) < Camp.NO_BUILD_R:
+		if is_instance_valid(b) and b.kind == "camp" and b.team != 0 and pos.distance_to(b.position) < Camp.NO_BUILD_R:
 			return "放不下：离 Goo 据点太近——先带兵把窝拆了"
 	for b in get_tree().get_nodes_in_group("buildings"):
-		if pos.distance_to(b.position) < b.size + 40.0:
+		if is_instance_valid(b) and pos.distance_to(b.position) < b.size + 40.0:
 			return "放不下：离建筑太近，挪远一点"
 	for s in get_tree().get_nodes_in_group("sites"):
 		if is_instance_valid(s) and pos.distance_to(s.position) < s.size + 30.0:

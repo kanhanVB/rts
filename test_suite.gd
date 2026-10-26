@@ -1360,8 +1360,10 @@ func _light_rts_tests() -> void:
 		var nh2 := tree.get_nodes_in_group("enemies").size()
 		hvx.take_damage(5.0, null)
 		await tree.create_timer(0.25).timeout
-		_check(tree.get_nodes_in_group("enemies").size() == nh2,
-			"吐满 %d 只就不再吐（磨血刷不出无尽守军）" % Building.SPIT_MAX)
+		# 只验"不再增加"：这 0.25 秒里要是有别的怪被塔射死、被兵打死，数量会变少。
+		# 用 == 等于要求场上别的事情一点都不许发生，那是不相干的偶发红
+		var nh3 := tree.get_nodes_in_group("enemies").size()
+		_check(nh3 <= nh2, "吐满 %d 只就不再吐（磨血刷不出无尽守军，%d → %d）" % [Building.SPIT_MAX, nh2, nh3])
 		for e in tree.get_nodes_in_group("enemies"):
 			if is_instance_valid(e):
 				e.queue_free()
@@ -2530,9 +2532,11 @@ func _camp_tests() -> void:
 	for g in gs:
 		g.hp = g.max_hp * 0.3
 	var back := false
+	# 容差 70 不是 50：四只守军挤在同一个岗位上，分离逻辑会互相推开——
+	# 实测里最远那只常在 40~48 之间打转，卡 50 就成了"偶尔红一条"（余量只剩 2px）
 	for i in 40:
 		await m.get_tree().create_timer(0.25).timeout
-		back = gs.all(func(g): return is_instance_valid(g) and not is_instance_valid(g.attack_target) and g.position.distance_to(g.home) < 50.0)
+		back = gs.all(func(g): return is_instance_valid(g) and not is_instance_valid(g.attack_target) and g.position.distance_to(g.home) < 70.0)
 		if back:
 			break
 	_check(back, "没人可咬了守军走回岗位（离岗位 %s）" % [gs.map(func(g): return int(g.position.distance_to(g.home)) if is_instance_valid(g) else -1)])
@@ -3743,3 +3747,6 @@ func _check(cond: bool, msg: String) -> void:
 	else:
 		m._fail += 1
 		print("  FAIL- " + msg)
+		# 全量跑偶发挂一条的时候，日志里只有文案、没有行号，翻起来得靠猜。
+		# 失败才打回溯（通过时零开销），直接定位到是哪一行断言
+		print_stack()
