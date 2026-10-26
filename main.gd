@@ -106,6 +106,7 @@ func _ready() -> void:
 	speed_i = 0
 	Tech.reset()    # 科技是全局静态的：开新局清空
 	Relic.reset()   # 遗物也是
+	Goo.lane_hazard = false    # 断道标记也是静态的：新一局还没有沟
 	Building.alarm_on = false
 	sfx = Sfx.new()
 	add_child(sfx)
@@ -529,11 +530,22 @@ func cut_road_at(pos: Vector2) -> bool:
 	var cells: Array = _dig_trench(at, dir)
 	if cells.is_empty():
 		return false
+	# 挖完先验一件事：怪还能不能从巢穴走到基地？走不到就填回去——
+	# 在自家门口挖断、两边又都是障碍的话，会把唯一的通路彻底封死，
+	# 而 _follow_lane 找不到路时会直线走，直接穿模穿过壕沟
+	var hh: Node2D = hives[hive_i] if hive_i >= 0 and hive_i < hives.size() else null
+	if hh != null and is_instance_valid(hh) and base != null:
+		var probe := terrain.find_path(hh.position, base.position)
+		if probe.is_empty():
+			_restore_cells(cells)
+			_hud_msg("这段断了就没路走了（怪只能穿墙）——换个地方挖，或者先把旁边的树清一清")
+			return false
 	# 顺手把这条路的数据也换成绕行版：新出生的怪直接就按新路走，不用现场算。
 	# 换不了也没关系——已经在上面的怪走到断口会自己寻路绕过去（见 enemy._follow_lane），
 	# 所以这里不做回滚：沟挖出来了就是挖出来了
 	_reroute(hive_i)
 	severed.append({"cells": cells, "hive": hive_i, "pos": at})
+	Goo.lane_hazard = true    # 有沟了：怪从现在起要每 0.35 秒探一次前方通不通
 	while severed.size() > MAX_SEVER:
 		road_reclaim(true)
 	if not _sever_told:
@@ -608,6 +620,7 @@ func road_reclaim(quiet := false) -> bool:
 	var s: Dictionary = severed.pop_front()
 	_restore_cells(s["cells"])
 	_reroute(int(s["hive"]))
+	Goo.lane_hazard = not severed.is_empty()    # 全填平了就把探测关掉
 	if not quiet:
 		_hud_msg("巢穴把断掉的那段土路重新踩平了——路口又通了")
 	return true
@@ -2436,8 +2449,13 @@ func _selected_info_text() -> String:
 			elif t.kind == "hive":
 				var bl: float = t.brood_left()
 				txt += "\n敌人老窝：每波怪从这里出来，拆掉所有巢穴就赢\n挨打会往外吐守军（最多 %d 只）——带够兵再来，别拿一两个兵磨" % Building.SPIT_MAX
-				txt += "\n正在孵：%d%%（约 %s 之后多派一窝过来——拖着不打，它自己会长大）" % [
-					int(t.brood * 100.0), Building.fmt_secs(bl) if bl >= 0.0 else "?"]
+				# 十波打完之后孵化就停了（不然孵出来的怪算"场上的怪"，胜利判定永远清不空）。
+				# 这里得跟着改口：还显示"正在孵 X%"就是在骗人，玩家会一直等一窝不会来的怪
+				if _wave_mgr.wave >= WaveManager.MAX_WAVES:
+					txt += "\n十波打完了，它不再孵了——现在只是等着被拆"
+				else:
+					txt += "\n正在孵：%d%%（约 %s 之后多派一窝过来——拖着不打，它自己会长大）" % [
+						int(t.brood * 100.0), Building.fmt_secs(bl) if bl >= 0.0 else "?"]
 			if t.is_processor():
 				var r: Dictionary = t.recipe()
 				txt = "%s   血量 %.0f/%.0f · %s：%d %s → %d %s / %s 秒%s\n%s · 自取%s" % [t.display_name, t.hp, t.max_hp, r.verb,

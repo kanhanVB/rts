@@ -191,6 +191,16 @@ func _tick_brood(delta: float) -> void:
 	var wm = g.get("_wave_mgr")
 	if wm != null:
 		wave = int(wm.get("wave"))
+	# 十波打完之后老窝消停：孵出来的怪也算"场上的怪"，会一直拖住"十波全清"的胜利判定，
+	# 玩家把最后一波清干净了却赢不了，只能回头去拆巢穴——那不是这条机制的本意
+	if wave >= WaveManager.MAX_WAVES:
+		# 顺手把没孵完的进度清掉：不清的话头顶那条紫红条会永远冻在半路，
+		# 玩家以为它在憋大招，其实它已经不孵了
+		if brood != 0.0:
+			brood = 0.0
+			_brood_warned = false
+			queue_redraw()
+		return
 	var span: float = maxf(BROOD_MIN, BROOD_T - float(wave) * 5.0)
 	span *= lerpf(0.55, 1.0, clampf(hp / max_hp, 0.0, 1.0))    # 残血 = 孵得更急
 	brood = minf(1.0, brood + delta / span)

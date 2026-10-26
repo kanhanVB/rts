@@ -48,6 +48,9 @@ var _lane_fighting := false
 var _lane_best := INF
 var _lane_stall := 0.0
 var _lane_probe := 0.0          # 隔一会儿探一次"前方路还通不通"（土路被玩家挖断时用）
+## 场上有没有被挖断的土路（main.cut_road_at / road_reclaim 维护）。
+## 没人断过的时候这个探测一点用都没有，关掉能省下"每只怪每 0.35 秒一次密集采样"
+static var lane_hazard := false
 
 func start_lane(points: Array) -> void:
 	if points.size() < 2:
@@ -348,7 +351,7 @@ func _follow_lane(delta: float) -> void:
 	# 自己算一条绕行路从林子里绕。每 0.35 秒才探一次——line_walkable 是密集采样，
 	# 每帧每只怪都调太贵
 	_lane_probe -= delta
-	if _path.is_empty() and _lane_probe <= 0.0:
+	if lane_hazard and _path.is_empty() and _lane_probe <= 0.0:
 		_lane_probe = 0.35
 		var ter := Terrain.current
 		if ter != null and not ter.line_walkable(position, wp):
