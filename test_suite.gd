@@ -1692,25 +1692,40 @@ func _light_rts_tests() -> void:
 	_check(m._hud_msg_label.text == "工地已放置", "日常提示之间照旧互相顶（别把优先级做成一堵墙）")
 	m._hud_msg_t = 0.0
 
-	# ---- T：镜头跳到下一只怪 ----
+	# ---- 顶栏「剩 N」是按钮：点一下 = 镜头跳到下一只怪 ----
+	# 玩家的规矩：不给命令配快捷键，一律点按钮 / 点文字（唯一例外是「撤退」的 W）。
+	# 所以这里走的是"点文字"这条路，不是按字母键
 	# 不放大不行：经典图最小缩放下视野正好铺满地图，镜头被 _clamp_camera 钉在中心，跳没跳看不出来
 	m._zoom_camera(2.0)
 	var far := Goo.new()
 	far.position = m.open_point(Vector2(m.W * 0.35, m.H * 0.3))
 	m.add_child(far)
 	await tree.create_timer(0.2).timeout
+	_check(m.wave_label.mouse_filter != Control.MOUSE_FILTER_IGNORE and
+		m.wave_label.mouse_default_cursor_shape == Control.CURSOR_POINTING_HAND,
+		"顶栏波次那行字可以点（鼠标是手型）")
 	var cam_b: Vector2 = m.cam.position
-	var seeked: bool = m.seek_enemy()
-	_check(seeked and m.cam.position.distance_to(cam_b) > 40.0,
-		"按 T 把镜头拽到怪身上（%d,%d → %d,%d）" % [cam_b.x, cam_b.y, m.cam.position.x, m.cam.position.y])
+	var label_click := InputEventMouseButton.new()
+	label_click.button_index = MOUSE_BUTTON_LEFT
+	label_click.pressed = true
+	m.wave_label.gui_input.emit(label_click)
+	_check(m.cam.position.distance_to(cam_b) > 40.0,
+		"点顶栏「剩 N」= 镜头拽到怪身上（%d,%d → %d,%d）" % [cam_b.x, cam_b.y, m.cam.position.x, m.cam.position.y])
 	# center_on 会加一个"避开底栏"的 y 偏移，所以别要求严丝合缝
 	_check(m.cam.position.distance_to(far.position) < 260.0,
 		"跳过去是冲着那只怪去的（离它 %.0f px）" % m.cam.position.distance_to(far.position))
+	# 顺手守一条：真按 T 不该有任何反应（别再往这儿塞快捷键）
+	var t_key := InputEventKey.new()
+	t_key.keycode = KEY_T
+	t_key.pressed = true
+	var cam_t: Vector2 = m.cam.position
+	m._on_key(t_key)
+	_check(m.cam.position.distance_to(cam_t) < 1.0, "按 T 没有任何反应（找怪不配快捷键）")
 	far.queue_free()
 	await tree.create_timer(0.25).timeout
 	m._hud_msg_t = 0.0
 	_check(not m.seek_enemy() and m._hud_msg_label.text.contains("没有敌人"),
-		"场上没怪时按 T 会说句话，不静默失败")
+		"场上没怪时点它会说句话，不静默失败")
 
 	# ---- 顶栏「剩 N」= 还没放出来的 + 场上活着的 ----
 	var g4 := Goo.new()

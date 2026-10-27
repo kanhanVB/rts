@@ -231,6 +231,15 @@ func _build_top_bar() -> void:
 	main.wave_label.add_theme_color_override("font_color", Color(1.0, 0.93, 0.6))
 	main.wave_label.add_theme_color_override("font_outline_color", Color(0.3, 0.05, 0.03))
 	main.wave_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# 顶栏这行字是**可以点的**：点一下 = 镜头跳到下一只怪（连点绕一圈）。
+	# 这游戏不给命令配快捷键，所以"找怪"做成可点文字，不占键位。
+	# 鼠标变小手 = 唯一的"这里能点"提示，不然没人会去点一行字
+	main.wave_label.mouse_filter = Control.MOUSE_FILTER_PASS
+	main.wave_label.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	main.wave_label.tooltip_text = "点一下 = 镜头跳到下一只怪（场上剩几只也写在这儿）"
+	main.wave_label.gui_input.connect(func(ev: InputEvent):
+		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+			main.seek_enemy())
 	wv.add_child(main.wave_label)
 	_wave_bar = ProgressBar.new()
 	_wave_bar.custom_minimum_size = Vector2(200, 5)
@@ -630,7 +639,7 @@ func _build_help() -> void:
   选中基地或兵营，右键地面 = 集结点
   移动镜头：鼠标推到画面边 / 方向键 / 中键或右键拖着走
   空格 = 回选中；什么都没选的时候 = 回基地
-  顶栏的「剩 N」= 这一波还剩几只 · T = 镜头跳到下一只
+  顶栏的「剩 N」= 这一波还剩几只，**点它镜头就跳到下一只**
   基地/前哨在画面外挨打：屏幕边上有红箭头，**点它就能飞过去**
   命令都点底栏按钮，鼠标悬停有说明
 

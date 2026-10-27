@@ -933,7 +933,7 @@ func _hud_msg(text: String, prio := 0) -> void:
 ## ================================ 输入（帝国时代式） ================================
 ## 左键：点选 / 拖框；Shift+左键 加减选；双击或 Ctrl+左键 = 选屏幕内同类
 ## 右键：智能指令（移动 / 采集 / 攻击 / 交货）；选中基地/兵营右键 = 集结点；Shift+右键 = 排路点
-## 空格 镜头回到选中（**什么都没选的时候 = 回基地**）· P 暂停 · N 叫波 · B 警钟 · M 静音 · Del 删除 · Esc 取消/取消选中 · F1 说明 · T 找下一只怪
+## 空格 镜头回到选中（**什么都没选的时候 = 回基地**）· P 暂停 · N 叫波 · B 警钟 · M 静音 · Del 删除 · Esc 取消/取消选中 · F1 说明
 ## 数字 选队（Ctrl 存队 / Shift 并队，连按两下跳镜头）· 中键拖动平移 · **右键拖出 10px 也是平移**（不派兵）
 ## 点屏幕边上的受袭箭头 = 镜头飞过去（箭头只在那边在画面外时才画）
 ## 命令卡不配热键（一律点按钮）——唯一例外是士兵的「撤退」挂了 W
@@ -1098,8 +1098,6 @@ func _on_key(event: InputEventKey) -> void:
 		ring_bell()
 	elif k == KEY_M:
 		toggle_mute()
-	elif k == KEY_T:
-		seek_enemy()
 	elif k == KEY_SPACE:
 		# 选着东西 = 镜头跳过去；什么都没选 = 回基地。
 		# 以前空选按空格毫无反应，"找不到家在哪了"只能靠双击小地图
@@ -1301,19 +1299,20 @@ func _center_on_selection() -> void:
 		c += u.position
 	center_on(c / list.size())
 
-## T：镜头跳到下一只场上的怪（按几次绕一圈）。
+## 镜头跳到下一只场上的怪（连点绕一圈）。
 ## 收尾阶段"还剩两三只躲哪儿了"是最烦的事——小地图红点只有几个像素，
-## 受袭箭头只指"家里挨打"，这个键把画面直接拽到怪脸上
+## 受袭箭头只指"家里挨打"。入口是顶栏那个「剩 N」可点文字，**不配快捷键**：
+## 这游戏的规矩是命令一律点按钮，只有「撤退」例外挂了 W
 var _seek_i := 0
 
 func seek_enemy() -> bool:
 	var list: Array = _wave_mgr.wave_enemies().filter(
 		func(e): return is_instance_valid(e) and not e.dead)
 	if list.is_empty():
-		_hud_msg("场上没有敌人了——要接着打就按 N 提前叫波", 1)
+		_hud_msg("场上没有敌人了——要接着打就点顶栏的「叫波」", 1)
 		return false
 	# 按 y 排一遍再循环：wave_enemies() 返回的是节点顺序，死了又生会乱跳，
-	# 排一下之后连按 T 是从上往下扫，不会来回打转
+	# 排一下之后连着点是从上往下扫，不会来回打转
 	list.sort_custom(func(a, b): return a.position.y < b.position.y)
 	_seek_i = _seek_i % list.size()
 	center_on(list[_seek_i].position)
@@ -2698,7 +2697,7 @@ func _update_labels() -> void:
 		# 顶栏写"清完即胜"，但还剩几只得自己数小地图上的红点——补上数字，少了才知道该去找
 		var left := _wave_mgr.remaining()
 		if left > 0:
-			wave_label.text = "最后一波已出 · 还剩 %d 只（按 T 找）" % left
+			wave_label.text = "最后一波已出 · 还剩 %d 只（点这里找）" % left
 		else:
 			wave_label.text = "最后一波已出，清完即胜"
 	else:

@@ -142,6 +142,9 @@ def main():
         elif a == "--key":
             steps.append(("key", int(args[i + 1])))
             i += 2
+        elif a == "--click":
+            steps.append(("click", [int(v) for v in args[i + 1].split(",")]))
+            i += 2
         elif a == "--holdbox":
             steps.append(("hold", [int(v) for v in args[i + 1].split(",")]))
             i += 2
@@ -170,6 +173,9 @@ def main():
             if kind == "box":
                 drag(h, val[0], val[1], val[2], val[3])
                 time.sleep(1.0)
+            elif kind == "click":
+                click(h, val[0], val[1])
+                time.sleep(0.6)
             elif kind == "hold":
                 drag_hold(h, val[0], val[1], val[2], val[3])
                 time.sleep(0.3)
