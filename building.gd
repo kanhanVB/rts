@@ -111,6 +111,67 @@ func take_damage(amount: float, from: Node2D = null) -> void:
 		queue_free()
 		release_garrison()    # 房子塌了：躲着的人跑出来（警钟还响着就去别处躲）
 
+## ---------- 巢穴脾气：每局每窝抽一种 ----------
+## 两座巢穴以前一模一样，所以"先打哪个"根本没有答案——反正一样，挑近的就行。
+## 现在每窝抽一个脾气，开局扫一眼地图就知道哪窝能硬啃、哪窝拖不得：
+## 目标优先级从"固定的最优解"变成"每局一个新问题"。
+## 全部是被动效果，**不新增任何按钮**（这条机制唯一的设计要求：只加抉择，不加操作）。
+const PERSONAS := {
+	"thick": {"name": "厚皮", "tip": "血量 1.6 倍——最硬的一窝，留到最后再啃", "color": Color(0.72, 0.7, 0.66)},
+	"breeder": {"name": "猛生", "tip": "孵得快 70%——放着不管，它会一直额外派人过来", "color": Color(0.85, 0.45, 0.85)},
+	"warlord": {"name": "好战", "tip": "守军上限翻倍、还更硬——别拿一两个兵去磨", "color": Color(0.95, 0.45, 0.4)},
+	"digger": {"name": "掘地", "tip": "每波多踩平一段断道——对它断道要断两次", "color": Color(0.85, 0.66, 0.35)},
+	"swift": {"name": "疾行", "tip": "这窝的怪移速 +25%——路上留给你的时间更短", "color": Color(0.5, 0.82, 0.95)},
+}
+const PERSONA_IDS := ["thick", "breeder", "warlord", "digger", "swift"]
+const PERSONA_THICK_HP := 1.6          # 厚皮：血上限 ×1.6
+const PERSONA_BREED_SPAN := 0.6        # 猛生：孵化时长 ×0.6（等价于快 67%）
+const PERSONA_WARLORD_SPIT := 2        # 好战：守军上限 ×2
+const PERSONA_WARLORD_HP := 1.2        #       守军血量 ×1.2
+const PERSONA_SWIFT_SPEED := 1.25      # 疾行：这窝的怪移速 ×1.25
+var persona := ""
+
+static func roll_persona() -> String:
+	return PERSONA_IDS[randi() % PERSONA_IDS.size()]
+
+## 抽一个脾气并立刻生效（建巢穴时调）
+func roll_persona_now() -> void:
+	persona = roll_persona()
+	apply_persona()
+
+## 把 persona 的即时效果落到属性上。
+## 单独拆出来是为了能测：只有"建的时候乘一次"的那部分（厚皮的血上限）写在这里，
+## 其余几条（孵化快、守军上限、移速）都是查询时算的，见下面那几个 *_mult / spit_max
+func apply_persona() -> void:
+	if persona == "thick":
+		max_hp *= PERSONA_THICK_HP
+		hp = max_hp
+
+func persona_name() -> String:
+	return String(PERSONAS[persona]["name"]) if PERSONAS.has(persona) else ""
+
+func persona_tip() -> String:
+	return String(PERSONAS[persona]["tip"]) if PERSONAS.has(persona) else ""
+
+func persona_color() -> Color:
+	return PERSONAS[persona]["color"] if PERSONAS.has(persona) else Color(0.8, 0.8, 0.8)
+
+## 这座巢穴最多吐这么多守军（好战翻倍）
+func spit_max() -> int:
+	return SPIT_MAX * (PERSONA_WARLORD_SPIT if persona == "warlord" else 1)
+
+## 吐出来的守军血量倍率
+func guard_hp_mult() -> float:
+	return PERSONA_WARLORD_HP if persona == "warlord" else 1.0
+
+## 孵化时长倍率（<1 = 更快）
+func brood_span_mult() -> float:
+	return PERSONA_BREED_SPAN if persona == "breeder" else 1.0
+
+## 这窝沿土路派出来的怪移速倍率
+func lane_speed_mult() -> float:
+	return PERSONA_SWIFT_SPEED if persona == "swift" else 1.0
+
 ## ---------- 巢穴：被捅了会吐守军 ----------
 ## 以前拆巢穴基本是白给：一队兵围上去砍 900 血，中间零阻力，"太容易拆了"。
 ## 现在巢穴一挨打就开始往外吐怪，三段节奏：
@@ -129,7 +190,8 @@ var _spit_n := 0                # 这一座已经吐了几只
 var _spit_cd := 0.0             # 下一只还要等多久
 
 func _spit_check(from: Node2D) -> void:
-	if _spit_n >= SPIT_MAX:
+	var cap := spit_max()    # 好战的窝上限翻倍
+	if _spit_n >= cap:
 		return
 	var batch: Array = []
 	if not _spit_hurt:
@@ -146,7 +208,7 @@ func _spit_check(from: Node2D) -> void:
 		return
 	# 名额不够时从前面砍，把尾部的岩壳留下：垂死反扑那一窝如果被砍掉岩壳，
 	# 就只剩两只软怪，"反扑"等于没反
-	while _spit_n + batch.size() > SPIT_MAX:
+	while _spit_n + batch.size() > cap:
 		batch.pop_front()
 	if batch.is_empty():
 		return
@@ -203,6 +265,7 @@ func _tick_brood(delta: float) -> void:
 		return
 	var span: float = maxf(BROOD_MIN, BROOD_T - float(wave) * 5.0)
 	span *= lerpf(0.55, 1.0, clampf(hp / max_hp, 0.0, 1.0))    # 残血 = 孵得更急
+	span *= brood_span_mult()    # 猛生的窝孵得快（信息栏的 ETA 也用同一个倍率，别一边快一边报慢）
 	brood = minf(1.0, brood + delta / span)
 	if int(brood * 100.0) != int(_brood_drawn * 100.0):
 		_brood_drawn = brood
@@ -228,6 +291,7 @@ func brood_left() -> float:
 		wave = int(wm.get("wave"))
 	var span: float = maxf(BROOD_MIN, BROOD_T - float(wave) * 5.0)
 	span *= lerpf(0.55, 1.0, clampf(hp / max_hp, 0.0, 1.0))
+	span *= brood_span_mult()
 	return maxf(0.0, (1.0 - brood) * span)
 
 ## 城堡自带箭塔（王国保卫战式）：开局没兵也能顶住零星几只 Goo，但挡不住大波
@@ -564,6 +628,10 @@ func _art_draw() -> bool:
 		h = Art.draw_w(self, key, foot + Vector2(shake, 0), w, mod)
 	if hp < max_hp or selected:
 		Art.hp_bar(self, foot - Vector2(0, h + 6.0), size * 0.7, hp / max_hp, team == 0, 4.0)
+	# 巢穴的脾气牌子 + 孵化条：**必须在这儿也画一遍**。
+	# 贴图版在下面 _draw 开头就 return 了，只写在手绘那段等于根本没画——
+	# 上一轮的孵化条就是这么"加完看不见"的，别再用 size 猜锚点，按画出来的高度 h 算
+	_hive_overlay(foot.y - h - 6.0)
 	var top := foot - Vector2(0, h + (12.0 if hp < max_hp or selected else 4.0))
 	if not sheltered.is_empty():
 		_shelter_badge(top)
@@ -604,15 +672,23 @@ func _draw() -> void:
 	if hp < max_hp:
 		draw_rect(Rect2(-size * 0.5, -size * 0.74, size, 6.0), Color(0, 0, 0, 0.5))
 		draw_rect(Rect2(-size * 0.5, -size * 0.74, size * hp / max_hp, 6.0), Color(0.3, 0.9, 0.3))
-	# 巢穴孵化条（紫红色，在血条上面一条）：涨满就多派一窝过来。
-	# 不画的话玩家完全不知道它在"长大"，只会在挨打时莫名其妙多出一队怪
-	if kind == "hive" and team == 1 and brood > 0.12:
-		var by: float = -size * 0.74 - 9.0
-		draw_rect(Rect2(-size * 0.5, by, size, 5.0), Color(0, 0, 0, 0.5))
-		draw_rect(Rect2(-size * 0.5, by, size * clampf(brood, 0.0, 1.0), 5.0),
-			Color(0.85, 0.35, 0.85) if brood < BROOD_WARN else Color(0.95, 0.25, 0.3))
+	_hive_overlay(-size * 0.74)
 	if is_processor():
 		_proc_draw(Vector2(0, size * 0.42), size * 1.1)
+
+## 巢穴专属的额外信息层：脾气牌子（厚皮/猛生/…） + 孵化条。
+## 两条绘制路径（贴图 / 手绘小人）的"血条上沿"在哪完全不一样——
+## 贴图版按画出来的高度 h 算，手绘版按 size 定坐标，所以这里只收一个 hp_top，
+## 内部绝不自算 size：上一轮的孵化条就是只写进了手绘分支，贴图版一辈子没画出来
+func _hive_overlay(hp_top: float) -> void:
+	if kind != "hive" or team != 1:
+		return
+	if persona != "":
+		Art.text(self, Vector2(0, hp_top - 16.0), persona_name(), 12, persona_color())
+	if brood > 0.12:
+		draw_rect(Rect2(-size * 0.5, hp_top - 9.0, size, 5.0), Color(0, 0, 0, 0.5))
+		draw_rect(Rect2(-size * 0.5, hp_top - 9.0, size * clampf(brood, 0.0, 1.0), 5.0),
+			Color(0.85, 0.35, 0.85) if brood < BROOD_WARN else Color(0.95, 0.25, 0.3))
 
 ## ---------- 通用小件 ----------
 ## 填充多边形 + 一体厚描边

@@ -1821,7 +1821,8 @@ func hive_spit(h: Building, kinds: Array, toward: Node2D = null) -> int:
 		add_child(goo)
 		if _wave_mgr.wave > 1:
 			goo.max_hp *= 1.0 + 0.06 * float(_wave_mgr.wave - 1)
-			goo.hp = goo.max_hp
+		goo.max_hp *= h.guard_hp_mult()    # 好战的窝：守军更硬（第 1 波也要吃到，所以放在 if 外面）
+		goo.hp = goo.max_hp
 		Fx.spawn(self, "dust", at + Vector2(0, 6), {"size": 34.0, "life": 0.55})
 		made.append(goo)
 	# 谁捅的窝就扑谁
@@ -2448,7 +2449,10 @@ func _selected_info_text() -> String:
 					" · %d 秒后补 1 只" % ceili(rl) if rl >= 0.0 else "", economy.cost_text(c.loot())]
 			elif t.kind == "hive":
 				var bl: float = t.brood_left()
-				txt += "\n敌人老窝：每波怪从这里出来，拆掉所有巢穴就赢\n挨打会往外吐守军（最多 %d 只）——带够兵再来，别拿一两个兵磨" % Building.SPIT_MAX
+				# 脾气放最前面：这是玩家挑"先拆哪个"的唯一依据，得第一眼看到
+				if t.persona != "":
+					txt += "\n脾气：%s——%s" % [t.persona_name(), t.persona_tip()]
+				txt += "\n敌人老窝：每波怪从这里出来，拆掉所有巢穴就赢\n挨打会往外吐守军（最多 %d 只）——带够兵再来，别拿一两个兵磨" % t.spit_max()
 				# 十波打完之后孵化就停了（不然孵出来的怪算"场上的怪"，胜利判定永远清不空）。
 				# 这里得跟着改口：还显示"正在孵 X%"就是在骗人，玩家会一直等一窝不会来的怪
 				if _wave_mgr.wave >= WaveManager.MAX_WAVES:
@@ -2499,6 +2503,9 @@ func _selected_info_text() -> String:
 			var ptxt := s.post_text()
 			if ptxt != "":
 				line += "\n" + ptxt
+			# 老兵：杀敌攒出来的星（数值已经乘上去了，这里只说"他是谁、还差几只升星"）
+			if s.rank > 0:
+				line += " · " + s.rank_text()
 			if not s.is_ranged and is_instance_valid(s.pin_target):
 				line += " · 钉住%s（1v1，别人不抢）" % s.pin_target.get("display_name")
 			elif s.is_ranged:

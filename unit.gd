@@ -326,10 +326,20 @@ func take_damage(amount: float, from: Node2D = null) -> void:
 	_hurt_until = Time.get_ticks_msec() + 140
 	if hp <= 0.0:
 		dead = true
+		_credit_killer(from)
 		_death_fx()
 		_report_death()
 		died.emit(self)
 		queue_free()
+
+## 击杀记账（老兵成长用）：只认**兵的最后一刀**。
+## 箭塔、基地、据点守军打死的都不算——那些是"设施的战果"，不是哪个人的战功。
+## 判断 team 不相等是为了防自己人误伤算账（也防兵打自家建筑时莫名其妙涨星）
+func _credit_killer(from) -> void:
+	if from == null or not is_instance_valid(from):
+		return
+	if from is Soldier and from != self and from.team != team:
+		from.credit_kill()
 
 ## 直接删掉（Del 键）：照常走死亡流程，编队/统计都会跟着更新
 func kill() -> void:
@@ -385,6 +395,7 @@ func _draw() -> void:
 	var key := _art_key()
 	if key != "" and Art.has("units/%s_idle" % key):
 		_art_draw(key)
+		_badge_draw()
 		return
 	_shadow()
 	for fx in _attack_fx:
@@ -396,6 +407,12 @@ func _draw() -> void:
 		draw_rect(Rect2(-w / 2.0, -radius - 10.0, w, 4.0), Color(0, 0, 0, 0.5))
 		draw_rect(Rect2(-w / 2.0, -radius - 10.0, w * hp / max_hp, 4.0), Color(0.3, 0.9, 0.3))
 	_body_draw()
+	_badge_draw()
+
+## 子类覆写：画在身体之上、两条绘制路径（贴图 / 手绘小人）都会走到的小挂件。
+## 老兵星级就挂这儿——只塞进 _body_draw 的话，有贴图的兵根本画不出来
+func _badge_draw() -> void:
+	pass
 
 ## 子类覆写：画自己的身体
 func _body_draw() -> void:

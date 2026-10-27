@@ -1353,8 +1353,10 @@ func _light_rts_tests() -> void:
 		_check(spit0.size() >= 3, "吐出来的是守军（守着巢穴不走土路，%d 只）" % spit0.size())
 		var wv0: Array = m._wave_mgr.wave_enemies()
 		_check(spit0.all(func(e): return not wv0.has(e)), "守军不算波次怪（拆完巢穴照样直接赢，不用清场）")
-		# 上限：磨血也刷不出无尽守军
-		hvx._spit_n = Building.SPIT_MAX
+		# 上限：磨血也刷不出无尽守军。
+		# 用 hvx.spit_max() 而不是 Building.SPIT_MAX——巢穴有脾气，抽到「好战」上限就翻倍，
+		# 写死常量会让这条断言随开局随机变红（真的红过一次）
+		hvx._spit_n = hvx.spit_max()
 		hvx.hp = hvx.max_hp
 		hvx._spit_cd = 0.0
 		var nh2 := tree.get_nodes_in_group("enemies").size()
@@ -1363,7 +1365,7 @@ func _light_rts_tests() -> void:
 		# 只验"不再增加"：这 0.25 秒里要是有别的怪被塔射死、被兵打死，数量会变少。
 		# 用 == 等于要求场上别的事情一点都不许发生，那是不相干的偶发红
 		var nh3 := tree.get_nodes_in_group("enemies").size()
-		_check(nh3 <= nh2, "吐满 %d 只就不再吐（磨血刷不出无尽守军，%d → %d）" % [Building.SPIT_MAX, nh2, nh3])
+		_check(nh3 <= nh2, "吐满 %d 只就不再吐（磨血刷不出无尽守军，%d → %d）" % [hvx.spit_max(), nh2, nh3])
 		for e in tree.get_nodes_in_group("enemies"):
 			if is_instance_valid(e):
 				e.queue_free()
@@ -1449,6 +1451,131 @@ func _light_rts_tests() -> void:
 	if m.terrain != null:
 		_check(m.terrain.walkable(int(back_at.x / Terrain.CELL), int(back_at.y / Terrain.CELL)),
 			"踩平之后断口又能走了")
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	await tree.create_timer(0.25).timeout
+
+	# ---- 老兵：杀敌攒星，死了归零 ----
+	# 以前兵只有"死/活"，按 W 撤退纯粹是止损——撤下来的老兵和新兵一模一样，
+	# 所以"保住这个兵"没有意义。现在能攒星，撤退才变成投资
+	var vet := Soldier.new()
+	vet.setup(false)
+	vet.position = m.open_point(Vector2(520, 520))
+	m.add_child(vet)
+	var atk0 := vet.attack_damage
+	var vet_hp0 := vet.max_hp
+	_check(vet.rank == 0 and vet.kills == 0, "出厂就是新兵（0 星 0 杀）")
+	var first_rank := int(Soldier.RANK_KILLS[0])
+	for i in first_rank - 1:
+		var snack := Goo.new()
+		snack.position = m.open_point(vet.position + Vector2(28, 0))
+		m.add_child(snack)
+		snack.take_damage(999.0, vet)    # 只认兵的最后一刀
+	await tree.create_timer(0.2).timeout
+	_check(vet.rank == 0, "差一只还不升星（%d 杀）" % vet.kills)
+	var lastkill := Goo.new()
+	lastkill.position = m.open_point(vet.position + Vector2(28, 0))
+	m.add_child(lastkill)
+	lastkill.take_damage(999.0, vet)
+	await tree.create_timer(0.2).timeout
+	_check(vet.rank == 1, "攒够 %d 杀升 1 星（%d 杀）" % [first_rank, vet.kills])
+	_check(vet.attack_damage > atk0 and vet.max_hp > vet_hp0,
+		"升星真的长本事（攻击 %.0f→%.0f · 血 %.0f→%.0f）" % [atk0, vet.attack_damage, vet_hp0, vet.max_hp])
+	_check(vet.hp >= vet.max_hp - 0.01, "升星当场把涨的那截血补上（%.0f/%.0f）" % [vet.hp, vet.max_hp])
+	# 封顶：一直杀也不会超过三星（不然老兵能滚成怪物）
+	for i in 60:
+		vet.credit_kill()
+	_check(vet.rank == Soldier.RANK_MAX, "星级封顶 %d 星（%d 杀也还是 %d 星）" % [Soldier.RANK_MAX, vet.kills, vet.rank])
+	_check(vet.attack_damage <= atk0 * (1.0 + Soldier.RANK_BONUS * float(Soldier.RANK_MAX)) + 0.01,
+		"三星的攻击倍率就是上限（%.1f 倍）" % (vet.attack_damage / maxf(atk0, 0.01)))
+	# 击杀记账只认兵：怪打死的怪不算到谁头上（这里用"没有 from"模拟）
+	var orphan := Goo.new()
+	orphan.position = m.open_point(vet.position + Vector2(40, 0))
+	m.add_child(orphan)
+	var vk0 := vet.kills
+	orphan.take_damage(999.0, null)
+	await tree.create_timer(0.15).timeout
+	_check(vet.kills == vk0, "没人认领的死亡不记战功（%d 杀不变）" % vet.kills)
+	vet.queue_free()
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	await tree.create_timer(0.25).timeout
+
+	# ---- 巢穴脾气：每局每窝抽一种，先拆哪个得看地图 ----
+	var hives_live: Array = m.hives.filter(func(h): return is_instance_valid(h) and h.persona != "")
+	_check(hives_live.size() > 0, "每座巢穴都抽到了脾气（%d 座）" % hives_live.size())
+	var pnames: Array = []
+	for h in m.hives:
+		if is_instance_valid(h) and not pnames.has(h.persona_name()):
+			pnames.append(h.persona_name())
+	print("  --  这一局的脾气：%s" % "、".join(pnames))
+	# 五条脾气**逐条**验，不看这局抽到了哪个：
+	# 按 hives_live 里实际抽到的脾气去 match，一次只会跑到一条，
+	# 抽到猛生的那一局，厚皮和疾行的代码一行都没被验过——那是假覆盖
+	var plain := Building.new()
+	plain.setup("hive")
+	plain.team = 1
+	var base_hp := plain.max_hp
+	plain.free()    # 只要基准数值；没进场景的 Node 不会自己回收
+	for pid in Building.PERSONA_IDS:
+		var ft := Building.new()
+		ft.setup("hive")
+		ft.team = 1
+		ft.persona = String(pid)
+		ft.apply_persona()
+		match String(pid):
+			"thick":
+				_check(absf(ft.max_hp - base_hp * Building.PERSONA_THICK_HP) < 0.5,
+					"厚皮：血上限 %.0f → %.0f（1.6 倍）" % [base_hp, ft.max_hp])
+			"breeder":
+				_check(ft.brood_span_mult() < 1.0, "猛生：孵化时长 ×%.2f（更快）" % ft.brood_span_mult())
+			"warlord":
+				_check(ft.spit_max() == Building.SPIT_MAX * Building.PERSONA_WARLORD_SPIT,
+					"好战：守军上限 %d → %d" % [Building.SPIT_MAX, ft.spit_max()])
+			"swift":
+				_check(ft.lane_speed_mult() > 1.0, "疾行：这窝的怪移速 ×%.2f" % ft.lane_speed_mult())
+			"digger":
+				_check(ft.brood_span_mult() == 1.0 and ft.lane_speed_mult() == 1.0,
+					"掘地：不靠孵化/移速，专门拆玩家的断道（数值上不额外加成）")
+		ft.free()
+	# 信息栏那句 ETA 必须和真实时长同一个倍率：一边孵得快、一边报得慢，就是在骗人
+	for h in hives_live:
+		var wvn: int = m._wave_mgr.wave
+		var span: float = maxf(Building.BROOD_MIN, Building.BROOD_T - float(wvn) * 5.0)
+		span *= lerpf(0.55, 1.0, clampf(h.hp / h.max_hp, 0.0, 1.0))
+		span *= h.brood_span_mult()
+		_check(absf(h.brood_left() - maxf(0.0, (1.0 - h.brood) * span)) < 0.02,
+			"%s的孵化 ETA 和真实时长一致（%.1f 秒）" % [h.persona_name(), h.brood_left()])
+	# 疾行：真的落到"这窝派出来的怪"身上（两个调用点之一，另一个是孵化）
+	var save_p: Array = []
+	for h in hives_live:
+		save_p.append([h, h.persona])
+		h.persona = "swift"
+	var shot: Goo = m._wave_mgr._spawn("goo")
+	if shot != null:
+		_check(absf(shot.speed - float(Goo.TYPES["goo"].speed) * Building.PERSONA_SWIFT_SPEED) < 0.01,
+			"疾行的窝派出来的怪移速 ×1.25（%.0f → %.0f）" % [float(Goo.TYPES["goo"].speed), shot.speed])
+		shot.queue_free()
+	await tree.create_timer(0.25).timeout    # 等它真的回收：不然下面数怪会把这只算进去（数错过一次）
+	# 好战：守军上限是真的翻倍，不是只把提示里的数字改了
+	var whive: Building = hives_live[0]
+	whive.persona = "warlord"
+	whive._spit_hurt = true
+	whive._spit_rage = true
+	whive._spit_n = Building.SPIT_MAX    # 普通窝到这儿就吐不出了
+	whive._spit_cd = 0.0
+	whive.hp = whive.max_hp
+	var nh4 := tree.get_nodes_in_group("enemies").size()
+	whive.take_damage(5.0, null)
+	await tree.create_timer(0.3).timeout
+	var nh5 := tree.get_nodes_in_group("enemies").size()
+	_check(nh5 > nh4, "好战的窝吐到 %d 只还没停（上限翻倍 %d → %d）" % [Building.SPIT_MAX, nh4, nh5])
+	# 复原：别把脾气改成永久的（后面的测试还会用到这座窝）
+	for e in save_p:
+		if is_instance_valid(e[0]):
+			e[0].persona = e[1]
 	for e in tree.get_nodes_in_group("enemies"):
 		if is_instance_valid(e):
 			e.queue_free()

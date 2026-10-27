@@ -70,6 +70,15 @@ func _start_wave() -> void:
 	# 不然挖一次沟就能让所有怪绕一辈子，这条机制就变成"一次性开关"了
 	if g != null and g.has_method("road_reclaim"):
 		g.road_reclaim()
+		# 掘地的窝：再额外踩平一段。对这类窝来说"断道"要断两次才顶用，
+		# 不然玩家学会断道之后所有巢穴都一个解法，脾气就白抽了
+		var extra := 0
+		for h in g.hives:
+			if is_instance_valid(h) and String(h.get("persona")) == "digger":
+				if g.road_reclaim(true):
+					extra += 1
+		if extra > 0:
+			g._hud_msg("掘地的巢穴把断掉的路又接上了一段")
 
 ## 场上还活着的波次怪（据点守军不算：十波打完就赢，不用去清野）
 func wave_enemies() -> Array:
@@ -138,6 +147,11 @@ func spawn_brood(h: Node2D, kinds: Array) -> Array:
 		g.add_child(goo)
 		goo.max_hp *= 1.0 + 0.06 * maxf(wave - 1, 0)
 		goo.hp = goo.max_hp
+		# 疾行的窝：它派出来的怪整条路都跑得更快（不止波次怪，孵出来的也一样，
+		# 不然"这窝的怪更快"这句提示会在孵化的那一窝上当场失效）
+		var hb := h as Building
+		if hb != null:
+			goo.speed *= hb.lane_speed_mult()
 		goo.start_lane(rd)
 		made.append(goo)
 	return made
@@ -165,5 +179,8 @@ func _spawn(t: String) -> Goo:
 	# 血量每波 +6%：后期光靠堆人数不够，得配弓手 / 升级箭塔
 	goo.max_hp *= 1.0 + 0.06 * maxf(wave - 1, 0)
 	goo.hp = goo.max_hp
+	var hb2 := h as Building
+	if hb2 != null:
+		goo.speed *= hb2.lane_speed_mult()    # 疾行
 	goo.start_lane(rd)
 	return goo

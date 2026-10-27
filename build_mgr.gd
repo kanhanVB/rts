@@ -37,6 +37,10 @@ func add_building(kind: String, pos: Vector2, team_: int) -> Building:
 	b.setup(kind)
 	b.team = team_
 	b.position = pos
+	# 巢穴：每局每窝抽一个脾气（见 Building.PERSONAS）。两窝以前一样，"先打哪个"没有答案；
+	# 现在得看地图挑——这是全图唯一"目标优先级"来源，所以必须在生成时就定下来
+	if kind == "hive" and team_ == 1:
+		b.roll_persona_now()    # 抽脾气 + 厚皮的血上限当场乘上去
 	if team_ == 0 and Relic.has("relic_heart"):
 		b.max_hp *= Relic.HEART_MULT    # 磐石之心：之后盖的房子也结实
 		b.hp = b.max_hp

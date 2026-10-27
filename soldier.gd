@@ -125,6 +125,45 @@ func setup(ranged: bool) -> void:
 	_base = {"hp": max_hp, "atk": attack_damage, "range": attack_range, "armor": armor, "aggro": aggro_range}
 	apply_techs()
 
+## ---------- 老兵：活下来的兵自己长本事 ----------
+## 以前兵只有"死/活"两种状态，按 W 撤退纯粹是止损——撤下来的老兵和刚出厂的新兵一模一样，
+## 所以"保住这个兵"没有任何意义，能跑就跑、跑不掉就换新的。
+## 现在杀敌攒星：4 杀一星、10 杀两星、18 杀三星，每星攻击和血上限各 +15%，头顶挂星。
+## 死了归零（新兵是全新实例，不用手动清）。于是"把三星剑士撤下来"变成一件会在意的事。
+const RANK_KILLS := [4, 10, 18]     # 攒够这么多击杀算 1/2/3 星
+const RANK_MAX := 3
+const RANK_BONUS := 0.15            # 每星：攻击、血上限各 +15%（三星 +45%）
+const RANK_COLORS := [Color(0.85, 0.63, 0.36), Color(0.86, 0.88, 0.92), Color(0.97, 0.78, 0.28)]
+var kills := 0
+var rank := 0
+
+## 记一笔战功（Unit._credit_killer 调：只有兵的最后一刀才算）
+func credit_kill() -> void:
+	if dead:
+		return
+	kills += 1
+	var want := 0
+	for i in RANK_KILLS.size():
+		if kills >= int(RANK_KILLS[i]):
+			want = i + 1
+	if want <= rank:
+		return
+	rank = mini(want, RANK_MAX)
+	apply_techs()      # 重算数值（mult 在 apply_techs 里乘），涨的那截血会顺手补上
+	queue_redraw()
+
+func rank_mult() -> float:
+	return 1.0 + RANK_BONUS * float(rank)
+
+func rank_text() -> String:
+	if rank <= 0:
+		return ""
+	var txt := "%d 星老兵（%d 杀）" % [rank, kills]
+	var nxt := rank
+	if nxt < RANK_KILLS.size():
+		txt += " · 再杀 %d 只升星" % maxi(int(RANK_KILLS[nxt]) - kills, 1)
+	return txt
+
 ## ---------- 科技加成（tech.gd）：出生时、每次研究完都按基础数值重算一遍，不会叠两次 ----------
 var _base := {}
 var _calm_t := 0.0    # 离开战斗多久了（挨打、出手都清零）：战地包扎按它回血
@@ -132,10 +171,11 @@ var _calm_t := 0.0    # 离开战斗多久了（挨打、出手都清零）：�
 func apply_techs() -> void:
 	if _base.is_empty():
 		return
+	var mult := rank_mult()    # 老兵星级：和科技一样是"乘在基础上"，重算不会叠两层
 	var mail := Tech.has("up_mail")
-	var new_max: float = _base.hp + (Tech.MAIL_HP if mail else 0.0)
+	var new_max: float = (_base.hp + (Tech.MAIL_HP if mail else 0.0)) * mult
 	if new_max > max_hp:
-		hp += new_max - max_hp    # 血上限涨了：涨的那截直接补上
+		hp += new_max - max_hp    # 血上限涨了：涨的那截直接补上（升星当场回血）
 	max_hp = new_max
 	hp = minf(hp, max_hp)
 	armor = _base.armor + (Tech.MAIL_ARMOR if mail else 0.0)
@@ -148,6 +188,7 @@ func apply_techs() -> void:
 		attack_damage += Tech.LONGBOW_DMG
 		attack_range += Tech.LONGBOW_RANGE
 		aggro_range = maxf(aggro_range, attack_range + 10.0)    # 射得远也要看得远，不然自动索敌还是 150 才开弓
+	attack_damage *= mult
 	atk = attack_damage
 	atk_range = attack_range
 
@@ -617,3 +658,25 @@ func _body_draw() -> void:
 		_kr_body(Color(0.5, 0.56, 0.6), Color(0.28, 0.3, 0.32), "hood", "bow")
 	else:
 		_kr_body(Color(0.44, 0.52, 0.62), Color(0.3, 0.3, 0.34), "helm", "sword")
+
+## 头顶的军功星：一星青铜、二星银、三星金。
+## 星星是"这个兵值不值得保"的唯一提示——不画的话玩家永远不知道自己在拿新兵换老兵
+func _badge_draw() -> void:
+	if rank <= 0 or dead:
+		return
+	var n := mini(rank, RANK_MAX)
+	var col: Color = RANK_COLORS[n - 1]
+	var step := 9.0
+	var x0 := -step * float(n - 1) * 0.5
+	var y := -radius - 19.0
+	for i in n:
+		_star(Vector2(x0 + step * float(i), y), 3.4, col)
+
+func _star(c: Vector2, r: float, col: Color) -> void:
+	var pts := PackedVector2Array()
+	for i in 10:
+		var a := -PI * 0.5 + PI * 0.2 * float(i)
+		pts.append(c + Vector2(cos(a), sin(a)) * (r if i % 2 == 0 else r * 0.45))
+	draw_colored_polygon(pts, col)    # 先填
+	pts.append(pts[0])
+	draw_polyline(pts, Color(0, 0, 0, 0.55), 1.0)    # 再描边：浅色星星压在浅色地面上也看得清
