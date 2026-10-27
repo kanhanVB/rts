@@ -1778,6 +1778,94 @@ func _light_rts_tests() -> void:
 	_check(int(m.sfx.played.get("place_bad", 0)) > pb0, "放不下会闷「嘟」一声（不是静默）")
 	m._placing_kind = ""
 
+	# ================= 修 bug 的回归断言 =================
+
+	# 1) 右键取消放置：只取消，不能顺手把工程师派走
+	#    （以前按下时清空 _placing_kind，抬手时条件成立 → 同一次右键又下了一道移动令）
+	var eng: Engineer = null
+	for e in m._player_engineers():
+		eng = e
+	if eng == null:    # 这块跑到这儿时工程师可能已经阵亡了：现造一个，别让断言变成环境依赖
+		eng = Engineer.new()
+		eng.position = m.open_point(m.base.position + Vector2(-90, 60))
+		m.add_child(eng)
+		await tree.create_timer(0.2).timeout
+		eng.move_order = false
+	_check(eng != null, "有工程师可以拿来试放置")
+	if eng != null:
+		m._set_selection([eng])
+		m._placing_kind = "barracks"
+		var eng_at: Vector2 = eng.position
+		var pdown := InputEventMouseButton.new()
+		pdown.button_index = MOUSE_BUTTON_RIGHT
+		pdown.pressed = true
+		pdown.position = Vector2(520, 300)
+		m._unhandled_input(pdown)
+		var pup := InputEventMouseButton.new()
+		pup.button_index = MOUSE_BUTTON_RIGHT
+		pup.pressed = false
+		pup.position = Vector2(520, 300)
+		m._unhandled_input(pup)
+		_check(m._placing_kind == "" and eng.position.distance_to(eng_at) < 2.0,
+			"右键取消放置：只取消，不顺手把工程师派走")
+
+	# 2) 同一片地方先报"农民被打"、接着基地挨砸：号角和提示条不能被吞
+	#    以前的合并分支直接 return，玩家最需要被叫醒的那一下正好是静音的
+	m.alerts.clear()
+	m._hud_msg_t = 0.0
+	m.alert_attack(m.base.position + Vector2(200, 0), "worker")
+	await tree.create_timer(float(m.ALERT_SFX_GAP) + 0.3).timeout
+	# 号角本身还有 3 秒节流：从"升级前"这一刻开始数，别把上一条的号角算进来
+	var alert_before_base := int(m.sfx.played.get("alert", 0))
+	m.alert_attack(m.base.position, "base")
+	_check(m.alerts.size() == 1 and String(m.alerts[0].what) == "base",
+		"同一片地方升级成基地警报（还是一条，不重复堆）")
+	_check(m.alerts[0].pos.distance_to(m.base.position) < 1.0,
+		"红圈挪到真正挨打的基地上（不是留在农民那儿）")
+	_check(int(m.sfx.played.get("alert", 0)) == alert_before_base + 1,
+		"升级成基地时号角照响（以前被合并分支吞掉）")
+	_check(m._hud_msg_label.text.contains("基地"), "升级时提示条也跟上")
+	m.alerts.clear()
+
+	# 3) 右键按下和松手不在同一处：指令落在"按下"的地方
+	#    （以前用松手的位置：落在顶栏/底栏上就会被换算成地图外的点，人被派到屏幕下方）
+	var rdu2 := Soldier.new()
+	rdu2.setup(false)
+	rdu2.position = m.base.position + Vector2(60, 40)
+	m.add_child(rdu2)
+	await tree.create_timer(0.2).timeout
+	m._set_selection([rdu2])
+	var press_world: Vector2 = m.open_point(m.base.position + Vector2(0, 180))
+	var press_scr: Vector2 = m.get_viewport().get_canvas_transform() * press_world
+	var d_press := InputEventMouseButton.new()
+	d_press.button_index = MOUSE_BUTTON_RIGHT
+	d_press.pressed = true
+	d_press.position = press_scr
+	m._unhandled_input(d_press)
+	var u_elsewhere := InputEventMouseButton.new()
+	u_elsewhere.button_index = MOUSE_BUTTON_RIGHT
+	u_elsewhere.pressed = false
+	u_elsewhere.position = press_scr + Vector2(120, -90)    # 松手时鼠标已经挪开
+	m._unhandled_input(u_elsewhere)
+	_check(rdu2.move_target.distance_to(press_world) < 40.0,
+		"指令落在右键**按下**的位置（松手挪开了也不跑偏）")
+
+	# 4) 按一个没存过的编队号：不能把当前选择清空，而且要吭一声
+	var groups_bak: Array = m.control_groups.duplicate()
+	m.control_groups.clear()
+	m._deselect_all()
+	m._set_selection([rdu2])
+	var g5 := InputEventKey.new()
+	g5.keycode = KEY_5
+	g5.pressed = true
+	m._hud_msg_t = 0.0
+	m._on_key(g5)
+	_check(m.selected.size() == 1, "按没存过的编队号：当前选择不会被清空")
+	_check(m._hud_msg_label.text.contains("还没存"), "而且会说一句「编队 5 还没存过」")
+	m.control_groups = groups_bak
+	rdu2.queue_free()
+	await tree.create_timer(0.2).timeout
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
 	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；

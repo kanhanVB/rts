@@ -178,11 +178,6 @@ func build() -> void:
 ## 点到了屏幕边上的受袭箭头没有？点中返回那边的世界坐标（main 拿它飞镜头），否则 Vector2.INF
 func alert_hit(screen: Vector2) -> Vector2:
 	return _edge.hit_alert(screen) if _edge != null else Vector2.INF
-	_build_bottom_bar()
-	_build_toast()
-	_build_panel()
-	_build_help()
-	_build_overlay()
 
 ## 顶栏（帝国式）：左边资源 + 人口，右边波次 + 时钟 + 按钮
 func _build_top_bar() -> void:

@@ -679,8 +679,11 @@ func _process(delta: float) -> void:
 		_rmb_held = false
 		var was_drag := _rmb_drag
 		_rmb_drag = false
+		# 落点用按下时的坐标：鼠标可能已经移到顶栏/底栏上松手了，
+		# 拿那儿的位置换算成世界坐标会落到地图外面，然后被 open_point 拽到最近的空地——
+		# 玩家只是"按了一下又改主意"，整队人却往屏幕下方跑了
 		if not was_drag and _placing_kind == "":
-			_right_click_command(get_viewport().get_mouse_position(), Input.is_key_pressed(KEY_SHIFT))
+			_right_click_command(_rmb_down, Input.is_key_pressed(KEY_SHIFT))
 	if game_state == "play":
 		game_time += delta
 		_wave_mgr.update(delta)
@@ -924,6 +927,7 @@ func _hud_msg(text: String, prio := 0) -> void:
 		return
 	if _hud_msg_label.text == text and _hud_msg_t > 0.0:
 		_hud_msg_t = 3.0
+		_hud_msg_prio = maxi(_hud_msg_prio, prio)
 		return
 	_hud_msg_prio = prio
 	_hud_msg_label.text = text
@@ -951,6 +955,9 @@ const RMB_DRAG_THRESH := 10.0
 var _rmb_held := false
 var _rmb_moved := 0.0
 var _rmb_drag := false
+## 右键按下时的屏幕坐标：松手那一刻鼠标可能已经移到顶栏/底栏上（那边的事件被 HUD 吃掉，
+## 走到 _process 的兜底），拿松手的位置去换算会把人派到屏幕下面去
+var _rmb_down := Vector2.ZERO
 var _drag_shift := false
 var _drag_ctrl := false
 var _drag_double := false
@@ -1021,6 +1028,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				_rmb_held = true
 				_rmb_moved = 0.0
 				_rmb_drag = false
+				_rmb_down = event.position    # 指令落点用"按下时"的坐标，不用"松手时"的
 				# 放置模式的反悔要"按下就生效"：拖图只在拖起来之后才算，没拖动就是取消
 				if _placing_kind != "":
 					_hud_msg("已取消放置" + _place_name(_placing_kind))
@@ -1028,12 +1036,16 @@ func _unhandled_input(event: InputEvent) -> void:
 					queue_redraw()
 					_rmb_held = false
 			else:
+				# 按下那一刻可能已经把这次右键用掉了（放置模式里"按下就取消"）：先存下来再清零。
+				# 以前这里不看 _rmb_held，于是"右键取消放置"抬手时又给工程师下了一道移动令——
+				# 一次右键干了两件事，人还被拽到取消的那个点上
 				var was_drag := _rmb_drag
+				var was_held := _rmb_held
 				_rmb_held = false
 				_rmb_drag = false
 				# 刚才是在拖镜头：这次右键到此为止，别顺手把部队派出去
-				if not was_drag and _placing_kind == "":
-					_right_click_command(event.position, event.shift_pressed)
+				if was_held and not was_drag and _placing_kind == "":
+					_right_click_command(_rmb_down, event.shift_pressed)
 	elif event is InputEventMouseMotion:
 		if _rmb_held and not _rmb_drag:
 			_rmb_moved += event.relative.length()
@@ -1908,25 +1920,34 @@ const ALERT_HOLD := 12.0     # 这么久没再挨打，这处才算消停（之�
 const ALERT_SHOW := 4.0      # 小地图红圈从最后一下挨打起闪这么久
 const ALERT_SFX_GAP := 3.0
 
+## 警报"响一下"：震屏 + 提示条 + 号角。新警报走一次；同一处从"农民被打"升级成
+## "基地/前哨挨打"时再走一次——玩家最需要被叫醒的正是这一下。
+## 号角自己还有 ALERT_SFX_GAP 节流，连着来的小事件不会把号角放成机关枪
+func _alert_kick(pos: Vector2, what: String) -> void:
+	shake(3.2 if what == "base" else 2.2)
+	if what == "base" or what == "outpost":
+		_hud_msg(alert_text(what) + "（点屏幕边上的箭头能飞过去）", 1)
+	if game_time - _alert_sfx_t >= ALERT_SFX_GAP:
+		_alert_sfx_t = game_time
+		sfx.play("alert")
+
+## 警报轻重：基地 > 前哨 > 农民。同一片地方先被摸了农民、后挨砸的是基地，
+## 就该升级成基地那条（以前只改 what 不换位置，小地图上的红圈还指在农民身上）
+const ALERT_RANK := {"base": 2, "outpost": 1, "worker": 0}
+
 func alert_attack(pos: Vector2, what: String) -> void:
 	if game_state != "play":
 		return
 	for a in alerts:
 		if a.pos.distance_to(pos) < ALERT_R and game_time - float(a.last) < ALERT_HOLD:
 			a.last = game_time
-			if what == "base":
-				a.what = "base"    # 一处里有基地挨打就说基地
+			if int(ALERT_RANK.get(what, 0)) > int(ALERT_RANK.get(String(a.what), 0)):
+				a.what = what
+				a.pos = pos
+				_alert_kick(pos, what)
 			return
 	alerts.append({"pos": pos, "what": what, "t0": game_time, "last": game_time})
-	# 新警报 = 家里真被砸了：轻轻震一下屏（老警报重复触发不震，不然一直在抖）
-	shake(3.2 if what == "base" else 2.2)
-	# 顺带在提示条上说一句。只在新警报时（同一处 6 秒内不重复）说，而且只说基地/前哨：
-	# 农民被摸太频繁，那样提示条会一直闪。光有号角和箭头的话，镜头在远处时还得自己找是哪儿
-	if what == "base" or what == "outpost":
-		_hud_msg(alert_text(what) + "（点屏幕边上的箭头能飞过去）", 1)
-	if game_time - _alert_sfx_t >= ALERT_SFX_GAP:
-		_alert_sfx_t = game_time
-		sfx.play("alert")
+	_alert_kick(pos, what)
 
 ## 小地图上还在闪的报警点（顺手把消停了的清掉）
 func active_alerts() -> Array:
@@ -2076,12 +2097,15 @@ func _save_control_group(idx: int) -> void:
 	_hud_msg("编队 %d 已存（%d 个单位）" % [idx + 1, control_groups[idx].size()])
 
 func _recall_control_group(idx: int, add := false) -> void:
+	# 先看这个号存没存，再动选择：以前是"先清空选择、再发现这号是空的"，
+	# 一次误按就把手上的人全丢了，而且一声不吭
+	if idx >= control_groups.size() or control_groups[idx] == null:
+		_hud_msg("编队 %d 还没存过（Ctrl+%d 存当前选择）" % [idx + 1, idx + 1])
+		return
 	if not add:
 		_deselect_all()
 	else:
 		_clear_inspect()
-	if idx >= control_groups.size() or control_groups[idx] == null:
-		return
 	var grp: Array = control_groups[idx]
 	var alive: Array = []
 	for u in grp:
@@ -2092,6 +2116,8 @@ func _recall_control_group(idx: int, add := false) -> void:
 			if not selected.has(u):
 				u.selected = true
 				selected.append(u)
+	if alive.is_empty() and not grp.is_empty():
+		_hud_msg("编队 %d 的人都没了" % (idx + 1))
 	control_groups[idx] = alive
 
 ## 第 i 个移动单位的目标点：中心 + 环形散开（每圈 8 个，圈距 26px）
