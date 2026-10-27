@@ -38,6 +38,7 @@ var camps: Array = []              # Goo 据点（随机图上守着富矿的野
 var wheels: Array = []             # 水车：每 0.5 秒给附近的熔炉 / 木工台重新分一次（_update_power）
 var fog: Fog = null                # 战争迷雾（随机图才有；--nofog 关掉）
 var _power_t := 0.0
+var _safety_t := 0.0
 var classic := false               # 经典固定图（--test / --classic）：测试断言用的老坐标
 var map_seed := 0
 var layout := {}                   # 随机图布局（MapGen.generate 的结果）
@@ -694,9 +695,14 @@ func _process(delta: float) -> void:
 			_power_t = 0.5
 			_update_power()
 			_check_garrison()
-			_check_worker_safety()
 			stats.peak_ore = maxf(stats.peak_ore, economy.ore)
 			stats.peak_wood = maxf(stats.peak_wood, economy.wood)
+		# 农民自保单独走一档 0.12 秒：怪贴上来要"立刻"撒腿，跟产能统计这种慢活绑在一起
+		# 会让农民最多愣半秒才开始跑（玩家看到的就是"有一小段前摇"）
+		_safety_t -= delta
+		if _safety_t <= 0.0:
+			_safety_t = 0.12
+			_check_worker_safety()
 		_check_end()
 	_update_labels()
 	_update_panel()
@@ -779,8 +785,11 @@ func _check_worker_safety() -> void:
 			# 最后那个条件要连距离一起看：怪还贴着就收工的话，农民会朝矿堆走两步、正好迎着怪，
 			# 下一秒又被吓得往回跑，在原地来回抖（9 秒超时本来是防"怪卡在房子后面看不见"的死锁）
 			var ed := _nearest_enemy_dist(w.position)
+			# 怪退到"不贴身"的距离（1.5 倍外围）就没必要继续贴着墙站满 9 秒：
+			# 2.5 秒还不回来就已经算安全，回去干活——真再近到 95px 以内会重新跑，不会挨打
+			var patience: float = Worker.FLEE_RELAX_T if ed > Worker.FLEE_RELAX_R else Worker.FLEE_MAX_T
 			if not has_enemy or ed > Worker.FLEE_SAFE_R \
-					or (w.flee_time() > Worker.FLEE_MAX_T and ed > Worker.FLEE_R):
+					or (w.flee_time() > patience and ed > Worker.FLEE_R):
 				w.end_flee()
 		elif has_enemy and _nearest_enemy_dist(w.position) < Worker.FLEE_R:
 			w.start_flee()

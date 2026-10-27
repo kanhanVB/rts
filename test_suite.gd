@@ -1941,6 +1941,59 @@ func _flee_tests() -> void:
 	_check(is_instance_valid(w.node_target) and w.state != Worker.State.IDLE, "回去接着干原来的活（采矿）")
 	w.queue_free()
 
+	# ---- 反应时间：怪走进 95px 之后，农民多久开跑 ----
+	# 这里**不手动调** _check_worker_safety，走真实主循环。
+	# 以前自保检测挂在 0.5 秒一档的 _power_t 上，怪贴脸了农民还要愣半秒才开始跑
+	var wr := Worker.new()
+	wr.position = m.base.position + Vector2(-160, -30)
+	m.add_child(wr)
+	var ore_r: ResNode = wr._nearest_node("ore")
+	await m.get_tree().create_timer(0.2).timeout
+	if ore_r != null:
+		wr.command_gather(ore_r)
+	var raider := Goo.new()
+	raider.position = wr.position + Vector2(90, 0)    # 一出生就踩在 FLEE_R(95) 里
+	raider.speed = 0.0                                # 站着不动：只制造"有怪贴身"
+	m.add_child(raider)
+	var t_re := Time.get_ticks_msec()
+	while not wr.is_fleeing() and Time.get_ticks_msec() - t_re < 1500:
+		await m.get_tree().process_frame
+	var react_s := float(Time.get_ticks_msec() - t_re) / 1000.0
+	_check(react_s < 0.20, "怪踩进 95px 就开跑：反应 %.2f 秒（以前 0.5 秒一档）" % react_s)
+	# 开跑之后是真的在动，不是"标记成逃跑然后站着"
+	var pf0: Vector2 = wr.position
+	await m.get_tree().create_timer(0.35).timeout
+	_check(wr.position.distance_to(pf0) > 12.0,
+		"开跑之后马上真的挪了（0.35 秒走了 %.0fpx）" % wr.position.distance_to(pf0))
+	raider.queue_free()
+	wr.queue_free()
+	await m.get_tree().create_timer(0.25).timeout
+
+	# ---- 躲在墙角要愣多久：怪已经退到 150px（不贴身）、但还没出 260px 的"安全圈" ----
+	# 以前这种情况下农民会一直贴墙站到 FLEE_MAX_T(9 秒) 才回去，看着就是"发愣好久"
+	var ws := Worker.new()
+	ws.position = m.base.position + Vector2(120, 40)
+	m.add_child(ws)
+	await m.get_tree().create_timer(0.2).timeout
+	var stalker := Goo.new()
+	stalker.position = m.base.position + Vector2(0, 150)    # 离墙根 150px：> FLEE_R，< FLEE_SAFE_R
+	m.add_child(stalker)
+	# 属性必须在 add_child 之后改：Goo._ready() 会按品种把 hp/speed 重置一遍
+	# （站着不动 = 只当"附近有威胁"；血拉满 = 别被基地箭塔几秒射死，那样测到的是"怪没了"）
+	stalker.speed = 0.0
+	stalker.max_hp = 99999.0
+	stalker.hp = 99999.0
+	await m.get_tree().create_timer(0.2).timeout
+	ws.start_flee()
+	var t_f0 := Time.get_ticks_msec()
+	while ws.is_fleeing() and Time.get_ticks_msec() - t_f0 < 12000:
+		await m.get_tree().process_frame
+	var stand_s := float(Time.get_ticks_msec() - t_f0) / 1000.0
+	_check(stand_s < 4.5, "怪退到 150px 之后 %.1f 秒就回去干活（不是死等 9 秒）" % stand_s)
+	stalker.queue_free()
+	ws.queue_free()
+	await m.get_tree().create_timer(0.25).timeout
+
 	# 一群人一起躲到同一面墙：到位就该站住，不能互相挤着原地打转
 	# （用户报的「怪一来农民就在基地门口一直转圈」就是这个：
 	#   到了墙点还小步追点 → 被队友一挤就回头走 → 配上靠右让路偏航，一直转）
@@ -1967,8 +2020,11 @@ func _flee_tests() -> void:
 		if is_instance_valid(crowd[i]):
 			mill += p1[i].distance_to(crowd[i].position)
 	mill /= float(crowd.size())
-	_check(mill < 40.0 and crowd.all(func(c): return is_instance_valid(c) and c.is_fleeing()),
-		"一群人躲到同一面墙：站稳之后不再磨（3 秒人均走了 %.0fpx）" % mill)
+	# 只断言"别在原地磨"。怪在 180px（不贴身、也没走远）时，新规则是躲满 2.5 秒就回去干活，
+	# 所以不能要求"6 秒后还在躲"——那是旧行为（死等 9 秒）
+	var still_fleeing: bool = crowd.all(func(c): return is_instance_valid(c) and c.is_fleeing())
+	_check(mill < 40.0,
+		"一群人躲到同一面墙：站稳之后不再磨（3 秒人均走了 %.0fpx，还在躲 %s）" % [mill, str(still_fleeing)])
 	g3.queue_free()
 	for c in crowd:
 		if is_instance_valid(c):
