@@ -674,6 +674,13 @@ func _process(delta: float) -> void:
 	# 鼠标在 HUD 上松开时 _unhandled_input 收不到抬起事件：这里兜底收尾拖框
 	if _dragging and DisplayServer.get_name() != "headless" and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		_finish_drag(get_viewport().get_mouse_position())
+	# 右键同理：在窗口外松手也要有个了结，不然下一次右键会被当成"上一次还在按着"
+	if _rmb_held and DisplayServer.get_name() != "headless" and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		_rmb_held = false
+		var was_drag := _rmb_drag
+		_rmb_drag = false
+		if not was_drag and _placing_kind == "":
+			_right_click_command(get_viewport().get_mouse_position(), Input.is_key_pressed(KEY_SHIFT))
 	if game_state == "play":
 		game_time += delta
 		_wave_mgr.update(delta)
@@ -691,6 +698,7 @@ func _process(delta: float) -> void:
 	_update_labels()
 	_update_panel()
 	_update_camera(rdelta)
+	_update_shake(rdelta)
 	hud.refresh()
 	if _hud_msg_t > 0.0:
 		_hud_msg_t -= rdelta
@@ -744,6 +752,9 @@ func note_death(u) -> void:
 		stats.lost += 1
 	else:
 		stats.kills += 1
+		# 击杀"啵"：节流到 0.10 秒一次——一波十几只一起死的时候听着是"啵啵啵"，
+		# 不节流则是糊成一片的白噪音
+		sfx_play("kill", 0.10)
 
 ## ================================ 农民自保 ================================
 ## 每 0.5 秒扫一遍：怪靠近了就放下手上的活往最近的房子跑，走远了自己回去接着干。
@@ -789,9 +800,14 @@ func _update_camera(delta: float) -> void:
 		dir.x -= 1.0
 	elif m.x > vp.x - CAM_EDGE:
 		dir.x += 1.0
-	if m.y < CAM_EDGE:
+	# 上下滚屏按"地图可视区"的边算，不按窗口边：
+	# 以前鼠标一移到顶栏（去点"叫波"/"警钟"/"速度"）就落进顶部 10px，镜头自己往上飞，
+	# 想点个按钮得跟镜头抢鼠标。现在屏幕条那一带不算滚屏区
+	var ytop := hud_top_h()
+	var ybot := vp.y - hud_bottom_h()
+	if m.y >= ytop - 1.0 and m.y <= ytop + CAM_EDGE:
 		dir.y -= 1.0
-	elif m.y > vp.y - CAM_EDGE:
+	elif m.y <= ybot + 1.0 and m.y >= ybot - CAM_EDGE:
 		dir.y += 1.0
 	if Input.is_key_pressed(KEY_LEFT):
 		dir.x -= 1.0
@@ -806,6 +822,36 @@ func _update_camera(delta: float) -> void:
 	if dir != Vector2.ZERO:
 		cam.position += dir.normalized() * CAM_SPEED * 60.0 * delta / cam.zoom.x
 	_clamp_camera()
+
+## 受击震屏：只给"基地/前哨挨打"和波次号角这种大事件用，幅度小、衰减快（26/秒）。
+## 每个单位挨打都震的话，混战里画面会一直抖——那是晕，不是打击感
+var _shake := 0.0
+
+func shake(amount: float) -> void:
+	_shake = maxf(_shake, amount)
+
+func _update_shake(delta: float) -> void:
+	if _shake <= 0.0:
+		if cam.offset != Vector2.ZERO:
+			cam.offset = Vector2.ZERO
+		return
+	_shake = maxf(0.0, _shake - delta * 26.0)
+	cam.offset = Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * _shake
+
+## ---------- 音效（带节流）----------
+## 混战里几十只怪同时死：不节流的话那声"啵"会连成一串噪音，还把播放器池占满。
+## 节流按"同类声音"记，不同种类互不影响
+var _sfx_gap := {}
+
+func sfx_play(key: String, gap := 0.0) -> void:
+	if sfx == null:
+		return
+	if gap > 0.0:
+		var now := float(Time.get_ticks_msec()) / 1000.0
+		if now - float(_sfx_gap.get(key, -999.0)) < gap:
+			return
+		_sfx_gap[key] = now
+	sfx.play(key)
 
 ## 镜头限制在地图内；上下多留出顶栏/底栏的高度（地图边沿能露到 HUD 外面）
 func _clamp_camera() -> void:
@@ -875,8 +921,8 @@ func _hud_msg(text: String) -> void:
 ## ================================ 输入（帝国时代式） ================================
 ## 左键：点选 / 拖框；Shift+左键 加减选；双击或 Ctrl+左键 = 选屏幕内同类
 ## 右键：智能指令（移动 / 采集 / 攻击 / 交货）；选中基地/兵营右键 = 集结点；Shift+右键 = 排路点
-## 空格 镜头回到选中 · P 暂停 · N 叫波 · B 警钟 · M 静音 · Del 删除 · Esc 取消/取消选中 · F1 说明
-## 数字 选队（Ctrl 存队 / Shift 并队，连按两下跳镜头）· 中键拖动平移
+## 空格 镜头回到选中（**什么都没选的时候 = 回基地**）· P 暂停 · N 叫波 · B 警钟 · M 静音 · Del 删除 · Esc 取消/取消选中 · F1 说明
+## 数字 选队（Ctrl 存队 / Shift 并队，连按两下跳镜头）· 中键拖动平移 · **右键拖出 10px 也是平移**（不派兵）
 ## 命令卡不配热键（一律点按钮）——唯一例外是士兵的「撤退」挂了 W
 var _target_mode := ""            # "attack" / "patrol"：按了那个按钮，等左/右键点目的地
 ## 兼容老代码 / 机器人脚本：A 移动待命 = 目标模式是 attack
@@ -886,6 +932,12 @@ var _a_move_next: bool:
 	set(v):
 		_target_mode = "attack" if v else ""
 var _mid_drag := false
+## 右键拖动平移：按下先不派兵，拖动超过 THRESH 才算拖图；抬手时没拖动才下发命令。
+## 以前右键一按下就派兵，右手党想拖图只能改用中键——而中键笔记本上不好按
+const RMB_DRAG_THRESH := 10.0
+var _rmb_held := false
+var _rmb_moved := 0.0
+var _rmb_drag := false
 var _drag_shift := false
 var _drag_ctrl := false
 var _drag_double := false
@@ -939,19 +991,35 @@ func _unhandled_input(event: InputEvent) -> void:
 					queue_redraw()
 			elif _dragging:
 				_finish_drag(event.position)
-		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-			if _placing_kind != "":
-				_hud_msg("已取消放置" + _place_name(_placing_kind))
-				_placing_kind = ""
-				queue_redraw()
-			elif _has_units_selected():
-				_command_at(_to_world(event.position), event.shift_pressed)
+		elif event.button_index == MOUSE_BUTTON_RIGHT:
+			if event.pressed:
+				_rmb_held = true
+				_rmb_moved = 0.0
+				_rmb_drag = false
+				# 放置模式的反悔要"按下就生效"：拖图只在拖起来之后才算，没拖动就是取消
+				if _placing_kind != "":
+					_hud_msg("已取消放置" + _place_name(_placing_kind))
+					_placing_kind = ""
+					queue_redraw()
+					_rmb_held = false
 			else:
-				var b := _selected_building()
-				if b != null and b.trains():
-					set_rally(b, _pick_at(_to_world(event.position), true))
-	elif event is InputEventMouseMotion and _dragging:
-		queue_redraw()
+				var was_drag := _rmb_drag
+				_rmb_held = false
+				_rmb_drag = false
+				# 刚才是在拖镜头：这次右键到此为止，别顺手把部队派出去
+				if not was_drag and _placing_kind == "":
+					_right_click_command(event.position, event.shift_pressed)
+	elif event is InputEventMouseMotion:
+		if _rmb_held and not _rmb_drag:
+			_rmb_moved += event.relative.length()
+			if _rmb_moved >= RMB_DRAG_THRESH:
+				_rmb_drag = true
+		if _rmb_drag:
+			cam.position -= event.relative / cam.zoom.x
+			_clamp_camera()
+			return
+		if _dragging:
+			queue_redraw()
 	elif event is InputEventKey and event.pressed and not event.echo:
 		_on_key(event)
 
@@ -970,6 +1038,15 @@ func _finish_drag(screen: Vector2) -> void:
 		else:
 			_point_select(p)
 	queue_redraw()
+
+## 右键"点一下"（不是拖图）该干什么：有兵就是智能指令，否则是兵营/基地的集结点
+func _right_click_command(screen: Vector2, shift: bool) -> void:
+	if _has_units_selected():
+		_command_at(_to_world(screen), shift)
+		return
+	var b := _selected_building()
+	if b != null and b.trains():
+		set_rally(b, _pick_at(_to_world(screen), true))
 
 func _on_key(event: InputEventKey) -> void:
 	var k := event.keycode
@@ -997,7 +1074,12 @@ func _on_key(event: InputEventKey) -> void:
 	elif k == KEY_M:
 		toggle_mute()
 	elif k == KEY_SPACE:
-		_center_on_selection()
+		# 选着东西 = 镜头跳过去；什么都没选 = 回基地。
+		# 以前空选按空格毫无反应，"找不到家在哪了"只能靠双击小地图
+		if selected.is_empty() and is_instance_valid(base):
+			center_on(base.position)
+		else:
+			_center_on_selection()
 	elif k >= KEY_1 and k <= KEY_9:
 		# 编队：Ctrl+数字 存队，数字 选队（连按两下镜头跳过去），Shift+数字 并进当前选择
 		var idx := int(k) - int(KEY_1)
@@ -1790,6 +1872,8 @@ func alert_attack(pos: Vector2, what: String) -> void:
 				a.what = "base"    # 一处里有基地挨打就说基地
 			return
 	alerts.append({"pos": pos, "what": what, "t0": game_time, "last": game_time})
+	# 新警报 = 家里真被砸了：轻轻震一下屏（老警报重复触发不震，不然一直在抖）
+	shake(3.2 if what == "base" else 2.2)
 	if game_time - _alert_sfx_t >= ALERT_SFX_GAP:
 		_alert_sfx_t = game_time
 		sfx.play("alert")

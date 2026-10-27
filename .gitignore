@@ -13,3 +13,6 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+# 截图验证产物：根目录的 png 都是 shot.py 现拍的，不进仓库
+/*.png

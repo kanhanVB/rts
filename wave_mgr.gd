@@ -61,6 +61,9 @@ func _start_wave() -> void:
 			fresh.append(grp[0])
 	# 头一回出现的品种：喊一嗓子说清楚它是什么、怎么对付（王国保卫战的"新敌人"提示）
 	var g := _game()
+	# 波次号角：每波一次，是"节奏点"。只有横幅没有声音的话，玩家在忙别的就错过了
+	if g != null and g.has_method("sfx_play"):
+		g.sfx_play("horn_wave")
 	if g != null and not fresh.is_empty() and wave > 1:
 		var parts: Array = []
 		for t in fresh:

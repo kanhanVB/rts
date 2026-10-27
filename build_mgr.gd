@@ -200,6 +200,10 @@ func complete_site(site: ConstructionSite) -> void:
 		return
 	var b := add_building(site.kind, site.position, 0)
 	_hud(_place_label(site.kind))
+	# 完工"笃笃—叮"：玩家盖完东西往往已经切去忙别的了，声音比横幅更早把人叫回来
+	var g2 := _game()
+	if g2 != null and g2.has_method("sfx_play"):
+		g2.sfx_play("build_done", 0.12)
 	building_built.emit(b)
 	site.queue_free()
 

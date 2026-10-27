@@ -161,6 +161,11 @@ func build() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.theme = theme_res
 	add_child(root)
+	# 屏幕边缘受袭箭头：**必须第一个加**，后加的面板才会压在它上面
+	# （加在最后的话，箭头会盖在顶栏/底栏/小地图上，看着像 UI 花了）
+	var ea = preload("res://edge_alerts.gd").new()    # 用 preload 而不是 class_name：类缓存没刷的时候不会找不到
+	ea.main = main
+	root.add_child(ea)
 	_build_top_bar()
 	_build_bottom_bar()
 	_build_toast()
@@ -612,6 +617,8 @@ func _build_help() -> void:
   左键点选 · 拖动框选 · Shift 加选
   右键：走过去 / 采集 / 打谁 / 交货
   选中基地或兵营，右键地面 = 集结点
+  移动镜头：鼠标推到画面边 / 方向键 / 中键或右键拖着走
+  空格 = 回选中；什么都没选的时候 = 回基地
   命令都点底栏按钮，鼠标悬停有说明
 
 兵怎么打

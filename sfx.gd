@@ -1,10 +1,13 @@
 class_name Sfx
 extends Node
 ## 音效：art/sfx/*.wav（tools/make_sfx.py 合成；同名 wav 直接覆盖就能换成真录音，再导入一次）。
-## bell = 警钟"当—当—当" · clear = 警报解除"叮—咚" · alert = 挨打报警的两声号角。M 键静音。
-## 几个播放器轮流用：警钟没敲完又来报警，两个声音叠着放，不互相掐断
+## bell = 警钟"当—当—当" · clear = 警报解除"叮—咚" · alert = 挨打报警的两声号角 ·
+## build_done = 完工"笃笃—叮" · thud = 自家房子被砸的闷响 · horn_wave = 波次号角 · kill = 击杀"啵"
+## M 键静音。几个播放器轮流用：警钟没敲完又来报警，两个声音叠着放，不互相掐断
 
-const VOLUME := {"bell": -3.0, "clear": -6.0, "alert": -4.0}
+## 手感音一律压得低：混战里它们响得比报警频繁得多，音量抢戏的话耳朵会累
+const VOLUME := {"bell": -3.0, "clear": -6.0, "alert": -4.0,
+	"build_done": -7.0, "thud": -9.0, "horn_wave": -5.0, "kill": -12.0}
 static var muted := false
 static var _streams := {}
 var last := ""             # 最近要播的（静音时也记，测试用）
@@ -13,7 +16,8 @@ var _players: Array = []
 var _headless := DisplayServer.get_name() == "headless"
 
 func _ready() -> void:
-	for i in 3:
+	# 6 个而不是 3 个：击杀/挨打这类手感音又短又密，池子太浅会互相掐断（听着像卡带）
+	for i in 6:
 		var p := AudioStreamPlayer.new()
 		add_child(p)
 		_players.append(p)

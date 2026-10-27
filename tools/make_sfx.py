@@ -100,7 +100,55 @@ def alert():
     return finish(mix([(0.0, horn_note(233.1, 0.34), 0.85), (0.4, horn_note(311.1, 0.56), 1.0)], 1.0), peak=0.8)
 
 
+# ---------- 下面四个是"手感音"：都比报警音轻，混战里一直响也不该抢戏 ----------
+
+def knock(f, dur=0.18, seed=1):
+    """木头/骨头被敲一下：低频下滑 + 一小撮噪声当"咔"。盖房子、砸建筑都用它"""
+    t = np.arange(int(dur * RATE)) / RATE
+    freq = f * (1.0 + 1.1 * np.exp(-t / 0.03))    # 起音高、几十毫秒内落回基频
+    body = np.sin(2 * np.pi * np.cumsum(freq) / RATE) * np.exp(-t / 0.055)
+    rng = np.random.default_rng(seed)
+    n = rng.standard_normal(len(t))
+    click = np.diff(n, prepend=0.0) * np.exp(-t / 0.010) * 0.30
+    att = np.clip(t / 0.003, 0.0, 1.0)
+    return (body + click) * att
+
+
+def build_done():
+    """笃、笃—叮：两下锤子收工，再落一声亮铃。每座房子完工放一次"""
+    a = knock(150.0, 0.16, seed=3)
+    b = knock(178.0, 0.16, seed=4)
+    ch = strike(1318.5, 0.9, CHIME, click=0.10, seed=11)
+    return finish(mix([(0.0, a, 0.85), (0.15, b, 0.75), (0.32, ch, 0.9)], 1.35), peak=0.78)
+
+
+def thud():
+    """闷响：自家房子被砸。低频、不带金属味——要"砸在木头上"，不是"打铁" """
+    y = knock(92.0, 0.30, seed=5)
+    return finish(y, peak=0.85, fade=0.09)
+
+
+def horn_wave():
+    """进攻号角：两声（低音 → 五度上），比报警的 alert 更长更沉，一听就知道"波次来了"""
+    return finish(mix([(0.0, horn_note(155.6, 0.52), 0.9), (0.54, horn_note(233.1, 0.72), 1.0)], 1.4), peak=0.85)
+
+
+def kill():
+    """一只怪没了：短促下滑的"啵"。很轻（-12dB），混战里响成一串也不该盖过号角"""
+    dur = 0.14
+    t = np.arange(int(dur * RATE)) / RATE
+    f = 430.0 * (1.0 - 0.5 * t / dur)
+    y = np.sin(2 * np.pi * np.cumsum(f) / RATE) * np.exp(-t / 0.038)
+    rng = np.random.default_rng(13)
+    y += np.diff(rng.standard_normal(len(t)), prepend=0.0) * np.exp(-t / 0.008) * 0.20
+    return finish(y * np.clip(t / 0.002, 0.0, 1.0), peak=0.62, fade=0.04)
+
+
 if __name__ == "__main__":
     save("bell", bell())
     save("clear", clear())
     save("alert", alert())
+    save("build_done", build_done())
+    save("thud", thud())
+    save("horn_wave", horn_wave())
+    save("kill", kill())

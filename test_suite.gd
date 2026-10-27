@@ -1581,6 +1581,102 @@ func _light_rts_tests() -> void:
 			e.queue_free()
 	await tree.create_timer(0.25).timeout
 
+	# ---- 操作手感：右键拖出 10px 是拖镜头，不是派兵 ----
+	# 以前右键一按下就派兵，右手党想拖图只能改用中键（笔记本上不好按）
+	var rdu := Soldier.new()
+	rdu.setup(false)
+	rdu.position = m.open_point(Vector2(560, 420))
+	m.add_child(rdu)
+	m._set_selection([rdu])
+	# 经典图在最小缩放下视野正好铺满地图，镜头 x 会被 _clamp_camera 钉死在中心（根本没法平移），
+	# 所以平移类的断言必须先放大——这不是测试的凑合，是「经典图最小缩放 = 不能滚屏」的真实行为
+	m._zoom_camera(2.0)
+	m.center_on(Vector2(m.W * 0.5, m.H * 0.5))
+	await tree.create_timer(0.15).timeout
+	var cam0: Vector2 = m.cam.position
+	var dest0: Vector2 = rdu.move_target
+	var down := InputEventMouseButton.new()
+	down.button_index = MOUSE_BUTTON_RIGHT
+	down.pressed = true
+	down.position = Vector2(640, 360)
+	m._unhandled_input(down)
+	for i in 4:    # 一共拖 80px，远超 10px 阈值
+		var mv := InputEventMouseMotion.new()
+		mv.relative = Vector2(20, 0)
+		mv.position = Vector2(640 + 20 * (i + 1), 360)
+		m._unhandled_input(mv)
+	var up := InputEventMouseButton.new()
+	up.button_index = MOUSE_BUTTON_RIGHT
+	up.pressed = false
+	up.position = Vector2(720, 360)
+	m._unhandled_input(up)
+	# 拖了 80 屏幕像素 ÷ 2 倍缩放 = 40 世界像素。别按 80 去断言——那样会红得莫名其妙
+	_check(m.cam.position.distance_to(cam0) > 25.0,
+		"右键拖出 10px 就是拖镜头（%.0f → %.0f，80 屏幕像素 ÷ 2 倍缩放）" % [cam0.x, m.cam.position.x])
+	_check(rdu.move_target.distance_to(dest0) < 1.0, "拖镜头不会顺手把部队派出去")
+	# 点一下（不拖）= 照旧下命令
+	var click_at: Vector2 = m.open_point(Vector2(720, 560))
+	var d1 := rdu.move_target
+	var d2 := InputEventMouseButton.new()
+	d2.button_index = MOUSE_BUTTON_RIGHT
+	d2.pressed = true
+	d2.position = m.get_viewport().get_canvas_transform() * click_at
+	m._unhandled_input(d2)
+	var u2 := InputEventMouseButton.new()
+	u2.button_index = MOUSE_BUTTON_RIGHT
+	u2.pressed = false
+	u2.position = d2.position
+	m._unhandled_input(u2)
+	_check(rdu.move_target.distance_to(d1) > 20.0, "右键点一下（没拖）照旧派兵")
+	# 空格：空选回基地。
+	# 别直接和 base.position 比：center_on 会额外加一个"避开底栏"的 y 偏移，而且镜头会被边界 clamp。
+	# 先记下"正常回基地之后镜头应该在哪"，再挪走，看按空格能不能回到这个位置
+	m._deselect_all()
+	m.center_on(m.base.position)
+	var base_cam: Vector2 = m.cam.position
+	m.cam.position = Vector2(900, 300)
+	var sk := InputEventKey.new()
+	sk.keycode = KEY_SPACE
+	sk.pressed = true
+	m._unhandled_input(sk)
+	_check(m.cam.position.distance_to(base_cam) < 2.0,
+		"什么都没选的时候按空格 = 镜头回基地（900,300 → %.0f,%.0f）" % [m.cam.position.x, m.cam.position.y])
+	m._zoom_camera(0.5)    # 缩回复原（_zoom_camera 自己会 clamp 回最小缩放）
+	rdu.queue_free()
+	await tree.create_timer(0.2).timeout
+
+	# ---- 音效：该响的时候真的响了（sfx.played 在无头下也记账）----
+	# 无头不真的出声，但 play() 会先记一笔，所以"有没有触发"是可测的
+	var snd := Goo.new()
+	snd.position = m.open_point(Vector2(300, 320))
+	m.add_child(snd)
+	var keep_from := snd
+	var k_before := int(m.sfx.played.get("kill", 0))
+	var hitter := Soldier.new()
+	hitter.setup(false)
+	hitter.position = m.open_point(Vector2(320, 320))
+	m.add_child(hitter)
+	snd.take_damage(999.0, hitter)    # 兵打死 = 击杀音 + 记战功
+	await tree.create_timer(0.2).timeout
+	_check(int(m.sfx.played.get("kill", 0)) > k_before, "怪被兵打死会响一声击杀")
+	var thud_before := int(m.sfx.played.get("thud", 0))
+	var g2s := Goo.new()
+	g2s.position = m.open_point(m.base.position + Vector2(80, 0))
+	m.add_child(g2s)
+	m.base.take_damage(5.0, g2s)      # 自家房子挨砸 = 闷响
+	m.base.hp = m.base.max_hp
+	_check(int(m.sfx.played.get("thud", 0)) > thud_before, "自家房子被砸会响闷响")
+	# 节流：混战里几十只一起死，不节流会糊成一片白噪音
+	var bd0 := int(m.sfx.played.get("build_done", 0))
+	m.sfx_play("build_done", 0.12)
+	m.sfx_play("build_done", 0.12)
+	_check(int(m.sfx.played.get("build_done", 0)) == bd0 + 1, "同类音效有节流（连响两次只放一次）")
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	hitter.queue_free()
+	await tree.create_timer(0.25).timeout
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
 	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；
@@ -3882,9 +3978,13 @@ func _alert_tests() -> void:
 	m.add_child(g)
 	g.process_mode = Node.PROCESS_MODE_DISABLED
 	var hp0: float = m.base.hp
+	var th0: int = int(m.sfx.played.get("thud", 0))
 	m.base.take_damage(1.0, g)
-	_check(m.alerts.size() == 1 and m.alerts[0].what == "base" and int(m.sfx.played.get("alert", 0)) == n0 + 1 and m.sfx.last == "alert",
+	# 用 played 里"号角响了一次"来判断，别用 sfx.last：房子挨打同时还会响一声闷响（thud），
+	# last 记的是"最后放的那个声音"，被闷响覆盖掉是很正常的，拿它当断言会假红
+	_check(m.alerts.size() == 1 and m.alerts[0].what == "base" and int(m.sfx.played.get("alert", 0)) == n0 + 1,
 		"基地挨怪打：报警 + 号角")
+	_check(int(m.sfx.played.get("thud", 0)) == th0 + 1, "基地挨怪打同时响一声闷响（听得出是砸在木头上）")
 	var act: Array = m.active_alerts()
 	_check(act.size() == 1 and act[0].pos.distance_to(bp) < 1.0 and m.alert_text(act[0].what) == "基地遭到攻击！", "小地图在基地那儿闪：基地遭到攻击！")
 	await tree.create_timer(0.3).timeout

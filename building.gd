@@ -102,6 +102,13 @@ func take_damage(amount: float, from: Node2D = null) -> void:
 	hp -= amount
 	_hurt_until = Time.get_ticks_msec() + 160
 	queue_redraw()
+	# 自家房子挨砸的闷响（全局节流 0.28 秒，混战里不会连成噪音）。
+	# 只报"谁在打我的房子"，不区分打的是哪座——耳朵只需要知道"那边在挨打"
+	if team == 0 and from != null and is_instance_valid(from) and from.get("team") == 1:
+		if _game_ref == null or not is_instance_valid(_game_ref):
+			_game_ref = get_tree().get_first_node_in_group("game")
+		if _game_ref != null and _game_ref.has_method("sfx_play"):
+			_game_ref.sfx_play("thud", 0.28)
 	# 巢穴：一挨打就往外吐守军（拆巢穴不能白给）。被拆死的那一下不吐
 	if kind == "hive" and team == 1 and hp > 0.0:
 		_spit_check(from)
