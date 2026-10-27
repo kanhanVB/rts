@@ -87,6 +87,13 @@ func _start_wave() -> void:
 func wave_enemies() -> Array:
 	return get_tree().get_nodes_in_group("enemies").filter(func(e): return is_instance_valid(e) and not (e is Goo and e.is_guard()))
 
+## 这一波还剩几只（还没放出来的 + 场上活着的）。
+## 顶栏的"还剩 N 只"和 T 键找怪都读它——顶栏写着"清完即胜"却不说还剩几只，
+## 玩家只能靠小地图上的红点自己数，最后两三只躲在林子里时最烦
+func remaining() -> int:
+	var live: Array = wave_enemies().filter(func(e): return is_instance_valid(e) and not e.dead)
+	return _queue.size() + live.size()
+
 ## 前 n 波里出现过这个品种没有
 func _seen(t: String, n: int) -> bool:
 	for i in mini(n, WAVES.size()):

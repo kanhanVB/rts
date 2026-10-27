@@ -144,6 +144,20 @@ def kill():
     return finish(y * np.clip(t / 0.002, 0.0, 1.0), peak=0.62, fade=0.04)
 
 
+def place_ok():
+    """落工地：一声轻"咔哒"。短到只有 0.12 秒——它每盖一座房子就响，长了会烦"""
+    a = knock(210.0, 0.07, seed=21)
+    b = knock(150.0, 0.09, seed=22)
+    return finish(mix([(0.0, a, 0.7), (0.055, b, 0.9)], 0.20), peak=0.55, fade=0.05)
+
+
+def place_bad():
+    """放不下：两声闷"嘟"往下走（否定）。比错误音（一声尖响）收敛——这不是程序报错，是提醒"""
+    a = knock(138.0, 0.10, seed=31)
+    b = knock(104.0, 0.12, seed=32)
+    return finish(mix([(0.0, a, 0.9), (0.115, b, 1.0)], 0.30), peak=0.62, fade=0.06)
+
+
 if __name__ == "__main__":
     save("bell", bell())
     save("clear", clear())
@@ -152,3 +166,5 @@ if __name__ == "__main__":
     save("thud", thud())
     save("horn_wave", horn_wave())
     save("kill", kill())
+    save("place_ok", place_ok())
+    save("place_bad", place_bad())

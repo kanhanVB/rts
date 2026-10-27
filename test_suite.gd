@@ -44,6 +44,10 @@ func run() -> void:
 		await _flee_tests()
 		_done()
 		return
+	if "--only=aoe" in OS.get_cmdline_user_args():
+		await _aoe_tests()    # 只跑帝国式操作（生产队列 / 选择 / 热键 / 删除）——调试用
+		_done()
+		return
 	if "--only=line" in OS.get_cmdline_user_args():
 		await _line_probe()    # 单独探针：加工线总量守恒（-- --test --only=line，20 秒一轮）
 		_done()
@@ -1677,6 +1681,88 @@ func _light_rts_tests() -> void:
 	hitter.queue_free()
 	await tree.create_timer(0.25).timeout
 
+	# ---- 提示条：要紧话（prio 1）不被日常话顶掉 ----
+	m._hud_msg_t = 0.0
+	m._hud_msg("木头不够：还差 25", 1)
+	m._hud_msg("已取消放置箭塔", 0)
+	_check(m._hud_msg_label.text == "木头不够：还差 25", "要紧提示不会被「已取消」这类日常提示顶掉")
+	m._hud_msg_t = 0.0
+	m._hud_msg("已取消放置箭塔", 0)
+	m._hud_msg("工地已放置", 0)
+	_check(m._hud_msg_label.text == "工地已放置", "日常提示之间照旧互相顶（别把优先级做成一堵墙）")
+	m._hud_msg_t = 0.0
+
+	# ---- T：镜头跳到下一只怪 ----
+	# 不放大不行：经典图最小缩放下视野正好铺满地图，镜头被 _clamp_camera 钉在中心，跳没跳看不出来
+	m._zoom_camera(2.0)
+	var far := Goo.new()
+	far.position = m.open_point(Vector2(m.W * 0.35, m.H * 0.3))
+	m.add_child(far)
+	await tree.create_timer(0.2).timeout
+	var cam_b: Vector2 = m.cam.position
+	var seeked: bool = m.seek_enemy()
+	_check(seeked and m.cam.position.distance_to(cam_b) > 40.0,
+		"按 T 把镜头拽到怪身上（%d,%d → %d,%d）" % [cam_b.x, cam_b.y, m.cam.position.x, m.cam.position.y])
+	# center_on 会加一个"避开底栏"的 y 偏移，所以别要求严丝合缝
+	_check(m.cam.position.distance_to(far.position) < 260.0,
+		"跳过去是冲着那只怪去的（离它 %.0f px）" % m.cam.position.distance_to(far.position))
+	far.queue_free()
+	await tree.create_timer(0.25).timeout
+	m._hud_msg_t = 0.0
+	_check(not m.seek_enemy() and m._hud_msg_label.text.contains("没有敌人"),
+		"场上没怪时按 T 会说句话，不静默失败")
+
+	# ---- 顶栏「剩 N」= 还没放出来的 + 场上活着的 ----
+	var g4 := Goo.new()
+	g4.position = m.open_point(Vector2(m.W * 0.5, m.H * 0.4))
+	m.add_child(g4)
+	await tree.create_timer(0.25).timeout
+	var queued: int = m._wave_mgr._queue.size()
+	var alive_n: int = m._wave_mgr.remaining()
+	_check(alive_n == queued + m._wave_mgr.wave_enemies().size() and alive_n >= 1,
+		"「剩 N 只」= 还没放出来的 %d + 场上的 %d" % [queued, alive_n - queued])
+
+	# ---- 受袭箭头：能点，点了镜头飞过去 ----
+	# headless 不渲染、_draw 永远不跑，所以命中判定是单独的纯函数 alert_hits()——
+	# 要是写在 _draw 里，这条就永远测不到（和"孵化条没画出来"同一类坑）
+	m.alerts.clear()
+	m.cam.position = Vector2(m.W * 0.35, m.H * 0.7)
+	await tree.create_timer(0.1).timeout
+	m.alert_attack(Vector2(m.W - 60.0, 60.0), "base")
+	var hits: Array = m.hud._edge.alert_hits()
+	_check(not hits.is_empty(), "基地在画面外挨打：屏幕上出现受袭箭头（%d 支）" % hits.size())
+	if not hits.is_empty():
+		var arrow_at: Vector2 = hits[0]["c"]
+		var cam_d: Vector2 = m.cam.position
+		var ac := InputEventMouseButton.new()
+		ac.button_index = MOUSE_BUTTON_LEFT
+		ac.pressed = true
+		ac.position = arrow_at
+		m._unhandled_input(ac)
+		var au := InputEventMouseButton.new()
+		au.button_index = MOUSE_BUTTON_LEFT
+		au.pressed = false
+		au.position = arrow_at
+		m._unhandled_input(au)
+		_check(m.cam.position.distance_to(cam_d) > 100.0,
+			"点边上的受袭箭头 = 镜头飞过去（%d → %d）" % [cam_d.x, m.cam.position.x])
+		_check(not m._dragging, "点箭头不会顺手开始拖框")
+	m.alerts.clear()
+	m._zoom_camera(0.5)
+	g4.queue_free()
+	await tree.create_timer(0.2).timeout
+
+	# ---- 放置成功 / 放不下的两个手感音 ----
+	var pb0 := int(m.sfx.played.get("place_bad", 0))
+	m._placing_kind = "barracks"
+	var bad_click := InputEventMouseButton.new()
+	bad_click.button_index = MOUSE_BUTTON_LEFT
+	bad_click.pressed = true
+	bad_click.position = Vector2(6, 6)    # 屏幕左上角 = 地图外，肯定放不下
+	m._unhandled_input(bad_click)
+	_check(int(m.sfx.played.get("place_bad", 0)) > pb0, "放不下会闷「嘟」一声（不是静默）")
+	m._placing_kind = ""
+
 ## ---- 农民自保：怪凑近就跑，怪走远自己回去 ----
 func _flee_tests() -> void:
 	# 先把场上所有怪清掉，让"有没有怪"这件事由测试自己决定；
@@ -2584,6 +2670,12 @@ func _td_tests() -> void:
 func _aoe_tests() -> void:
 	var tree := m.get_tree()
 	m._deselect_all()
+	# 先清场：新兵是从基地走 170px 去集结点的，半路被路过的 Goo 吃掉就成了"人数没涨"。
+	# 那测的是这一局的运气，不是生产队列——之前这条偶发红过，原因就在这儿
+	for e in tree.get_nodes_in_group("enemies"):
+		if is_instance_valid(e):
+			e.queue_free()
+	await tree.create_timer(0.25).timeout
 	# 生产队列：先扣钱再排队，取消全额退；集结点
 	m.train_scale = 1.0
 	m.economy.wood += 200.0
@@ -2605,7 +2697,10 @@ func _aoe_tests() -> void:
 	for w in m._player_workers():
 		if w.move_target.distance_to(m.open_point(rally)) < 30.0:
 			fresh = w
-	_check(m._player_workers().size() == nw0 + 1 and fresh != null, "读条完出 1 个农民，走向集结点")
+	_check(m._player_workers().size() == nw0 + 1 and fresh != null,
+		"读条完出 1 个农民，走向集结点（农民 %d→%d，fresh=%s，场上怪 %d 只，基地木 %.0f）" % [
+			nw0, m._player_workers().size(), str(fresh != null),
+			tree.get_nodes_in_group("enemies").size(), m.economy.wood])
 	m.base.rally = Vector2.INF
 	m.base.rally_node = null
 	m.train_scale = 0.0

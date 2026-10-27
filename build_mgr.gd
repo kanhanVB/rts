@@ -27,10 +27,10 @@ func _ready() -> void:
 func _game() -> Node2D:
 	return get_tree().get_first_node_in_group("game")
 
-func _hud(text: String) -> void:
+func _hud(text: String, prio := 0) -> void:
 	var g := _game()
 	if g:
-		g._hud_msg(text)
+		g._hud_msg(text, prio)
 
 func add_building(kind: String, pos: Vector2, team_: int) -> Building:
 	var b := Building.new()
@@ -152,14 +152,14 @@ const WHEEL_DEEP := 6.0    # 轮心至少泡进水面这么深
 func try_place(kind: String, pos: Vector2, eng: Node2D) -> int:
 	var why := placement_error(pos, kind)
 	if why != "":
-		_hud(why)
+		_hud(why, 1)
 		return 1
 	var cost: Dictionary = COST_TABLE.get(kind, {})
 	var g := _game()
 	if g == null:
 		return 2
 	if not g.economy.can_afford(cost):
-		_hud(g.economy.short_msg(cost))
+		_hud(g.economy.short_msg(cost), 1)
 		return 2
 	g.economy.spend(cost)
 	var site := ConstructionSite.new()

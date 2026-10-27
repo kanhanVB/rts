@@ -912,8 +912,20 @@ func _end(result: String, msg: String) -> void:
 		overlay_stats.text = stats_text()
 
 ## ================================ HUD 提示 ================================
-## 所有"为什么不行"都在屏幕上说清楚，绝不静默失败
-func _hud_msg(text: String) -> void:
+## 所有"为什么不行"都在屏幕上说清楚，绝不静默失败。
+## 优先级：prio 1 的"要紧话"（放不下 / 资源不够 / 家里挨打 / 找怪）不会被 prio 0 的日常话顶掉，
+## 反过来 prio 1 会立刻盖掉正在显示的 prio 0。以前谁都能顶谁——"木头不够"经常一闪就被
+## "已取消放置"冲没了，玩家根本没看见为什么盖不成。
+## 同一句话重复来（连点放不下去的空地）只续时间、不重弹，不然提示条会一直闪。
+var _hud_msg_prio := 0
+
+func _hud_msg(text: String, prio := 0) -> void:
+	if _hud_msg_t > 0.0 and _hud_msg_prio > prio:
+		return
+	if _hud_msg_label.text == text and _hud_msg_t > 0.0:
+		_hud_msg_t = 3.0
+		return
+	_hud_msg_prio = prio
 	_hud_msg_label.text = text
 	_hud_msg_t = 3.0
 	_hud_msg_label.visible = true
@@ -921,8 +933,9 @@ func _hud_msg(text: String) -> void:
 ## ================================ 输入（帝国时代式） ================================
 ## 左键：点选 / 拖框；Shift+左键 加减选；双击或 Ctrl+左键 = 选屏幕内同类
 ## 右键：智能指令（移动 / 采集 / 攻击 / 交货）；选中基地/兵营右键 = 集结点；Shift+右键 = 排路点
-## 空格 镜头回到选中（**什么都没选的时候 = 回基地**）· P 暂停 · N 叫波 · B 警钟 · M 静音 · Del 删除 · Esc 取消/取消选中 · F1 说明
+## 空格 镜头回到选中（**什么都没选的时候 = 回基地**）· P 暂停 · N 叫波 · B 警钟 · M 静音 · Del 删除 · Esc 取消/取消选中 · F1 说明 · T 找下一只怪
 ## 数字 选队（Ctrl 存队 / Shift 并队，连按两下跳镜头）· 中键拖动平移 · **右键拖出 10px 也是平移**（不派兵）
+## 点屏幕边上的受袭箭头 = 镜头飞过去（箭头只在那边在画面外时才画）
 ## 命令卡不配热键（一律点按钮）——唯一例外是士兵的「撤退」挂了 W
 var _target_mode := ""            # "attack" / "patrol"：按了那个按钮，等左/右键点目的地
 ## 兼容老代码 / 机器人脚本：A 移动待命 = 目标模式是 attack
@@ -972,9 +985,21 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
+				# 点屏幕边上的受袭箭头 = 镜头飞过去。箭头原本只是"那边出事了"的提示，
+				# 看见提示还得自己去小地图找、再拖镜头，等于白指一次。
+				# 放置模式优先：正在选位置时别抢左键
+				var hit := hud.alert_hit(event.position) if _placing_kind == "" else Vector2.INF
+				if hit != Vector2.INF:
+					center_on(hit)
+					return
 				if _placing_kind != "":
 					# 0=成功落工地 / 2=买不起 → 结束放置模式；1=位置不合适 → 可以再点
 					var r := _build_mgr.try_place(_placing_kind, _to_world(event.position), _build_eng)
+					if r == 0:
+						sfx_play("place_ok", 0.05)
+					else:
+						# 点着玩的时候会连点：不放就一直"嘟嘟"会烦，节流到 0.18 秒
+						sfx_play("place_bad", 0.18)
 					if r != 1:
 						_placing_kind = ""
 					queue_redraw()
@@ -1073,6 +1098,8 @@ func _on_key(event: InputEventKey) -> void:
 		ring_bell()
 	elif k == KEY_M:
 		toggle_mute()
+	elif k == KEY_T:
+		seek_enemy()
 	elif k == KEY_SPACE:
 		# 选着东西 = 镜头跳过去；什么都没选 = 回基地。
 		# 以前空选按空格毫无反应，"找不到家在哪了"只能靠双击小地图
@@ -1273,6 +1300,26 @@ func _center_on_selection() -> void:
 	for u in list:
 		c += u.position
 	center_on(c / list.size())
+
+## T：镜头跳到下一只场上的怪（按几次绕一圈）。
+## 收尾阶段"还剩两三只躲哪儿了"是最烦的事——小地图红点只有几个像素，
+## 受袭箭头只指"家里挨打"，这个键把画面直接拽到怪脸上
+var _seek_i := 0
+
+func seek_enemy() -> bool:
+	var list: Array = _wave_mgr.wave_enemies().filter(
+		func(e): return is_instance_valid(e) and not e.dead)
+	if list.is_empty():
+		_hud_msg("场上没有敌人了——要接着打就按 N 提前叫波", 1)
+		return false
+	# 按 y 排一遍再循环：wave_enemies() 返回的是节点顺序，死了又生会乱跳，
+	# 排一下之后连按 T 是从上往下扫，不会来回打转
+	list.sort_custom(func(a, b): return a.position.y < b.position.y)
+	_seek_i = _seek_i % list.size()
+	center_on(list[_seek_i].position)
+	_hud_msg("场上还剩 %d 只" % list.size(), 1)
+	_seek_i += 1
+	return true
 
 ## Del：删除选中的己方单位/建筑（英雄工程师和基地不能删）；排队的训练全额退
 func _delete_selected() -> void:
@@ -1874,6 +1921,10 @@ func alert_attack(pos: Vector2, what: String) -> void:
 	alerts.append({"pos": pos, "what": what, "t0": game_time, "last": game_time})
 	# 新警报 = 家里真被砸了：轻轻震一下屏（老警报重复触发不震，不然一直在抖）
 	shake(3.2 if what == "base" else 2.2)
+	# 顺带在提示条上说一句。只在新警报时（同一处 6 秒内不重复）说，而且只说基地/前哨：
+	# 农民被摸太频繁，那样提示条会一直闪。光有号角和箭头的话，镜头在远处时还得自己找是哪儿
+	if what == "base" or what == "outpost":
+		_hud_msg(alert_text(what) + "（点屏幕边上的箭头能飞过去）", 1)
 	if game_time - _alert_sfx_t >= ALERT_SFX_GAP:
 		_alert_sfx_t = game_time
 		sfx.play("alert")
@@ -2002,7 +2053,7 @@ func upgrade_tower(b: Building) -> bool:
 	if b == null or not b.can_upgrade():
 		return false
 	if not economy.can_afford(Economy.COST_TOWER_UP):
-		_hud_msg(economy.short_msg(Economy.COST_TOWER_UP) + "（木板靠木工台、铁锭靠熔炉）")
+		_hud_msg(economy.short_msg(Economy.COST_TOWER_UP) + "（木板靠木工台、铁锭靠熔炉）", 1)
 		return false
 	economy.spend(Economy.COST_TOWER_UP)
 	b.upgrade()
@@ -2250,7 +2301,7 @@ func _enqueue(b: Building, kind: String) -> bool:
 		return false
 	var cost: Dictionary = TRAIN[kind].cost
 	if not _can_afford(cost):
-		_hud_msg(economy.short_msg(cost))
+		_hud_msg(economy.short_msg(cost), 1)
 		return false
 	_spend(cost)
 	var t: float = TRAIN[kind].time * train_scale
@@ -2354,7 +2405,7 @@ func research(id: String) -> bool:
 		return false
 	var cost: Dictionary = d.cost
 	if not _can_afford(cost):
-		_hud_msg(economy.short_msg(cost))
+		_hud_msg(economy.short_msg(cost), 1)
 		return false
 	_spend(cost)
 	var t: float = float(d.time) * train_scale
@@ -2405,7 +2456,7 @@ func _start_placing(kind: String) -> void:
 	_build_eng = selected[0]
 	var cost: Dictionary = BuildManager.COST_TABLE.get(kind, {})
 	if not _can_afford(cost):
-		_hud_msg(economy.short_msg(cost) + " · 框选农民右键点树，多派几个伐木")
+		_hud_msg(economy.short_msg(cost) + " · 框选农民右键点树，多派几个伐木", 1)
 		return
 	_placing_kind = kind
 	_hud_msg("点击地图放置%s（右键取消）· 工程师会亲自过去施工" % _place_name(kind))
@@ -2644,9 +2695,18 @@ func _update_labels() -> void:
 		else:
 			wave_label.text = "敌情：第一波还有 %d 秒 · %s" % [int(_wave_mgr.wave_timer), WaveManager.wave_text(1)]
 	elif _wave_mgr.wave >= WaveManager.MAX_WAVES:
-		wave_label.text = "最后一波已出，清完即胜"
+		# 顶栏写"清完即胜"，但还剩几只得自己数小地图上的红点——补上数字，少了才知道该去找
+		var left := _wave_mgr.remaining()
+		if left > 0:
+			wave_label.text = "最后一波已出 · 还剩 %d 只（按 T 找）" % left
+		else:
+			wave_label.text = "最后一波已出，清完即胜"
 	else:
 		wave_label.text = "第 %d/%d 波 · 下一波 %d 秒：%s" % [_wave_mgr.wave, WaveManager.MAX_WAVES, int(_wave_mgr.wave_timer), WaveManager.wave_text(_wave_mgr.wave + 1)]
+		# 这一波还没清完也报个数（放出来的 + 还没放的）：不然"打完了没"全靠猜
+		var alive := _wave_mgr.remaining()
+		if alive > 0:
+			wave_label.text += " · 剩 %d" % alive
 
 ## ================================ 产能面板 ================================
 func _update_panel() -> void:
@@ -2823,6 +2883,17 @@ func _draw() -> void:
 		var rect := Rect2(_drag_start, get_global_mouse_position() - _drag_start).abs()
 		draw_rect(rect, Color(0.6, 1.0, 0.5, 0.1))
 		draw_rect(rect, Color(0.75, 1.0, 0.6, 0.85), false, 2.0 / cam.zoom.x)
+		# 框里已经圈住几个：松手之前就知道会选中谁，不用靠猜（帝国/星际都把数字印在框角）
+		var n := 0
+		for u in get_tree().get_nodes_in_group("player_units"):
+			if rect.has_point(u.position):
+				n += 1
+		if n > 0:
+			# 数字底下垫一块暗绿牌子：直接写白字的话，压在城堡/树林上就看不清了
+			var fs := int(18.0 / cam.zoom.x)
+			var lp := rect.position + Vector2(7.0, 7.0) / cam.zoom.x
+			draw_rect(Rect2(lp, Vector2(30.0, 24.0) / cam.zoom.x), Color(0.1, 0.2, 0.05, 0.62))
+			Art.text(self, lp + Vector2(15.0, 18.5) / cam.zoom.x, "%d" % n, fs, Color(0.86, 1.0, 0.72))
 	# ---- 放置设施的幽灵预览：半透明建筑贴图，能放 = 绿，不能放 = 红 ----
 	# 已经挖断的路段：画个缺口标记（地形本身会把壕沟画成悬崖色，这里再点明白一点）
 	for s in severed:

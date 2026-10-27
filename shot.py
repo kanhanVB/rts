@@ -78,6 +78,17 @@ def drag(h, x0, y0, x1, y1):
     mouse_btn(h, x1, y1, down=False)
 
 
+def drag_hold(h, x0, y0, x1, y1):
+    """按下 -> 移动，**不抬起**：截图要拍"拖框中"的样子（框里那个已选 N）"""
+    u.SetCursorPos(*to_screen(h, x0, y0))
+    mouse_btn(h, x0, y0, down=True)
+    time.sleep(0.15)
+    steps = 6
+    for i in range(1, steps + 1):
+        u.SetCursorPos(*to_screen(h, int(x0 + (x1 - x0) * i / steps), int(y0 + (y1 - y0) * i / steps)))
+        time.sleep(0.05)
+
+
 def to_screen(h, cx, cy):
     pt = wt.POINT(cx, cy)
     u.ClientToScreen(h, ctypes.byref(pt))
@@ -131,6 +142,9 @@ def main():
         elif a == "--key":
             steps.append(("key", int(args[i + 1])))
             i += 2
+        elif a == "--holdbox":
+            steps.append(("hold", [int(v) for v in args[i + 1].split(",")]))
+            i += 2
         elif a == "--mouse":
             steps.append(("mouse", [int(v) for v in args[i + 1].split(",")]))
             i += 2
@@ -156,6 +170,9 @@ def main():
             if kind == "box":
                 drag(h, val[0], val[1], val[2], val[3])
                 time.sleep(1.0)
+            elif kind == "hold":
+                drag_hold(h, val[0], val[1], val[2], val[3])
+                time.sleep(0.3)
             elif kind == "right":
                 click(h, val[0], val[1], right=True)
                 time.sleep(1.5)

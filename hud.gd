@@ -57,6 +57,7 @@ var _sel: SelPanel
 var _idle_w: Button
 var _idle_s: Button
 var _overlay_pic: TextureRect
+var _edge: Control        # 屏幕边缘受袭箭头（edge_alerts.gd）
 var minimap: Control
 
 func _init(m: Node2D) -> void:
@@ -166,7 +167,17 @@ func build() -> void:
 	var ea = preload("res://edge_alerts.gd").new()    # 用 preload 而不是 class_name：类缓存没刷的时候不会找不到
 	ea.main = main
 	root.add_child(ea)
+	_edge = ea
 	_build_top_bar()
+	_build_bottom_bar()
+	_build_toast()
+	_build_panel()
+	_build_help()
+	_build_overlay()
+
+## 点到了屏幕边上的受袭箭头没有？点中返回那边的世界坐标（main 拿它飞镜头），否则 Vector2.INF
+func alert_hit(screen: Vector2) -> Vector2:
+	return _edge.hit_alert(screen) if _edge != null else Vector2.INF
 	_build_bottom_bar()
 	_build_toast()
 	_build_panel()
@@ -619,6 +630,8 @@ func _build_help() -> void:
   选中基地或兵营，右键地面 = 集结点
   移动镜头：鼠标推到画面边 / 方向键 / 中键或右键拖着走
   空格 = 回选中；什么都没选的时候 = 回基地
+  顶栏的「剩 N」= 这一波还剩几只 · T = 镜头跳到下一只
+  基地/前哨在画面外挨打：屏幕边上有红箭头，**点它就能飞过去**
   命令都点底栏按钮，鼠标悬停有说明
 
 兵怎么打
