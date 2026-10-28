@@ -17,10 +17,15 @@ var rich := false
 var guard_at := Vector2.INF
 var _guard_ms := -1000
 var _guarded := false
+## 主场景的引用：_exit_tree 里 is_inside_tree() 已经是 false 了，
+## 那时候再去查 group 一个都拿不到——小地图上被砍掉的那棵树会一直留着那个像素
+## （地图上早就空了，小地图还画着一棵树）
+var _game: Node = null
 
 func _ready() -> void:
 	add_to_group("res_nodes")
 	set_process(kind == "ore")    # 只有矿堆要按储量换图（富矿还要闪），树不用每帧跑
+	_game = get_tree().get_first_node_in_group("game")
 	var t := Terrain.current
 	if solid and t != null:
 		cell = Vector2i(int(position.x / Terrain.CELL), int(position.y / Terrain.CELL))
@@ -30,9 +35,8 @@ func _exit_tree() -> void:
 	var t := Terrain.current
 	if solid and cell.x >= 0 and t != null and is_instance_valid(t) and not t.is_queued_for_deletion():
 		t.set_cell(cell, Terrain.T.EMPTY)
-		var g := get_tree().get_first_node_in_group("game") if is_inside_tree() else null
-		if g != null and g.has_method("on_cell_cleared"):
-			g.on_cell_cleared(cell)
+		if is_instance_valid(_game) and _game.has_method("on_cell_cleared"):
+			_game.on_cell_cleared(cell)
 
 ## 变成富矿（add_child 之后调）：储量 600、归 camp_pos 那个据点看守
 func make_rich(camp_pos: Vector2) -> void:

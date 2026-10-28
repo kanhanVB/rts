@@ -70,6 +70,12 @@ func _step(delta: float) -> void:
 			if build_site == null or not is_instance_valid(build_site):
 				_drop_site()
 				return
+			# 站在工地上挨咬：先放下锤子打回去。以前这里一眼敌人都不看，
+			# 一路敲到被啃死（Goo 咬工地的时候正好就贴在旁边）
+			var foe := _acquire_target()
+			if foe != null:
+				command_attack(foe, false)    # 自卫，不是玩家手令：够不着会松口
+				return
 			# 抡锤特效
 			if _cd <= 0.0:
 				_cd = 0.4
@@ -77,9 +83,11 @@ func _step(delta: float) -> void:
 				attack_fx_to(build_site.position)
 			build_site.progress += delta / build_site.build_time
 			if build_site.progress >= 1.0:
-				var game := get_tree().get_first_node_in_group("game")
-				if game:
-					get_tree().get_first_node_in_group("build_mgr").complete_site(build_site)
+				# 交给 build_mgr 收尾（造出真建筑 + 回收工地）。以前是先查 "game" 组、
+				# 再拿 "build_mgr" 组的节点直接用：build_mgr 不在就空引用报错
+				var bm := get_tree().get_first_node_in_group("build_mgr")
+				if bm != null:
+					bm.complete_site(build_site)
 				build_site = null
 				state = State.IDLE
 
@@ -188,12 +196,19 @@ func _fight(t: Node2D, delta: float) -> void:
 		move_target = t.position
 		_move_toward(move_target, delta)
 
-## 索敌逻辑同剑士：玩家指定优先，否则找索敌圈内的 Goo
+## 索敌逻辑同剑士：玩家指定优先，否则找索敌圈内的 Goo。
+## 自动挑中的目标跑出 1.5 个索敌圈就松口（和剑士同一条规矩）。不松手的话
+## A 移动会被一个够不到的旧目标永久劫持：一直往它那儿走，永远到不了 A 移动的终点
 func _acquire_target() -> Node2D:
 	if attack_target != null:
-		if is_instance_valid(attack_target):
+		if not is_instance_valid(attack_target):
+			attack_target = null
+		elif attack_target == cmd_target:
 			return attack_target
-		attack_target = null
+		elif position.distance_to(attack_target.position) <= aggro_range * AUTO_LEASH:
+			return attack_target
+		else:
+			attack_target = null    # 跑远了：松口，回去干正事
 	var best: Node2D = null
 	var best_d := aggro_range
 	for e in _group("enemies"):
@@ -295,17 +310,26 @@ func command_build(site: ConstructionSite) -> void:
 	site.assigned = self
 	attack_target = null
 	move_order = false
+	move_target = site.position
 	_path = _find_path(site.position)
 	_path_idx = 0
 	state = State.TO_SITE
 
-func command_attack(t: Node2D) -> void:
+## manual = 玩家亲手点的：记成 cmd_target，追到底。
+## false = 自己判断要打的（施工时被咬、A 移动路上遇到）：够不着会自动松口
+func command_attack(t: Node2D, manual := true) -> void:
+	# 正在盖房子也得先放下去。以前这里不放手，右键点怪被静默吞掉：
+	# 人理都不理，继续抡锤（state 还是 BUILDING，那条分支压根不看指令）
+	_drop_site()
 	_drop_fix()
 	attack_target = t
+	cmd_target = t if manual else null
 	move_target = t.position
 	_path = _find_path(t.position)
 	_path_idx = 0
 	move_order = false
+	_amove = false
+	_amove_fight = false
 
 func command_move(pos: Vector2) -> void:
 	super(pos)
@@ -348,10 +372,19 @@ func _done_with_order() -> bool:
 		return not move_order and attack_target == null
 	return state == State.IDLE and not move_order and attack_target == null
 
+## 松开手上的工地（变回无主，别的工程师能接手）。
+## 顺带把状态机拉回 IDLE：以前只清 build_site 不动 state，工地被 Goo 拆掉之后
+## 状态永远停在 TO_SITE / BUILDING 两个分支里，每帧「build_site 是 null → return」
+## 空转——这个工程师从此既不盖房子也不修房子，也不反击，跟丢了魂一样
 func _drop_site() -> void:
 	if build_site != null and is_instance_valid(build_site):
 		build_site.assigned = null    # 工地无主，别的工程师可以接手
 	build_site = null
+	if state == State.TO_SITE or state == State.BUILDING:
+		state = State.IDLE
+		move_target = position
+		_path = PackedVector2Array()
+		_path_idx = 0
 
 ## 阵亡 / 被删：把手上的工地松开。
 ## 不松的话工地一直挂着"施工中"，而别的工程师只认 assigned == null 的工地，

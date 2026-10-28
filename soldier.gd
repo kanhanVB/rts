@@ -228,6 +228,11 @@ func _step_post(delta: float) -> void:
 			_walk(home, delta)
 		else:
 			move_target = position
+			# 站好了就把旧路丢干净。_can_yield() 要 _path.is_empty() 才肯给队友让路，
+			# 而走到 POST_SETTLE 就停下的那一次路径还剩最后一小截没消费掉——
+			# 于是这个兵明明站在家门口，却因为"还记着一条路"永远不肯让开，成了路障
+			_path = PackedVector2Array()
+			_path_idx = 0
 		return
 	# 有目标：贴上去。进射程就站定输出（这就是"钉住"——怪会停下跟他对砍）
 	var d := position.distance_to(t.position)
@@ -449,20 +454,20 @@ func _step(delta: float) -> void:
 			reach += t.size * 0.5      # 打建筑按体量放宽射程
 		if d <= reach:
 			move_target = position     # 站定输出
-			_calm_t = 0.0
-			if _cd <= 0.0:
-				_cd = attack_cooldown
-				attack_anim = 1.0    # 挥刀/拉弓动画
-				t.take_damage(attack_damage, self)
-				attack_fx_to(t.position)
+			_hit(t)
 			return
 		if hold:
-			# 驻守：够不着就不追（敌人跑出射程也不跟），人站原地
+			# 驻守：够不着就不追（敌人跑出射程也不跟），人站原地。
+			# 但"够不着"不等于"站着挨打"：自动挑中的那个够不着就放掉、下一帧重扫，
+			# 射程里现在有谁就先打谁——以前这里死死举着一个够不着的目标，
+			# 连走到贴脸的怪都不还手，一直站到那只怪自己走进射程
 			_engaged = false
 			move_target = position
-			if attack_target == t and not is_instance_valid(attack_target):
-				attack_target = null
-			_auto_target = null
+			if t != cmd_target:
+				_unpin()
+			var side := _nearest_enemy(reach)
+			if side != null and side != t:
+				_hit(side)
 			return
 		# 追击：路劲要跟着目标走。只改 move_target 不作废旧路径的话，
 		# _move_toward 会照着"奔目的地"的旧路径跑，跑到头再折回来追——
@@ -480,7 +485,7 @@ func _step(delta: float) -> void:
 	if _amove_dest != Vector2.ZERO and attack_target == null:
 		var e := _nearest_enemy(aggro_range)
 		if e != null:
-			command_attack(e)
+			command_attack(e, false)    # 不是玩家点的令：够不着会自己松口，接着赶路
 			return
 	_move_toward(move_target, delta)   # 没仗打就执行玩家的移动令
 	# 到站：清掉 A 移动标记、恢复自动索敌（被人群挤住时放宽判定）
@@ -493,6 +498,19 @@ func _step(delta: float) -> void:
 				# 巡逻：到一头就掉头 A 移动去另一头
 				var nxt := _patrol_a if _patrol_b.distance_to(position) < _patrol_a.distance_to(position) else _patrol_b
 				command_attack_move(nxt)
+
+## 出手：冷却好了就砍一刀 / 射一箭。`_calm_t` 归零 = 算"正在战斗"（战地包扎不回血）。
+## 抽出来是因为驻守那条路要在"举着的目标够不着"时顺手打射程里的别人，
+## 以前那段出手代码写死在一个分支里，别处想复用只能抄一遍
+func _hit(t: Node2D) -> void:
+	_engaged = true
+	_calm_t = 0.0
+	if _cd > 0.0:
+		return
+	_cd = attack_cooldown
+	attack_anim = 1.0    # 挥刀/拉弓动画
+	t.take_damage(attack_damage, self)
+	attack_fx_to(t.position)
 
 func _done_with_order() -> bool:
 	return _amove_dest == Vector2.ZERO and not _engaged and attack_target == null and position.distance_to(move_target) < 20.0
@@ -571,13 +589,23 @@ func _nearest_enemy(dist: float) -> Node2D:
 ## 玩家指定的目标优先追到底；否则自动索敌。
 ## 自动目标有粘性：还活着且没跑出索敌圈就继续打，每 0.25 秒才重新扫一次——
 ## 以前每帧都换"最近的那个"，混战里会在两只 Goo 之间来回切、白跑腿
+## 自动目标还要拴绳：跑出 1.5 个索敌圈就松口。以前自动挑中的也会写进 attack_target，
+## 而 attack_target 是没有过期时间的——一只掉头就跑的 Goo 能把整队兵牵到地图另一头，
+## 驻守的兵更是举着一个够不着的目标原地站死（连贴脸的怪都不还手）
 func _acquire_target() -> Node2D:
 	if attack_target != null:
-		if is_instance_valid(attack_target):
+		if not is_instance_valid(attack_target):
+			attack_target = null
+		elif attack_target == cmd_target:
 			return attack_target
-		attack_target = null
+		elif position.distance_to(attack_target.position) <= aggro_range * AUTO_LEASH:
+			return attack_target
+		else:
+			_unpin()           # 松口：pinned_by / attack_target / _auto_target 一起放
+			attack_target = null    # 目标是建筑时 _unpin 不会清它（打完那座还得接着打），这里一起清
+			_auto_target = null
 	if _auto_target != null and is_instance_valid(_auto_target) \
-			and position.distance_to(_auto_target.position) <= aggro_range * 1.2 \
+			and position.distance_to(_auto_target.position) <= aggro_range * AUTO_LEASH \
 			and _scan_t > 0.0:
 		return _auto_target
 	_scan_t = 0.25
@@ -617,9 +645,12 @@ func _take_over() -> void:
 	_retreating = false       # 任何手令都打断撤退（command_retreat 自己随后再置回 true）
 	_retreat_to = Vector2.INF
 
-func command_attack(t: Node2D) -> void:
+## manual = 玩家亲手点的（记成 cmd_target，追到底）；false = 自己判断要打的
+## （A 移动途中的自动开打就走这个，够不着会自动松口，接着赶路）
+func command_attack(t: Node2D, manual := true) -> void:
 	_take_over()
 	attack_target = t
+	cmd_target = t if manual else null
 	_ignore_aggro = false
 	move_target = t.position
 	_path = _find_path(t.position)

@@ -28,7 +28,19 @@ var move_target: Vector2
 ## 这只标记只是让别的兵别来抢同一个目标，以及兵死了/脱岗时好清干净
 var pinned_by: Node2D = null
 var _attack_fx: Array = []        # [{to: Vector2, t: 剩余秒数}]
-var attack_target: Node2D = null  # 战斗单位当前攻击目标（基类声明，子类复用）
+## 战斗单位当前攻击目标（基类声明，子类复用）。
+## 清空时顺手把 cmd_target 一起清掉——用 setter 是为了不让哪条路忘了清：
+## 以前"玩家点名的目标"和"自动索敌挑中的目标"共用这一个字段，结果自动挑中的那个
+## 跑出十万八千里也还挂在身上，整队兵被一只逃跑的 Goo 牵着走
+var attack_target: Node2D = null:
+	set(v):
+		attack_target = v
+		if v == null:
+			cmd_target = null
+## 玩家亲手点名的目标：追到底，不因为"跑远了"而松口。
+## 自动索敌挑中的目标只拴在 AUTO_LEASH 个索敌圈内（见 _acquire_target）
+var cmd_target: Node2D = null
+const AUTO_LEASH := 1.5    # 自动目标拴绳：跑出 aggro_range 的这么多倍就松口
 var _path: PackedVector2Array = PackedVector2Array()   # A* 路径（为空 = 无路径）
 var _path_idx := 0                # 当前走到的路径点下标
 ## 这条路径是奔哪儿去的（_find_path 记下）。_move_toward 用它判断"路和目标对不上"，
@@ -52,7 +64,9 @@ var _stuck_t := 0.0
 ## 以前每个单位每帧都 get_nodes_in_group() 好几次（每次分配新数组），
 ## 分离力还是全员两两比较 O(n²)。现在每帧只取一次组成员，
 ## 再按格子分桶做空间哈希，分离只看周围 3×3 桶。
-const HASH_CELL := 28.0           # 桶边长：必须 ≥ 最大分离距离（12+12+2=26px），越小混战里扫的邻居越少
+## 桶边长必须 ≥ 场上最大的分离距离（radius*2+2），否则两只大块头正好落在隔一格的
+## 两个桶里、3×3 邻域够不着，就会直接叠在一起——岩壳 radius 15，15+15+2=32
+const HASH_CELL := 32.0
 static var _cache_frame := -1
 static var _group_cache := {}     # 组名 -> Array（本帧快照）
 static var _hash := {}            # Vector2i -> Array[Unit]

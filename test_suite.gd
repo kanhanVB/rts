@@ -48,6 +48,10 @@ func run() -> void:
 		await _aoe_tests()    # 只跑帝国式操作（生产队列 / 选择 / 热键 / 删除）——调试用
 		_done()
 		return
+	if "--only=ai" in OS.get_cmdline_user_args():
+		await _ai_tests()    # 只跑状态机 / 索敌这几条（-- --test --only=ai，迭代用）
+		_done()
+		return
 	if "--only=line" in OS.get_cmdline_user_args():
 		await _line_probe()    # 单独探针：加工线总量守恒（-- --test --only=line，20 秒一轮）
 		_done()
@@ -731,6 +735,7 @@ func run() -> void:
 	await _stats_tests()
 	await _light_rts_tests()
 	await _flee_tests()
+	await _ai_tests()
 
 	# 拆巢穴触发胜利
 	m.hive.take_damage(99999.0)
@@ -2060,6 +2065,216 @@ func _flee_tests() -> void:
 		m._check_worker_safety()
 		_check(not w2.is_fleeing(), "怪清掉了：回矿上接着干")
 		w2.queue_free()
+
+## ---- 状态机 / 索敌回归（-- --test --only=ai）----
+## 第二轮审计翻出来的几条"玩家不会特意去点、但一局里一定撞上"的毛病：
+## 工地没了工程师发呆一局、站在工地上被咬到死都不还手、施工中右键点怪被静默吞掉、
+## 举着一只够不着的怪站死（或者反过来追到天涯）、两只岩壳叠成一只、砍掉的树在小地图上留着。
+func _ai_tests() -> void:
+	var tr := m.get_tree()
+	# 场地收拾干净：别的怪会抢镜；残血的房子会让工程师跑去修（他闲着会自己找活干）
+	for e0 in tr.get_nodes_in_group("enemies"):
+		if is_instance_valid(e0):
+			e0.queue_free()
+	for b0 in tr.get_nodes_in_group("buildings"):
+		if is_instance_valid(b0):
+			b0.hp = b0.max_hp
+	await tr.create_timer(0.3).timeout
+
+	var ai_eng := Engineer.new()
+	ai_eng.position = m.open_point(Vector2(640, 646))
+	m.add_child(ai_eng)
+	await tr.create_timer(0.2).timeout
+
+	# ---- 1) 工地被拆：状态机要回到 IDLE ----
+	# 以前 _drop_site() 只清 build_site 不动 state，TO_SITE / BUILDING 两个分支
+	# 每帧「工地是 null -> return」空转，这个工程师这辈子再也不盖房、不修房、不还手
+	var ai_st := ConstructionSite.new()
+	ai_st.kind = "warehouse"
+	ai_st.position = m.open_point(ai_eng.position + Vector2(46, 0))
+	m.add_child(ai_st)
+	await tr.create_timer(0.15).timeout
+	ai_eng.command_build(ai_st)
+	_check(ai_eng.state == Engineer.State.TO_SITE and ai_eng.build_site == ai_st, "工程师接下工地")
+	ai_st.queue_free()    # 工地被 Goo 拆了（工地自己消失）
+	await tr.create_timer(0.4).timeout
+	_check(ai_eng.build_site == null, "工地没了：认领关系松开")
+	_check(ai_eng.state == Engineer.State.IDLE,
+		"工地没了：工程师回 IDLE 接着干活（以前永远卡在 TO_SITE 空转，状态 %d）" % ai_eng.state)
+
+	# ---- 2) 施工中右键点怪：不会被吞 ----
+	# command_attack 以前不 _drop_site，state 还是 BUILDING，那条分支压根不看指令
+	var ai_st2 := ConstructionSite.new()
+	ai_st2.kind = "warehouse"
+	ai_st2.position = m.open_point(ai_eng.position + Vector2(-46, 0))
+	m.add_child(ai_st2)
+	await tr.create_timer(0.15).timeout
+	ai_eng.command_build(ai_st2)
+	await tr.create_timer(0.5).timeout
+	ai_eng.command_build(ai_st2)    # 再叫一次：确保在工地边上（自动认领可能抢过）
+	await tr.create_timer(0.5).timeout
+	var ai_foe := Goo.make("goo")
+	ai_foe.position = m.open_point(ai_eng.position + Vector2(150, 0))    # 够不着：不触发自保
+	m.add_child(ai_foe)
+	ai_foe.speed = 0.0
+	ai_foe.max_hp = 9999.0
+	ai_foe.hp = 9999.0
+	await tr.create_timer(0.15).timeout
+	var ai_d0: float = ai_eng.position.distance_to(ai_foe.position)
+	ai_eng.command_attack(ai_foe)
+	_check(ai_eng.attack_target == ai_foe and ai_eng.state == Engineer.State.IDLE,
+		"施工中右键点怪：指令不被吞（状态 %d）" % ai_eng.state)
+	_check(ai_eng.build_site == null, "施工中右键点怪：工地放回去（别的工程师能接手）")
+	await tr.create_timer(1.4).timeout
+	_check(ai_eng.position.distance_to(ai_foe.position) < ai_d0 - 30.0,
+		"施工中右键点怪：真走过去了（%.0f -> %.0f）" % [ai_d0, ai_eng.position.distance_to(ai_foe.position)])
+	ai_foe.queue_free()    # 收走：不然他站在怪旁边，下一条测试一开工就先去打怪
+	await tr.create_timer(0.3).timeout
+
+	# ---- 3) 站在工地上被咬：先放下锤子打回去 ----
+	# 以前 BUILDING 分支一眼敌人都不看，一路敲到被啃死
+	var ai_st3 := ConstructionSite.new()
+	ai_st3.kind = "warehouse"
+	ai_st3.position = m.open_point(ai_eng.position)
+	m.add_child(ai_st3)
+	await tr.create_timer(0.15).timeout
+	ai_eng.attack_target = null
+	ai_eng.command_build(ai_st3)
+	await tr.create_timer(0.6).timeout
+	_check(ai_eng.state == Engineer.State.BUILDING, "工程师在工地上开工（状态 %d）" % ai_eng.state)
+	var ai_biter := Goo.make("goo")
+	ai_biter.position = m.open_point(ai_eng.position + Vector2(30, 0))
+	m.add_child(ai_biter)
+	ai_biter.speed = 0.0
+	ai_biter.max_hp = 9999.0
+	ai_biter.hp = 9999.0
+	await tr.create_timer(1.2).timeout
+	_check(ai_eng.state != Engineer.State.BUILDING and ai_eng.build_site == null,
+		"站在工地上被咬：放下锤子（状态 %d）" % ai_eng.state)
+	_check(ai_biter.hp < 9999.0, "站在工地上被咬：真还手了（怪血 %.0f/9999）" % ai_biter.hp)
+	ai_biter.queue_free()
+	await tr.create_timer(0.3).timeout
+
+	# ---- 4) 自动索敌的拴绳：跑远了松口；玩家点名的追到底 ----
+	# 以前 attack_target 没有过期时间，自动挑中的那只跑出十万八千里也还挂在身上
+	var ai_eng_far := Goo.make("goo")
+	ai_eng_far.position = m.open_point(ai_eng.position + Vector2(-400, 0))
+	m.add_child(ai_eng_far)
+	ai_eng_far.speed = 0.0
+	ai_eng_far.max_hp = 9999.0
+	ai_eng_far.hp = 9999.0
+	await tr.create_timer(0.15).timeout
+	ai_eng.attack_target = ai_eng_far
+	ai_eng.cmd_target = null
+	_check(ai_eng._acquire_target() == null, "自动挑中的目标跑远了：工程师松口")
+	ai_eng.attack_target = ai_eng_far
+	ai_eng.cmd_target = ai_eng_far
+	_check(ai_eng._acquire_target() == ai_eng_far, "玩家点名的目标：工程师追到底（不松口）")
+	ai_eng.attack_target = null
+
+	var ai_sol := Soldier.new()
+	ai_sol.setup(false)
+	ai_sol.position = m.open_point(Vector2(1000, 700))
+	m.add_child(ai_sol)
+	await tr.create_timer(0.2).timeout
+	ai_sol.post_fixed = Vector2.INF    # 当"没岗位"的自由兵测（防区那套有自己的一套拴绳）
+	ai_sol.attack_target = ai_eng_far
+	ai_sol.cmd_target = null
+	ai_sol._auto_target = null
+	_check(ai_sol._acquire_target() == null, "自动挑中的目标跑远了：剑士也松口（不再追到天涯）")
+
+	# ---- 5) 驻守兵：举着够不着的目标，射程里谁来打谁 ----
+	# 以前这条分支只把 _auto_target 清掉、attack_target 留着，于是下帧又挑回同一只，
+	# 人站在那儿一动不动作也不还手，直到那只怪自己走进射程
+	var ai_far := Goo.make("goo")
+	ai_far.position = m.open_point(ai_sol.position + Vector2(-420, 0))
+	m.add_child(ai_far)
+	ai_far.speed = 0.0
+	ai_far.max_hp = 9999.0
+	ai_far.hp = 9999.0
+	var ai_near := Goo.make("goo")
+	ai_near.position = m.open_point(ai_sol.position + Vector2(26, 0))
+	m.add_child(ai_near)
+	ai_near.speed = 0.0
+	ai_near.max_hp = 9999.0
+	ai_near.hp = 9999.0
+	await tr.create_timer(0.2).timeout
+	ai_sol.command_hold()
+	ai_sol.attack_target = ai_far
+	ai_sol._auto_target = ai_far
+	var ai_hold_pos: Vector2 = ai_sol.position
+	var ai_near_hp0: float = ai_near.hp
+	await tr.create_timer(1.6).timeout
+	_check(ai_near.hp < ai_near_hp0,
+		"驻守兵：举着够不着的目标也会打贴脸的（%.0f -> %.0f）" % [ai_near_hp0, ai_near.hp])
+	_check(ai_sol.position.distance_to(ai_hold_pos) < 24.0,
+		"驻守兵：还是站着没追出去（挪了 %.0fpx）" % ai_sol.position.distance_to(ai_hold_pos))
+
+	# ---- 6) 岩壳不叠：空间哈希的桶边长必须 ≥ 最大分离距离 ----
+	# 岩壳 radius 15，15+15+2 = 32 > 旧的 28：两只刚好落在隔一格的两个桶里，
+	# 3×3 邻域够不着，它们就真的一路叠着走（玩家看到的是"一只厚皮怪"）
+	_check(Unit.HASH_CELL >= 32.0, "桶边长 ≥ 最大的分离距离（岩壳 32）")
+	var ai_spot: Vector2 = m.open_point(Vector2(1180, 760))
+	# 特意选"贴着旧桶边界"的一对：相距 29px，但按 28 的桶宽正好隔一格
+	var ai_pa := Vector2(floor(ai_spot.x / 28.0) * 28.0 - 0.5, ai_spot.y)
+	var ai_b1 := Goo.make("brute")
+	ai_b1.position = ai_pa
+	m.add_child(ai_b1)
+	var ai_b2 := Goo.make("brute")
+	ai_b2.position = ai_pa + Vector2(29.0, 0)
+	m.add_child(ai_b2)
+	ai_b1.speed = 0.0
+	ai_b2.speed = 0.0
+	ai_b1.max_hp = 99999.0
+	ai_b1.hp = 99999.0
+	ai_b2.max_hp = 99999.0
+	ai_b2.hp = 99999.0
+	await tr.create_timer(0.8).timeout
+	_check(ai_b1.position.distance_to(ai_b2.position) > 30.5,
+		"两只岩壳挤在一起会被推开（%.1fpx，以前谁也不推谁、直接叠住）"
+			% ai_b1.position.distance_to(ai_b2.position))
+	for g in [ai_eng_far, ai_far, ai_near, ai_b1, ai_b2]:
+		if is_instance_valid(g):
+			g.queue_free()
+	for s in [ai_st2, ai_st3]:
+		if is_instance_valid(s):
+			s.queue_free()
+	ai_eng.queue_free()
+	ai_sol.queue_free()
+
+	# ---- 7) 砍掉的树：小地图那一格也要擦掉 ----
+	# _exit_tree 里 is_inside_tree() 已经是 false，以前那句「拿主场景」永远拿到 null
+	var tn := Terrain.current
+	var ai_c := Vector2i(-1, -1)
+	for gy in range(6, 40):
+		if ai_c.x >= 0:
+			break
+		for gx in range(6, 60):
+			if tn.cell_type(Vector2i(gx, gy)) == Terrain.T.EMPTY:
+				ai_c = Vector2i(gx, gy)
+				break
+	_check(ai_c.x >= 0, "找到一格空地插树")
+	if ai_c.x >= 0:
+		var ai_tree := ResNode.new()
+		ai_tree.kind = "wood"
+		ai_tree.solid = true
+		ai_tree.position = Vector2(ai_c) * Terrain.CELL + Vector2(Terrain.CELL, Terrain.CELL) * 0.5
+		m.add_child(ai_tree)
+		await tr.create_timer(0.2).timeout
+		_check(tn.cell_type(ai_c) == Terrain.T.TREE, "实心树占住了地形格子")
+		_check(ai_tree.cell == ai_c, "树记着自己的格子（%s / %s）" % [ai_tree.cell, ai_c])
+		# 经典测试图没有小地图底图（minimap_img 只有随机图才建），所以这里验的是"线接着没有"：
+		# 进树那一刻就得把主场景记下来，_exit_tree 里 is_inside_tree() 已经是 false 了
+		_check(ai_tree._game == m, "资源点进树时记着主场景（砍掉才能报给 on_cell_cleared）")
+		if m.minimap_img != null:
+			m.minimap_img.set_pixel(ai_c.x, ai_c.y, Color(1, 0, 1))    # 打个记号，看它擦不擦
+		ai_tree.queue_free()
+		await tr.create_timer(0.4).timeout
+		_check(tn.cell_type(ai_c) == Terrain.T.EMPTY, "树砍掉了：地形格子变回空地")
+		if m.minimap_img != null:
+			_check(m.minimap_img.get_pixel(ai_c.x, ai_c.y) != Color(1, 0, 1),
+				"树砍掉了：小地图那一格也擦掉")
+	await tr.create_timer(0.3).timeout
 
 ## 乱按期间反复查的"状态不变量"：这些字段玩家看不见，但一旦串了就会出现
 ## "兵站着发呆 / 农民不干活 / 房子不产能 / 人口算错"这类怪现象。
